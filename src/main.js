@@ -386,6 +386,40 @@ class Game {
     return best;
   }
 
+  /**
+   * Ground truth on the HDR scene *before* tonemapping. The environment and the
+   * grade are authored by different people; without a shared measurement they
+   * fight each other and the image runs away. Values are linear, unbounded.
+   */
+  hdrStats() {
+    const gl = this.gl;
+    const rt = this.post.scene;
+    this.render(FIXED);
+    const W = 96, H = 54;
+    // Sample a coarse grid rather than the full buffer: enough for statistics,
+    // cheap enough to call from a tuning loop.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
+    const buf = new Float32Array(rt.w * 4);
+    const rows = [];
+    for (let i = 0; i < H; i++) {
+      const y = Math.floor((i + 0.5) * rt.h / H);
+      gl.readPixels(0, y, rt.w, 1, gl.RGBA, gl.FLOAT, buf);
+      for (let j = 0; j < W; j++) {
+        const x = Math.floor((j + 0.5) * rt.w / W) * 4;
+        rows.push(buf[x] * 0.2126 + buf[x + 1] * 0.7152 + buf[x + 2] * 0.0722);
+      }
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    rows.sort((a, b) => a - b);
+    const q = (t) => rows[Math.min(rows.length - 1, Math.floor(t * rows.length))];
+    const mean = rows.reduce((a, b) => a + b, 0) / rows.length;
+    return {
+      mean: +mean.toFixed(4), p10: +q(0.1).toFixed(4), p50: +q(0.5).toFixed(4),
+      p90: +q(0.9).toFixed(4), p99: +q(0.99).toFixed(4), max: +rows[rows.length - 1].toFixed(3),
+      note: 'linear HDR scene luminance, pre-tonemap',
+    };
+  }
+
   stats() {
     const p = this.player;
     return {
@@ -421,6 +455,7 @@ export function boot() {
       seekTo: (t) => game.seekTo(t),
       seekUntil: (c, m) => game.seekUntil(c, m),
       stats: () => game.stats(),
+      hdrStats: () => game.hdrStats(),
       game,
     };
     return;
@@ -430,6 +465,6 @@ export function boot() {
   requestAnimationFrame(loop);
   window.LUMEN = {
     ready: true, seekTo: (t) => game.seekTo(t), seekUntil: (c, m) => game.seekUntil(c, m),
-    stats: () => game.stats(), game,
+    stats: () => game.stats(), hdrStats: () => game.hdrStats(), game,
   };
 }

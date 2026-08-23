@@ -96,9 +96,9 @@ void main(){
   outColor = vec4(c * uMul, 1.0);
 }`;
 
-// ?g=halation:1.2,veil:0.5 overrides GRADE for A/B without editing defaults
-for (const kv of (q.get('g') || '').split(',').filter(Boolean)) {
-  const [k, v] = kv.split(':');
+// ?g=halation=1.2;veil=0.5 overrides GRADE for A/B without editing defaults
+for (const kv of (q.get('g') || '').split(';').filter(Boolean)) {
+  const [k, v] = kv.split('=');
   if (k in GRADE) GRADE[k] = Number(v);
 }
 
@@ -134,10 +134,12 @@ drawFullscreen(gl);
 post.render(ctx);
 
 // crude timing: 40 composites back to back
+const px = new Uint8Array(4);
+post.render(ctx); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);   // warm
 const t0 = performance.now();
-for (let i = 0; i < 40; i++) post.render(ctx);
-gl.finish();
-window.__ms = (performance.now() - t0) / 40;
+for (let i = 0; i < 60; i++) post.render(ctx);
+gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);                     // force sync
+window.__ms = (performance.now() - t0) / 60;
 post.beginScene();
 gl.useProgram(pPattern.program);
 gl.uniform2f(pPattern.u.uRes, W, H);

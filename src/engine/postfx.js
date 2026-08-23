@@ -29,7 +29,9 @@ uniform float uThreshold, uKnee, uExposure, uFloor;
 in vec2 vUv; out vec4 outColor;
 
 void main(){
-  // 4-tap Karis average kills fireflies before they can flicker.
+  // 4-tap Karis average kills fireflies before they can flicker. Reads the
+  // half-res copy: a firefly is a firefly at either resolution, and the
+  // full-res HDR target is the most expensive texture in the frame.
   vec3 a = texture(uSrc, vUv + uTexel * vec2(-1,-1)).rgb;
   vec3 b = texture(uSrc, vUv + uTexel * vec2( 1,-1)).rgb;
   vec3 c = texture(uSrc, vUv + uTexel * vec2(-1, 1)).rgb;
@@ -128,9 +130,19 @@ void main(){
   outColor = vec4(c / wsum, 1.0);
 }`;
 
+// A half-res copy of the scene. One bilinear tap lands exactly on a 2x2 box.
+// The wide-offset taps in the composite read this instead of the full-res
+// target: a 15px dispersion across 7 full-res HDR taps is pure bandwidth, and
+// anything being displaced that far is by definition not sharp anyway.
+const COPY_FS = `
+${GLSL_COMMON}
+uniform sampler2D uSrc;
+in vec2 vUv; out vec4 outColor;
+void main(){ outColor = vec4(texture(uSrc, vUv).rgb, 1.0); }`;
+
 const COMPOSITE_FS = `
 ${GLSL_COMMON}
-uniform sampler2D uScene, uVeil, uHaloB, uHaloC, uStreak, uDirt, uSpectrum;
+uniform sampler2D uScene, uHalf, uVeil, uHaloB, uHaloC, uStreak, uDirt, uSpectrum;
 uniform vec2  uRes;
 uniform float uTime, uExposure;
 uniform float uVeilAmt, uVeilWiden, uHaloAmt, uHalation, uStreakAmt, uDirtAmt;
@@ -157,7 +169,7 @@ float ign(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.005
 float grain(vec2 p, float s){
   float clump = vnoise(p * 0.55 + s);
   float fine  = hash12(p + s * 7.31);
-  return (clump * 0.62 + fine * 0.38) - 0.5;
+  return (clump * 0.70 + fine * 0.30) - 0.5;
 }
 
 // Hable filmic. Applied to a scalar only - see tonemapHue.
@@ -220,10 +232,14 @@ void main(){
     float d = t * 2.0 - 1.0;
     vec3 sw = texture(uSpectrum, vec2(t, 0.5)).rgb + 0.03;
     vec2 off = dirR * (d * (caK + smK)) + perp * (d * defK);
-    acc  += texture(uScene, uv + off).rgb * sw;
+    acc  += texture(uHalf, uv + off).rgb * sw;
     wsum += sw;
   }
-  vec3 col = (acc / max(wsum, vec3(1e-4))) * uExposure;
+  // On axis nothing is displaced, so keep the full-res tap; the dispersed
+  // version fades in exactly where the lens stops being sharp. That is also
+  // where the edge softness comes from - it is one effect, not two.
+  float soft = clamp((caK + smK + defK) * uRes.x / 2.2 - 0.35, 0.0, 1.0);
+  vec3 col = mix(texture(uScene, uv).rgb, acc / max(wsum, vec3(1e-4)), soft) * uExposure;
 
   // --- bloom, two characters. Wide veil first: low amplitude, long tail. ---
   float ca2 = caK * 2.6;
@@ -255,7 +271,8 @@ void main(){
   //     the frame toward its edges, where the sightline through water is
   //     longest. Both belong before the curve so the curve sees real light. ---
   float path = 1.0 + 1.45 * rn2;
-  col *= exp(-uAbsorb * path);
+  vec3 kA = uAbsorb * path;
+  col *= 1.0 - kA + 0.5 * kA * kA;          // exp(-kA) to 2 terms; kA stays small
   col += uScatterCol * (uScatter * (1.0 + uScatterEdge * rn2));
 
   // --- vignette as light loss, not as a dark disc pasted on the result.
@@ -296,7 +313,7 @@ void main(){
   //     the deep blacks so the abyss stays clean. ---
   float gs = hash11(floor(uTime * 24.0) + 0.5) * 311.0;
   float gn = grain(fc, gs);
-  float gc = grain(fc + 57.3, gs + 19.0);
+  float gc = hash12(fc + gs * 1.7 + 3.71) - 0.5;
   float gl = dot(col, LUMA);
   float gw = smoothstep(0.014, 0.11, gl) * (1.0 - 0.62 * smoothstep(0.52, 1.0, gl));
   col += (vec3(gn) + vec3(gc, 0.0, -gc) * uGrainChroma) * uGrain * gw;
@@ -324,7 +341,7 @@ export const GRADE = {
   veil: 0.30,             // wide, low amplitude, long tail
   veilWiden: 1.10,        // bright sources spread further, not just harder
   halo: 0.40,             // tight halation hugging sources
-  halation: 0.26,         // red-shifted DoG ring
+  halation: 0.55,         // red-shifted DoG ring
   haloStride: 1.05,       // tight gaussian, quarter-res texels
   haloStride2: 2.25,      // the wider half of the DoG
   streak: 0.15,
@@ -333,20 +350,20 @@ export const GRADE = {
   chroma: 0.0013,
   defocus: 0.0034,
   barrel: 0.030,
-  vignette: 0.54,
-  vigFocal: 1.16,
-  vigCorner: 0.20,
+  vignette: 0.62,
+  vigFocal: 1.02,
+  vigCorner: 0.28,
   white: 15.0,            // linear value that lands on display white
   hueKeep: 6.0,           // higher = hue survives further up the shoulder
   saturation: 1.06,
-  contrast: 0.150,
+  contrast: 0.170,
   lift: 0.034,
-  grain: 0.055,
+  grain: 0.048,
   grainChroma: 0.32,
   absorb: [0.125, 0.042, 0.024],
   scatter: 0.0075,
-  scatterEdge: 2.1,
-  shadowTint: [0.780, 0.960, 1.000],
+  scatterEdge: 1.20,
+  shadowTint: [0.740, 0.955, 1.000],
   highTint: [1.000, 0.938, 0.842],
   liftCol: [0.055, 0.400, 0.520],
   scatterCol: [0.090, 0.450, 0.580],
@@ -363,6 +380,7 @@ export class Post {
     this.scene = rt(2, 2);
     this.mips = [];
     for (let i = 0; i < BLOOM_LEVELS; i++) this.mips.push(rt(2, 2));
+    this.half = rt(2, 2);
     this.halA = rt(2, 2); this.halB = rt(2, 2); this.halC = rt(2, 2);
     this.veil = rt(2, 2);
     this.streakA = rt(2, 2); this.streakB = rt(2, 2);
@@ -371,6 +389,7 @@ export class Post {
     this.pDown = compile(gl, FS_VS, DOWN_FS, 'down');
     this.pUp = compile(gl, FS_VS, UP_FS, 'up');
     this.pBlur = compile(gl, FS_VS, BLUR_FS, 'blur');
+    this.pCopy = compile(gl, FS_VS, COPY_FS, 'copy');
     this.pComp = compile(gl, FS_VS, COMPOSITE_FS, 'composite');
     this.w = 0; this.h = 0;
     this._fallbackSpec = null;
@@ -380,6 +399,7 @@ export class Post {
     if (w === this.w && h === this.h) return;
     this.w = w; this.h = h;
     this.scene.resize(w, h);
+    this.half.resize(Math.max(1, w >> 1), Math.max(1, h >> 1));
     let mw = Math.max(1, w >> 1), mh = Math.max(1, h >> 1);
     for (let i = 0; i < BLOOM_LEVELS; i++) {
       this.mips[i].resize(mw, mh);
@@ -446,8 +466,8 @@ export class Post {
     const att = ctx.attached ? 1 : 0;
     const diff = clampN(ctx.difficulty || 0);
     const depthK = clampN((ctx.depth || 0) / 1400);
-    // The Hush bites late. A linear ramp would read as a filter fading in.
-    const hush = clampN(hp * hp * 1.15);
+    // The Hush leans in early but only closes its fist at the end.
+    const hush = clampN(hp * (0.40 + 0.60 * hp));
 
     const waves = (ctx.waves || []).map((w) => {
       if (!w.live) return [0, 0, 0, 0];
@@ -526,9 +546,11 @@ export class Post {
     const g = this.grade(ctx);
     Blend.none(gl);
 
+    this._pass(this.pCopy, this.half, this.scene.tex, {});
+
     // brightpass -> mip0
-    this._pass(this.pBright, this.mips[0], this.scene.tex, {
-      uTexel: [1 / this.scene.w, 1 / this.scene.h],
+    this._pass(this.pBright, this.mips[0], this.half.tex, {
+      uTexel: [1 / this.half.w, 1 / this.half.h],
       uThreshold: g.threshold, uKnee: g.knee, uExposure: g.exposure, uFloor: g.veilFloor,
     });
     for (let i = 1; i < BLOOM_LEVELS; i++) {
@@ -578,6 +600,7 @@ export class Post {
     bind(4, this.streakB.tex, 'uStreak');
     bind(5, this.tex.dirt, 'uDirt');
     bind(6, this._spectrum(), 'uSpectrum');
+    bind(7, this.half.tex, 'uHalf');
 
     const U = p.u, f = (n, v) => { if (U[n]) gl.uniform1f(U[n], v); };
     const v3 = (n, v) => { if (U[n]) gl.uniform3f(U[n], v[0], v[1], v[2]); };

@@ -33,12 +33,27 @@ const BUDGET = {
   bootMs: 5000,
   renderMs: 12,          // submit + gl.finish at W x H
   stepUs: 120,           // one 1/120s sim step
-  meanLumMin: 0.030,     // darker than this and the frame is effectively black
-  meanLumMax: 0.45,      // brighter than this and it is a milky mess
+  meanLumMin: 0.045,     // darker than this and the frame is effectively black
+  meanLumMax: 0.240,     // this is an abyss; brighter than this and it is a milky mess
   clippedMax: 0.060,     // fraction of pixels at >=0.99 luminance
   blackMax: 0.900,       // fraction of pixels at <0.008 luminance
   minDepth: 40,          // autopilot must get somewhere
   minSpread: 0.14,       // p95-p20 luminance: below this the frame is flat mush
+};
+
+/**
+ * Targets for the HDR scene *before* tonemapping, linear. This is the contract
+ * between the environment (which authors the dark bulk) and the grade (which
+ * authors the response). Without it the two run away from each other: the first
+ * time we measured, the water bulk sat at linear 0.13 and nothing in the frame
+ * exceeded 1.0, so there were no shadows, no highlights, and no shoulder to
+ * tonemap - a milky mid-grey wall.
+ */
+const HDR = {
+  p50Max: 0.030,   // the bulk of an abyss is deep shadow
+  p90Max: 0.150,
+  p99Min: 0.250,   // there must be real highlights
+  maxMin: 6.0,     // emitter cores must be genuinely hot, or bloom has nothing
 };
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.png': 'image/png', '.json': 'application/json' };
@@ -137,6 +152,20 @@ for (const seed of SEEDS) {
       }
     }
 
+    // ---- HDR scene structure ----
+    try {
+      for (const sc of ['tethered', 'fast']) {
+        await page.evaluate((c) => window.LUMEN.seekUntil(c, 60), sc);
+        const h = await page.evaluate(() => window.LUMEN.hdrStats());
+        S.scenes[sc] = { ...(S.scenes[sc] || {}), hdr: h };
+        const tag = `seed ${seed} / ${sc} HDR`;
+        if (h.p50 > HDR.p50Max) fails.push(`${tag}: scene bulk too bright — p50 ${h.p50} > ${HDR.p50Max} linear (the abyss should be deep shadow)`);
+        if (h.p90 > HDR.p90Max) warns.push(`${tag}: p90 ${h.p90} > ${HDR.p90Max} linear`);
+        if (h.p99 < HDR.p99Min) warns.push(`${tag}: no real highlights — p99 only ${h.p99} (want > ${HDR.p99Min})`);
+        if (h.max < HDR.maxMin) fails.push(`${tag}: nothing is hot — max ${h.max} < ${HDR.maxMin} linear, so bloom and the tonemap shoulder have nothing to work with`);
+      }
+    } catch (e) { warns.push(`seed ${seed}: hdrStats failed — ${e.message}`); }
+
     // ---- perf ----
     try {
       const perf = await page.evaluate(() => {
@@ -148,7 +177,7 @@ for (const seed of SEEDS) {
         gl.finish();
         const renderMs = (performance.now() - t0) / 20;
         const t1 = performance.now();
-        for (let i = 0; i < 600; i++) g.step(1 / 120);
+        for (let i = 0; i < 600; i++) { g.step(1 / 120); g.input.endFrame(); }
         const stepUs = ((performance.now() - t1) / 600) * 1000;
         return { renderMs, stepUs, renderer: g.caps.renderer };
       });
@@ -181,7 +210,10 @@ for (const seed of SEEDS) {
       const det = await page.evaluate(async () => {
         const snap = () => {
           const g = window.game;
-          g.newRun();
+          // Input is not part of newRun(), so a probe that ran before this one
+          // can leave the synthetic button held and desync step 1.
+          g.input.setSynthetic(false); g.input.endFrame();
+          g.startPlay();
           for (let i = 0; i < 1200; i++) { g.input.setSynthetic(g.autopilot()); g.step(1 / 120); g.input.endFrame(); }
           const p = g.player;
           return [p.x, p.y, p.vx, p.vy, g.world.anchors.length, g.particles.n].map(v => Math.round(v * 1000) / 1000).join('|');
@@ -212,6 +244,7 @@ if (JSON_OUT) {
       (S.run ? `  autopilot ${S.run.best}m / ${S.run.deaths} deaths in 45s` : '') +
       (S.determinism === false ? '  NON-DETERMINISTIC' : ''));
     for (const [sc, v] of Object.entries(S.scenes)) {
+      if (v.hdr) console.log(`  ${(sc + ' hdr').padEnd(11)} p50 ${v.hdr.p50}  p90 ${v.hdr.p90}  p99 ${v.hdr.p99}  max ${v.hdr.max}   (linear, pre-tonemap)`);
       console.log(`  ${sc.padEnd(11)} mean ${v.mean.toFixed(4)}  p50 ${v.p50.toFixed(3)}  spread ${(v.p95 - v.p20).toFixed(3)}  p99 ${v.p99.toFixed(3)}` +
         `  clipped ${(v.clipped * 100).toFixed(2)}%  black ${(v.black * 100).toFixed(1)}%  (${v.depth}m)`);
     }

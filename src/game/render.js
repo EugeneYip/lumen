@@ -10,11 +10,18 @@
 //   round 2  near decor, hazards, anchors  silhouette -> their light
 //   round 3  plankton, hush, trail, tether, mote, particles, ambient (light only)
 //
-// This renderer only knows quads and polylines, so solid dark bodies are built
-// by stroking a shape's *medial axis* with a low-falloff ribbon: falloff near 1
-// turns the gaussian cross-section into a filled body instead of a filament,
-// and a width function gives the body its profile. That is where the
-// silhouettes come from.
+// Two rules earn their keep here:
+//
+// 1. This renderer only knows quads and polylines, so solid dark bodies are
+//    built by stroking a shape's *medial axis* with a low-falloff ribbon: a
+//    falloff near 1 turns the gaussian cross-section into a filled body instead
+//    of a filament, and a width function gives the body its profile.
+//
+// 2. A ribbon's visible core is width*sqrt(ln2/falloff). Under about four world
+//    units that core is sub-pixel, and a sub-pixel line samples as a *dotted*
+//    line - which reads as a debug primitive, not as light. So crisp features
+//    use a low falloff and an honest width, never a hairline with a tight
+//    gaussian. wCore() below is the conversion.
 import { Blend } from '../engine/gl.js';
 import { SpriteBatch } from '../engine/sprites.js';
 import { Ribbons } from '../engine/ribbons.js';
@@ -36,6 +43,10 @@ const L_MEMB = LY('MEMBRANE', S.BLOB);
 
 const MAXP = 96;         // longest polyline any shape here needs
 const FAR = 0.44;        // decor depth that moves an object into the far round
+const CORE_MIN = 4.2;    // world units: below this a ribbon core aliases to dots
+
+/** Ribbon width that renders a visible core `core` units wide at `falloff`. */
+const wCore = (core, falloff) => Math.max(core, CORE_MIN) * Math.sqrt(falloff / 0.693);
 
 export class Scene {
   constructor(gl, tex) {
@@ -123,7 +134,7 @@ export class Scene {
     depthFade(PAL.voidDeep, d.depth * 0.55, c0);
     const opa = 1 - d.depth * 0.30;
     this.rDark.stroke(pts, {
-      width: (f) => lerp(d.w * 2.7, d.w * 0.42, Math.pow(f, 0.82)),
+      width: (f) => lerp(d.w * 3.0, d.w * 0.50, Math.pow(f, 0.82)),
       color: c0, alpha: (f) => lerp(0.97, 0.16, Math.pow(f, 1.3)) * opa, falloff: 1.15,
     });
 
@@ -137,8 +148,8 @@ export class Scene {
       let tx = pts[si * 2 + 2] - pts[si * 2], ty = pts[si * 2 + 3] - pts[si * 2 + 1];
       const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
       const side = (k & 1) ? 1 : -1;
-      const bl = d.w * (5.6 + hash2(sid, k * 7 + 3) * 3.4) * (1 - f * 0.42);
-      const bw = d.w * (1.5 + hash2(sid, k * 11 + 5) * 1.2);
+      const bl = d.w * (6.2 + hash2(sid, k * 7 + 3) * 3.6) * (1 - f * 0.42);
+      const bw = d.w * (1.7 + hash2(sid, k * 11 + 5) * 1.3);
       const ang = Math.atan2(ty, tx) + side * (0.52 + 0.34 * Math.sin(t * d.sway * 1.3 + k * 2.1 + d.phase));
       this.occl.push(px + Math.cos(ang) * bl * 0.42, py + Math.sin(ang) * bl * 0.42,
         bl, bw, ang, c0[0], c0[1], c0[2], 0.88 * opa, L_LEAF);
@@ -149,12 +160,12 @@ export class Scene {
     const off = this._p2(n);
     for (let s = 0; s < n; s++) {
       const f = s / (n - 1);
-      off[s * 2] = pts[s * 2] - lerp(d.w * 1.20, d.w * 0.20, f);
+      off[s * 2] = pts[s * 2] - lerp(d.w * 1.35, d.w * 0.24, f);
       off[s * 2 + 1] = pts[s * 2 + 1];
     }
     this.rGlow.stroke(off, {
-      width: (f) => lerp(d.w * 0.62, d.w * 0.14, f), color: c1,
-      alpha: (f) => 0.62 * (1 - f * 0.5) * dim, falloff: 6.5,
+      width: (f) => lerp(wCore(d.w * 0.75, 3), wCore(0, 3), f), color: c1,
+      alpha: (f) => 0.50 * (1 - f * 0.5) * dim, falloff: 3,
     });
 
     if (d.glow > 0) {
@@ -169,14 +180,14 @@ export class Scene {
         const py = lerp(pts[si * 2 + 1], pts[si * 2 + 3], lf);
         const pk = 0.40 + 0.60 * Math.sin(t * (1.3 + hk * 1.1) + k * 2.3 + d.phase * 2.1);
         const kk = lit * pk;
-        this.glow.puts(px, py, d.w * 6.4, scaled(c2, kk * 0.34, c3), 1, S.GLOW);
-        this.glow.puts(px, py, d.w * 1.4, scaled(PAL.planktonCore, kk * 1.05, c3), 1, S.CORE);
+        this.glow.puts(px, py, d.w * 7.0, scaled(c2, kk * 0.34, c3), 1, S.GLOW);
+        this.glow.puts(px, py, d.w * 1.7, scaled(PAL.planktonCore, kk * 1.05, c3), 1, S.CORE);
       }
       const tx = pts[(n - 1) * 2], ty = pts[(n - 1) * 2 + 1];
       const tp = 0.58 + 0.42 * Math.sin(t * 1.7 + d.phase * 2.1);
-      this.glow.puts(tx, ty, d.w * 13, scaled(c2, lit * tp * 0.40, c3), 1, S.GLOW);
-      this.glow.puts(tx, ty, d.w * 3.4, scaled(c2, lit * tp * 0.85, c3), 1, S.GLOW);
-      this.glow.puts(tx, ty, d.w * 1.1, scaled(PAL.planktonCore, lit * tp * 1.8, c3), 1, S.CORE);
+      this.glow.puts(tx, ty, d.w * 14, scaled(c2, lit * tp * 0.40, c3), 1, S.GLOW);
+      this.glow.puts(tx, ty, d.w * 3.8, scaled(c2, lit * tp * 0.85, c3), 1, S.GLOW);
+      this.glow.puts(tx, ty, d.w * 1.3, scaled(PAL.planktonCore, lit * tp * 1.8, c3), 1, S.CORE);
     }
   }
 
@@ -210,13 +221,13 @@ export class Scene {
       const off = this._p2(n);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
-        off[s * 2] = pts[s * 2] - wfn(f) * 0.44;
+        off[s * 2] = pts[s * 2] - wfn(f) * 0.42;
         off[s * 2 + 1] = pts[s * 2 + 1];
       }
       const grad = d.up ? (f) => 0.50 + 0.60 * f : (f) => 1.05 - 0.45 * f;
       this.rGlow.stroke(off, {
-        width: (f) => lerp(wq * 0.11, wq * 0.02, f) + 1.6, color: c1,
-        alpha: (f) => 0.30 * grad(f) * (1 - d.depth * 0.55) * dim, falloff: 8,
+        width: (f) => lerp(wCore(wq * 0.10, 4), wCore(0, 4), f), color: c1,
+        alpha: (f) => 0.26 * grad(f) * (1 - d.depth * 0.55) * dim, falloff: 4,
       });
 
       if (first) {
@@ -260,12 +271,12 @@ export class Scene {
         pts[s * 2 + 1] = by + sa * L * f + ca * curl * L * f * f * 0.5;
       }
       this.rGlow.stroke(pts, {
-        width: (f) => lerp(d.r * 0.22, d.r * 0.03, Math.pow(f, 0.7)), color: base,
-        alpha: (f) => k * 0.52 * (1 - f * 0.35), falloff: 5.5,
+        width: (f) => lerp(wCore(d.r * 0.16, 3.5), wCore(0, 3.5), Math.pow(f, 0.7)), color: base,
+        alpha: (f) => k * 0.42 * (1 - f * 0.35), falloff: 3.5,
       });
       const ex = pts[(n - 1) * 2], ey = pts[(n - 1) * 2 + 1];
-      this.glow.puts(ex, ey, d.r * 0.90, scaled(tip, k * 0.95, c1), 1, S.CORE);
-      this.glow.puts(ex, ey, d.r * 2.6, scaled(base, k * 0.20, c1), 1, S.GLOW);
+      this.glow.puts(ex, ey, d.r * 0.95, scaled(tip, k * 0.95, c1), 1, S.CORE);
+      this.glow.puts(ex, ey, d.r * 2.8, scaled(base, k * 0.20, c1), 1, S.GLOW);
     }
     this.glow.puts(d.x, d.y + dir * d.r * 0.35, d.r * 6.0, scaled(base, k * 0.30, c1), 1, S.GLOW);
     this.glow.puts(d.x, d.y + dir * d.r * 0.55, d.r * 1.5, scaled(tip, k * 0.85, c1), 1, S.CORE);
@@ -288,57 +299,78 @@ export class Scene {
     const r = h.r, sid = (h.x * 4.61) | 0;
     const spin = t * h.spin + h.phase;
     const p = 0.56 + 0.44 * Math.sin(t * 1.35 + h.phase);
-    const hot = h.brushed ? 1.30 : 1;
+    const hot = h.brushed ? 1.35 : 1;
 
-    // Shell: a solid black disc, from a fat low-falloff stroke over a stub axis.
+    // Shell: solid black. It emits almost nothing - a lit red ball reads as a
+    // flower, and the thing has to read as an absence with sharp edges.
     const bp = this._p1(2);
     bp[0] = h.x - r * 0.16; bp[1] = h.y; bp[2] = h.x + r * 0.16; bp[3] = h.y;
-    this.rDark.stroke(bp, { width: r * 1.34, color: PAL.hazardDark, alpha: 0.995, falloff: 0.80 });
+    this.rDark.stroke(bp, { width: r * 1.32, color: PAL.hazardDark, alpha: 0.995, falloff: 0.80 });
 
-    // Spines as geometry, not a texture. This is the whole silhouette, and it
-    // is the difference between "menace" and "starfish".
-    const ns = 15;
+    // Spines as geometry, not a texture: this is the whole silhouette. Described
+    // by a cool ambient graze along the shaft and a hot glint at the tip, so
+    // they still read where the water behind them is already black.
+    const ns = 16;
     for (let k = 0; k < ns; k++) {
       const h1 = hash2(sid, k * 3 + 1), h2 = hash2(sid, k * 3 + 2);
-      const ang = spin + (k / ns) * TAU + (h1 - 0.5) * 0.18;
-      const L = r * (1.06 + h2 * 0.66);
-      const bend = (h1 - 0.5) * 0.44;
+      const ang = spin + (k / ns) * TAU + (h1 - 0.5) * 0.30;
+      const L = r * (1.10 + h2 * 0.84);
+      const bend = (h1 - 0.5) * 0.50;
       const n = 4, pts = this._p2(n);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
         const a = ang + bend * f * f;
-        const rr = r * 0.30 + (L - r * 0.30) * f;
+        const rr = r * 0.28 + (L - r * 0.28) * f;
         pts[s * 2] = h.x + Math.cos(a) * rr;
         pts[s * 2 + 1] = h.y + Math.sin(a) * rr;
       }
       this.rDark.stroke(pts, {
-        width: (f) => lerp(r * 0.21, r * 0.010, Math.pow(f, 0.70)),
+        width: (f) => lerp(r * 0.26, r * 0.012, Math.pow(f, 0.66)),
         color: PAL.hazardDark, alpha: (f) => 0.99 - f * 0.16, falloff: 0.95,
       });
-      // Hot only on the outer third: tips catching light, not glowing sticks.
-      this.rGlow.stroke(pts, {
-        width: (f) => lerp(r * 0.070, r * 0.008, f), color: PAL.hazardRim,
-        alpha: (f) => Math.pow(clamp01((f - 0.44) / 0.56), 1.9) * (0.48 + 0.42 * p) * hot,
-        falloff: 12,
+      // Cool ambient graze: describes the shaft without lighting it.
+      const gz = this._p3(n);
+      for (let s = 0; s < n; s++) {
+        gz[s * 2] = pts[s * 2] - r * 0.055;
+        gz[s * 2 + 1] = pts[s * 2 + 1] - r * 0.055;
+      }
+      this.rGlow.stroke(gz, {
+        width: (f) => lerp(wCore(r * 0.05, 3), wCore(0, 3), Math.pow(f, 0.8)), color: PAL.waterHigh,
+        alpha: (f) => 0.30 * (1 - f * 0.55), falloff: 3,
       });
+      // Glint on the lit flank, pulled inside the tip and stretched along the
+      // spine. A round bead sitting on the point detaches and floats. Not every
+      // spine either - regularity is what read as floral.
+      if (h2 > 0.34) {
+        const i0 = n - 2, lf = 0.70;
+        const ex = lerp(pts[i0 * 2], pts[i0 * 2 + 2], lf);
+        const ey = lerp(pts[i0 * 2 + 1], pts[i0 * 2 + 3], lf);
+        const sa = Math.atan2(pts[i0 * 2 + 3] - pts[i0 * 2 + 1], pts[i0 * 2 + 2] - pts[i0 * 2]);
+        const gk = (0.26 + 0.30 * p) * hot * (0.5 + h1 * 0.8);
+        this.glow.push(ex, ey, r * 0.80, r * 0.44, sa,
+          PAL.hazard[0] * gk, PAL.hazard[1] * gk, PAL.hazard[2] * gk, 1, S.STREAK);
+        this.glow.push(ex, ey, r * 0.30, r * 0.15, sa,
+          PAL.hazardRim[0] * gk * 1.15, PAL.hazardRim[1] * gk * 1.15, PAL.hazardRim[2] * gk * 1.15,
+          1, S.GLOW);
+      }
     }
 
-    // Ember: a deep coal inside a dark body, never a lamp.
-    this.glow.puts(h.x, h.y, r * 7.2, scaled(PAL.hazard, (0.050 + 0.028 * p) * hot, c0), 1, S.GLOW);
-    this.glow.puts(h.x, h.y, r * 2.3, scaled(PAL.hazard, (0.10 + 0.09 * p) * hot, c0), 1, S.GLOW);
-    this.glow.puts(h.x, h.y, r * 0.92, scaled(PAL.hazard, (0.38 + 0.40 * p) * hot, c0), 1, S.GLOW);
-    this.glow.puts(h.x, h.y, r * 0.26, scaled(PAL.hazardRim, (0.95 + 0.85 * p) * hot, c0), 1, S.CORE);
+    // Ember down in the shell, glimpsed between spines. Deliberately small.
+    this.glow.puts(h.x, h.y, r * 3.0, scaled(PAL.hazard, (0.035 + 0.022 * p) * hot, c0), 1, S.GLOW);
+    this.glow.puts(h.x, h.y, r * 0.66, scaled(PAL.hazard, (0.20 + 0.20 * p) * hot, c0), 1, S.GLOW);
+    this.glow.puts(h.x, h.y, r * 0.20, scaled(PAL.hazardRim, (0.55 + 0.50 * p) * hot, c0), 1, S.CORE);
 
-    // Crescent on the shell: light wrapping the top-left of a hard body.
-    const n2 = 14, rp = this._p1(n2);
+    // Soft graze across the top of the shell. Wide and low, so it stays a
+    // gradient rather than becoming an outline.
+    const n2 = 12, rp = this._p1(n2);
     for (let s = 0; s < n2; s++) {
-      const a = -Math.PI * 1.16 + (s / (n2 - 1)) * Math.PI * 0.98;
-      rp[s * 2] = h.x + Math.cos(a) * r * 0.58;
-      rp[s * 2 + 1] = h.y + Math.sin(a) * r * 0.58;
+      const a = -Math.PI * 1.10 + (s / (n2 - 1)) * Math.PI * 0.86;
+      rp[s * 2] = h.x + Math.cos(a) * r * 0.52;
+      rp[s * 2 + 1] = h.y + Math.sin(a) * r * 0.52;
     }
     this.rGlow.stroke(rp, {
-      width: r * 0.11, color: PAL.hazardRim,
-      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.2) * 0.30 * hot, falloff: 9,
+      width: r * 0.42, color: PAL.hazardRim,
+      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.3) * 0.16 * hot, falloff: 1.5,
     });
   }
 
@@ -351,7 +383,7 @@ export class Scene {
     const rim = w * (1.08 + 0.055 * Math.sin(h.bellPhase));
     const hotb = h.brushed ? 1.25 : 1;
 
-    // --- dark fill along the dome's medial axis: the silhouette ---
+    // --- dark fill along the dome's medial axis: silhouette in bright water ---
     const nf = 15, fill = this._p1(nf);
     for (let s = 0; s < nf; s++) {
       const u = -0.96 + 1.92 * (s / (nf - 1));
@@ -365,6 +397,15 @@ export class Scene {
       },
       color: PAL.hazardDark, alpha: 0.74, falloff: 1.0,
     });
+
+    // --- interior volume. Nested squashed glows fill the dome so the bell is a
+    // body of light bounded by a membrane, not an outline around nothing. ---
+    this.glow.push(cx, cy - hh * 0.46, w * 2.7, hh * 2.4, 0,
+      PAL.hazard[0] * 0.13 * bell, PAL.hazard[1] * 0.13 * bell, PAL.hazard[2] * 0.13 * bell, 1, S.GLOW);
+    this.glow.push(cx, cy - hh * 0.40, w * 1.85, hh * 1.62, 0,
+      PAL.hazard[0] * 0.22 * bell, PAL.hazard[1] * 0.22 * bell, PAL.hazard[2] * 0.22 * bell, 1, S.GLOW);
+    this.glow.push(cx, cy - hh * 0.30, w * 1.05, hh * 0.92, 0,
+      PAL.hazard[0] * 0.30 * bell, PAL.hazard[1] * 0.30 * bell, PAL.hazard[2] * 0.30 * bell, 1, S.GLOW);
 
     // --- bell outline: the membrane ---
     const n = 32, out = this._p2(n);
@@ -386,21 +427,19 @@ export class Scene {
     }
     this.rDark.stroke(out, { width: w * 0.20, color: PAL.hazardDark, alpha: 0.55, falloff: 1.2 });
 
-    // --- interior: gonads in a ring, radial canals, a manubrium ---
-    this.glow.push(cx, cy - hh * 0.40, w * 2.4, hh * 2.0, 0,
-      PAL.hazard[0] * 0.15 * bell, PAL.hazard[1] * 0.15 * bell, PAL.hazard[2] * 0.15 * bell, 1, S.GLOW);
+    // --- organs ---
     for (let k = 0; k < 4; k++) {
       const u = (k / 3 - 0.5) * 1.32;
       const ox = cx + u * w * 0.74;
       const oy = cy - hh * 0.34 - Math.abs(u) * hh * 0.12;
-      const gk = (0.42 + 0.28 * Math.sin(t * 1.9 + k * 1.7 + h.bellPhase)) * bell * hotb;
-      this.glow.push(ox, oy, w * 0.34, hh * 0.58, 0,
+      const gk = (0.46 + 0.30 * Math.sin(t * 1.9 + k * 1.7 + h.bellPhase)) * bell * hotb;
+      this.glow.push(ox, oy, w * 0.36, hh * 0.60, 0,
         PAL.hazard[0] * gk, PAL.hazard[1] * gk, PAL.hazard[2] * gk, 1, L_MEMB);
-      this.glow.push(ox, oy, w * 0.13, hh * 0.26, 0,
-        PAL.hazardRim[0] * gk * 1.5, PAL.hazardRim[1] * gk * 1.5, PAL.hazardRim[2] * gk * 1.5, 1, S.CORE);
-      // canal from the apex down to the rim
+      this.glow.push(ox, oy, w * 0.14, hh * 0.28, 0,
+        PAL.hazardRim[0] * gk * 1.4, PAL.hazardRim[1] * gk * 1.4, PAL.hazardRim[2] * gk * 1.4, 1, S.CORE);
+      // canal from the apex out to the rim
       this.rGlow.segment(cx + u * w * 0.14, cy - hh * 0.82, cx + u * rim * 0.94, cy - hh * 0.03,
-        w * 0.030, PAL.hazardRim, 0.26 * bell, 16);
+        wCore(w * 0.045, 3), PAL.hazardRim, 0.20 * bell, 3);
     }
     // manubrium: the stomach hanging under the bell
     const mp = this._p3(4);
@@ -410,15 +449,16 @@ export class Scene {
       mp[s * 2 + 1] = cy - hh * 0.20 + f * hh * 1.05;
     }
     this.rGlow.stroke(mp, {
-      width: (f) => lerp(w * 0.30, w * 0.10, f), color: PAL.hazardRim,
-      alpha: (f) => 0.30 * bell * (1 - f * 0.6), falloff: 4,
+      width: (f) => lerp(w * 0.34, w * 0.12, f), color: PAL.hazardRim,
+      alpha: (f) => 0.26 * bell * (1 - f * 0.6), falloff: 2.4,
     });
 
-    // Membrane rim: crisp, brightest over the shoulders where light grazes.
-    this.rGlow.stroke(out, { width: w * 0.44, color: PAL.hazard, alpha: 0.18 * bell, falloff: 2.2 });
+    // Membrane: soft scatter band, then a crisp edge at an honest width.
+    this.rGlow.stroke(out, { width: w * 0.50, color: PAL.hazard, alpha: 0.18 * bell, falloff: 1.6 });
     this.rGlow.stroke(out, {
-      width: (f) => lerp(w * 0.105, w * 0.055, Math.abs(f * 2 - 1)), color: PAL.hazardRim,
-      alpha: (f) => (0.26 + 0.58 * Math.pow(Math.sin(f * Math.PI), 0.7)) * bell * hotb, falloff: 10,
+      width: (f) => lerp(wCore(w * 0.10, 4.5), wCore(w * 0.055, 4.5), Math.abs(f * 2 - 1)),
+      color: PAL.hazardRim,
+      alpha: (f) => (0.22 + 0.46 * Math.pow(Math.sin(f * Math.PI), 0.7)) * bell * hotb, falloff: 4.5,
     });
 
     // --- tentacles. Follow-through comes from sampling where the bell *was*. ---
@@ -437,20 +477,20 @@ export class Scene {
         tp[s * 2 + 1] = cy + hh * 0.10 + f * L + vlag(lag) * 0.85 * Math.pow(f, 1.2);
       }
       this.rDark.stroke(tp, {
-        width: (f) => lerp(r * 0.30, r * 0.05, Math.pow(f, 0.7)), color: PAL.hazardDark,
+        width: (f) => lerp(r * 0.34, r * 0.06, Math.pow(f, 0.7)), color: PAL.hazardDark,
         alpha: (f) => 0.52 * (1 - f * 0.8), falloff: 1.3,
       });
       this.rGlow.stroke(tp, {
-        width: (f) => lerp(r * 0.26, r * 0.04, Math.pow(f, 0.7)), color: PAL.hazard,
-        alpha: (f) => 0.24 * (1 - f * 0.65) * bell, falloff: 2.6,
+        width: (f) => lerp(r * 0.30, r * 0.05, Math.pow(f, 0.7)), color: PAL.hazard,
+        alpha: (f) => 0.22 * (1 - f * 0.65) * bell, falloff: 1.8,
       });
       this.rGlow.stroke(tp, {
-        width: (f) => lerp(r * 0.055, r * 0.012, f), color: PAL.hazardRim,
-        alpha: (f) => 0.44 * Math.pow(1 - f, 1.3) * bell * hotb, falloff: 15,
+        width: (f) => lerp(wCore(r * 0.06, 4), wCore(0, 4), f), color: PAL.hazardRim,
+        alpha: (f) => 0.36 * Math.pow(1 - f, 1.3) * bell * hotb, falloff: 4,
       });
     }
 
-    const nT = 9;
+    const nT = 7;
     for (let k = 0; k < nT; k++) {
       const hk = hash2(sid, k * 3 + 1);
       const u = (k / (nT - 1)) * 2 - 1;
@@ -464,12 +504,12 @@ export class Scene {
         tp[s * 2 + 1] = cy + hh * 0.22 + f * L + vlag(lag) * 0.92 * Math.pow(f, 1.15);
       }
       this.rGlow.stroke(tp, {
-        width: (f) => lerp(r * 0.105, r * 0.006, Math.pow(f, 0.55)), color: PAL.hazard,
-        alpha: (f) => 0.46 * Math.pow(1 - f, 0.85) * bell, falloff: 7,
+        width: (f) => lerp(wCore(r * 0.055, 3), wCore(0, 3), Math.pow(f, 0.55)), color: PAL.hazard,
+        alpha: (f) => 0.34 * Math.pow(1 - f, 0.85) * bell, falloff: 3,
       });
       this.rGlow.stroke(tp, {
-        width: (f) => lerp(r * 0.048, 0.6, f), color: PAL.hazardRim,
-        alpha: (f) => 0.60 * Math.pow(clamp01(1 - f * 2.3), 1.4) * bell * hotb, falloff: 17,
+        width: (f) => lerp(wCore(r * 0.05, 3.5), wCore(0, 3.5), Math.pow(f, 0.5)), color: PAL.hazardRim,
+        alpha: (f) => 0.40 * Math.pow(clamp01(1 - f * 2.3), 1.4) * bell * hotb, falloff: 3.5,
       });
     }
 
@@ -501,9 +541,9 @@ export class Scene {
     const dpl = Math.hypot(dpx, dpy) || 1;
     const pdx = dpx / dpl, pdy = dpy / dpl;
     const near = 1 - clamp01(dpl / 700);
-    const live = isHeld ? 1 : (0.24 + 0.54 * smoothstep(near)) * (1 - spent * 0.34);
-    const pulse = 0.74 + 0.26 * Math.sin(t * a.pulse * (isHeld ? 3.6 : 1.5) + a.phase);
-    const k = pulse * (0.42 + live * 1.06) * lerp(1, dim, 0.45);
+    const live = isHeld ? 1 : (0.34 + 0.52 * smoothstep(near)) * (1 - spent * 0.30);
+    const pulse = 0.78 + 0.22 * Math.sin(t * a.pulse * (isHeld ? 3.6 : 1.5) + a.phase);
+    const k = pulse * (0.50 + live * 1.05) * lerp(1, dim, 0.45);
 
     // Strain: a loaded bulb is dragged toward the mote and its stalk goes taut.
     const strain = isHeld ? clamp01(0.40 + player.tetherGlow * 0.60) : 0;
@@ -515,7 +555,7 @@ export class Scene {
 
     // ---- stalk ----
     const n = 11, sp = this._p1(n);
-    const tipY = by - r * 0.78;
+    const tipY = by - r * 0.74;
     for (let s = 0; s < n; s++) {
       const f = s / (n - 1);
       const e = f * f * (3 - 2 * f);            // keep the root vertical at the roof
@@ -523,23 +563,24 @@ export class Scene {
       sp[s * 2 + 1] = lerp(topY, tipY, f);
     }
     this.rDark.stroke(sp, {
-      width: (f) => lerp(r * 0.30, r * 0.54, Math.pow(f, 1.6)) * (1 - strain * 0.20),
+      width: (f) => lerp(r * 0.32, r * 0.56, Math.pow(f, 1.6)) * (1 - strain * 0.20),
       color: PAL.voidDeep, alpha: 0.94, falloff: 1.05,
     });
     // The stalk conducts: a warm filament inside it, loaded when tethered.
     this.rGlow.stroke(sp, {
-      width: (f) => lerp(r * 0.05, r * 0.17, f), color: isHeld ? PAL.anchorCore : PAL.anchorMid,
-      alpha: (f) => (isHeld ? 0.80 : 0.16 + 0.34 * live) * Math.pow(f, 1.5) * pulse, falloff: 13,
+      width: (f) => lerp(wCore(r * 0.06, 3), wCore(r * 0.15, 3), f),
+      color: isHeld ? PAL.anchorLive : PAL.anchorMid,
+      alpha: (f) => (isHeld ? 0.62 : 0.14 + 0.30 * live) * Math.pow(f, 1.5) * pulse, falloff: 3,
     });
     const so = this._p2(n);
     for (let s = 0; s < n; s++) {
       const f = s / (n - 1);
-      so[s * 2] = sp[s * 2] - lerp(r * 0.13, r * 0.24, f);
+      so[s * 2] = sp[s * 2] - lerp(r * 0.15, r * 0.27, f);
       so[s * 2 + 1] = sp[s * 2 + 1];
     }
     this.rGlow.stroke(so, {
-      width: r * 0.075, color: PAL.anchorRim,
-      alpha: (f) => (0.07 + 0.26 * live) * (0.4 + 0.6 * f), falloff: 12,
+      width: wCore(r * 0.07, 3), color: PAL.anchorRim,
+      alpha: (f) => (0.08 + 0.24 * live) * (0.4 + 0.6 * f), falloff: 3,
     });
     // Nodes: swellings where the stalk has grown in fits.
     for (let q = 0; q < 3; q++) {
@@ -551,14 +592,14 @@ export class Scene {
       this.occl.push(nx, ny, nr * 2.5, nr * 1.9, 0,
         PAL.voidDeep[0], PAL.voidDeep[1], PAL.voidDeep[2], 0.82, S.BLOB);
       const np = 0.38 + 0.62 * Math.sin(t * (1.5 + hash2(sid, q * 5 + 2) * 1.2) + q * 2.2 + a.phase);
-      this.glow.puts(nx, ny, nr * 5.0, scaled(PAL.anchorRim, k * np * 0.14, c0), 1, S.GLOW);
-      this.glow.puts(nx, ny, nr * 1.3, scaled(PAL.anchorMid, k * np * 0.55, c0), 1, S.CORE);
+      this.glow.puts(nx, ny, nr * 4.4, scaled(PAL.anchorRim, k * np * 0.20, c0), 1, S.GLOW);
+      this.glow.puts(nx, ny, nr * 1.25, scaled(PAL.anchorMid, k * np * 0.60, c0), 1, S.CORE);
     }
 
     // ---- bulb: a teardrop, from a profiled stroke over its vertical axis ----
-    const axTop = by - r * 1.14, axBot = by + r * 1.30;
+    const axTop = by - r * 1.32, axBot = by + r * 1.54;
     const prof = (f) => Math.pow(Math.sin(Math.PI * (0.17 + 0.79 * f)), 0.60);
-    const bw = (f) => r * 2.16 * prof(f);
+    const bw = (f) => r * 2.50 * prof(f);
     const stx = (f) => pdx * (f - 0.35) * 0.50 * strain * r;
     const sty = (f) => pdy * (f - 0.35) * 0.30 * strain * r;
     const nb = 13, bp = this._p3(nb);
@@ -568,32 +609,56 @@ export class Scene {
       bp[s * 2 + 1] = lerp(axTop, axBot, f) + sty(f);
     }
     // alpha < 1 on purpose: the membrane is thick, not opaque.
-    this.rDark.stroke(bp, { width: bw, color: PAL.voidDeep, alpha: 0.90, falloff: 0.95 });
+    this.rDark.stroke(bp, { width: bw, color: PAL.voidDeep, alpha: 0.93, falloff: 0.95 });
 
-    // Sub-surface scatter: warm light escaping a thick translucent body.
-    this.glow.push(bx, by, r * (isHeld ? 16 : 11), r * (isHeld ? 14 : 9.6), 0,
-      PAL.anchorRim[0] * k * (isHeld ? 0.30 : 0.16), PAL.anchorRim[1] * k * (isHeld ? 0.30 : 0.16),
-      PAL.anchorRim[2] * k * (isHeld ? 0.30 : 0.16), 1, S.GLOW);
-    this.glow.push(bx, by + r * 0.16, r * 4.8, r * 5.1, 0,
-      PAL.anchorMid[0] * k * 0.44, PAL.anchorMid[1] * k * 0.44, PAL.anchorMid[2] * k * 0.44, 1, S.GLOW);
-    this.glow.push(bx, by + r * 0.26, r * 2.05, r * 2.35, 0,
-      PAL.anchorLive[0] * k * 0.72, PAL.anchorLive[1] * k * 0.72, PAL.anchorLive[2] * k * 0.72, 1, S.GLOW);
+    // Warm mass. The amber has to be *dense*, not a tint on an outline, so the
+    // interior is filled by glows that follow the teardrop's own profile. Amber
+    // and orange carry the volume; near-white is rationed to the core alone, or
+    // the anchor competes with the mote for hue as well as value.
+    this.glow.push(bx, by - r * 0.10, r * 12 * (isHeld ? 1.35 : 1), r * 11 * (isHeld ? 1.35 : 1), 0,
+      PAL.anchorRim[0] * k * 0.20, PAL.anchorRim[1] * k * 0.20, PAL.anchorRim[2] * k * 0.20, 1, S.GLOW);
+    // Sampled along the teardrop's own axis so the light fills the body's shape
+    // rather than sitting behind it as a disc.
+    for (let q = 0; q < 4; q++) {
+      const f = 0.22 + q * 0.185;
+      const ww = bw(f);
+      const amb = q === 1 || q === 2 ? PAL.anchorLive : PAL.anchorMid;
+      const kk = k * (q === 1 ? 1.00 : q === 2 ? 0.86 : 0.62);
+      this.glow.push(bx + stx(f), lerp(axTop, axBot, f) + sty(f), ww * 1.20, ww * 1.04, 0,
+        amb[0] * kk, amb[1] * kk, amb[2] * kk, 1, S.GLOW);
+    }
+    // Hot core: small, and the only near-white on the object.
+    const cf = 0.46;
+    const ccx = bx + stx(cf), ccy = lerp(axTop, axBot, cf) + sty(cf);
+    this.glow.push(ccx, ccy, r * 0.92, r * 0.80, 0,
+      PAL.anchorCore[0] * k * 1.55, PAL.anchorCore[1] * k * 1.42, PAL.anchorCore[2] * k * 1.05, 1, S.GLOW);
+    this.glow.push(ccx, ccy, r * 0.34, r * 0.30, 0,
+      PAL.anchorCore[0] * k * 2.30, PAL.anchorCore[1] * k * 2.05, PAL.anchorCore[2] * k * 1.45, 1, S.CORE);
 
-    // Rim that catches the bulb's own light, on the left edge only.
+    // Rim that catches the bulb's own light. Warm, and subordinate to the core.
     const nr2 = 15, rimL = this._p1(nr2);
     for (let s = 0; s < nr2; s++) {
       const f = s / (nr2 - 1);
-      rimL[s * 2] = bx + stx(f) - bw(f) * 0.47;
+      rimL[s * 2] = bx + stx(f) - bw(f) * 0.46;
       rimL[s * 2 + 1] = lerp(axTop, axBot, f) + sty(f);
     }
+    // Soft band first so the membrane has thickness, then the crisp edge on top.
     this.rGlow.stroke(rimL, {
-      width: r * 0.10, color: PAL.anchorCore,
-      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 0.85) * (0.26 + 0.58 * live) * pulse, falloff: 15,
+      width: r * 0.52, color: PAL.anchorRim,
+      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 0.9) * (0.16 + 0.26 * live) * pulse, falloff: 1.6,
     });
-    for (let s = 0; s < nr2; s++) rimL[s * 2] += bw(s / (nr2 - 1)) * 0.94;
     this.rGlow.stroke(rimL, {
-      width: r * 0.085, color: PAL.anchorRim,
-      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.1) * (0.10 + 0.24 * live) * pulse, falloff: 13,
+      width: wCore(r * 0.11, 3.5), color: PAL.anchorLive,
+      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 0.85) * (0.34 + 0.60 * live) * pulse, falloff: 3.5,
+    });
+    for (let s = 0; s < nr2; s++) rimL[s * 2] += bw(s / (nr2 - 1)) * 0.92;
+    this.rGlow.stroke(rimL, {
+      width: r * 0.46, color: PAL.anchorRim,
+      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.1) * (0.10 + 0.16 * live) * pulse, falloff: 1.6,
+    });
+    this.rGlow.stroke(rimL, {
+      width: wCore(r * 0.09, 3.5), color: PAL.anchorRim,
+      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.1) * (0.18 + 0.40 * live) * pulse, falloff: 3.5,
     });
 
     // Filament: the one detail that makes the bulb an organism, not a lamp.
@@ -601,16 +666,17 @@ export class Scene {
     const fw = isHeld ? 6.6 : 1.45;
     for (let s = 0; s < 11; s++) {
       const f = s / 10;
-      const amp = bw(lerp(0.12, 0.90, f)) * 0.29 * Math.sin(Math.PI * f);
+      const amp = bw(lerp(0.12, 0.90, f)) * 0.26 * Math.sin(Math.PI * f);
       fp[s * 2] = bx + stx(f) + Math.sin(f * 5.6 + t * fw + a.phase * 1.7) * amp
         + Math.sin(f * 11.3 + t * fw * 1.6 + a.phase) * amp * 0.30;
-      fp[s * 2 + 1] = lerp(axTop + r * 0.22, axBot - r * 0.24, f) + sty(f);
+      fp[s * 2 + 1] = lerp(axTop + r * 0.20, axBot - r * 0.22, f) + sty(f);
     }
-    this.rGlow.stroke(fp, { width: r * 0.34, color: PAL.anchorMid, alpha: 0.18 * live * pulse, falloff: 2.0 });
+    this.rGlow.stroke(fp, { width: r * 0.44, color: PAL.anchorMid, alpha: 0.20 * live * pulse, falloff: 1.8 });
     this.rGlow.stroke(fp, {
-      width: (f) => lerp(r * 0.105, r * 0.042, f), color: isHeld ? PAL.anchorCore : PAL.anchorLive,
-      alpha: (f) => (0.40 + 0.56 * live) * pulse * Math.pow(Math.sin(f * Math.PI), 0.32) * (1 - spent * 0.28),
-      falloff: 20,
+      width: (f) => lerp(wCore(r * 0.085, 3.5), wCore(r * 0.045, 3.5), f),
+      color: isHeld ? PAL.anchorCore : PAL.anchorLive,
+      alpha: (f) => (0.34 + 0.50 * live) * pulse * Math.pow(Math.sin(f * Math.PI), 0.32) * (1 - spent * 0.28),
+      falloff: 3.5,
     });
 
     // Seeds suspended in the jelly, each on its own clock.
@@ -618,12 +684,12 @@ export class Scene {
     for (let q = 0; q < nseed; q++) {
       const u = hash2(sid, q * 13 + 7) * 2 - 1;
       const ff = 0.16 + hash2(sid, q * 17 + 3) * 0.72;
-      const px = bx + stx(ff) + u * bw(ff) * 0.33;
+      const px = bx + stx(ff) + u * bw(ff) * 0.32;
       const py = lerp(axTop, axBot, ff) + sty(ff);
       const sk = 0.32 + 0.68 * Math.sin(t * (1.3 + hash2(sid, q * 7 + 1) * 2.0) + q * 2.4 + a.phase);
       const kk = k * (0.45 + sk * 0.85);
-      this.glow.puts(px, py, r * 1.9, scaled(PAL.anchorMid, kk * 0.20, c0), 1, S.GLOW);
-      this.glow.puts(px, py, r * 0.52, scaled(PAL.anchorCore, kk * 0.80, c0), 1, S.CORE);
+      this.glow.puts(px, py, r * 1.5, scaled(PAL.anchorRim, kk * 0.26, c0), 1, S.GLOW);
+      this.glow.puts(px, py, r * 0.30, scaled(PAL.anchorLive, kk * 0.85, c0), 1, S.CORE);
     }
 
     // Tendrils: secondary motion, and the reason it reads as alive.
@@ -631,23 +697,23 @@ export class Scene {
     for (let q = 0; q < nt; q++) {
       const hq = hash2(sid, q * 11 + 5);
       const u = nt === 1 ? 0 : (q / (nt - 1)) * 2 - 1;
-      const ox = bx + u * r * 0.78 + stx(1);
-      const oy = by + r * 1.04 + sty(1);
+      const ox = bx + u * r * 0.88 + stx(1);
+      const oy = by + r * 1.22 + sty(1);
       const L = r * (1.7 + hq * 2.4) * (isHeld ? 1.22 : 1);
       const nq = 7, tp = this._p3(nq);
       for (let s = 0; s < nq; s++) {
         const f = s / (nq - 1);
         const drift = Math.sin(t * (0.7 + hq * 0.8) - f * 2.3 + q * 1.9 + a.phase) * r * (0.34 + hq * 0.30) * f;
-        tp[s * 2] = ox + drift + u * r * 0.5 * f * f + pdx * strain * r * 0.7 * f * f;
+        tp[s * 2] = ox + drift + u * r * 1.15 * f * f + pdx * strain * r * 0.7 * f * f;
         tp[s * 2 + 1] = oy + f * L + pdy * strain * r * 0.7 * f * f;
       }
       this.rDark.stroke(tp, {
-        width: (f) => lerp(r * 0.15, 0, Math.pow(f, 0.4)), color: PAL.voidDeep,
+        width: (f) => lerp(r * 0.17, 0, Math.pow(f, 0.4)), color: PAL.voidDeep,
         alpha: (f) => 0.70 * (1 - f), falloff: 1.2,
       });
       this.rGlow.stroke(tp, {
-        width: (f) => lerp(r * 0.10, r * 0.010, Math.pow(f, 0.6)), color: PAL.anchorMid,
-        alpha: (f) => (0.26 + 0.44 * live) * pulse * Math.pow(1 - f, 0.75), falloff: 9,
+        width: (f) => lerp(wCore(r * 0.075, 3), wCore(0, 3), Math.pow(f, 0.6)), color: PAL.anchorMid,
+        alpha: (f) => (0.22 + 0.40 * live) * pulse * Math.pow(1 - f, 0.75), falloff: 3,
       });
       if (hq > 0.42) {
         const fj = 0.62;
@@ -655,27 +721,26 @@ export class Scene {
         const nx = lerp(tp[si * 2], tp[si * 2 + 2], lf);
         const ny = lerp(tp[si * 2 + 1], tp[si * 2 + 3], lf);
         const np = 0.35 + 0.65 * Math.sin(t * (1.9 + hq) + q * 2.7 + a.phase);
-        this.glow.puts(nx, ny, r * 1.1, scaled(PAL.anchorLive, k * np * 0.45, c0), 1, S.GLOW);
-        this.glow.puts(nx, ny, r * 0.30, scaled(PAL.anchorCore, k * np * 0.9, c0), 1, S.CORE);
+        this.glow.puts(nx, ny, r * 1.0, scaled(PAL.anchorMid, k * np * 0.42, c0), 1, S.GLOW);
+        this.glow.puts(nx, ny, r * 0.24, scaled(PAL.anchorLive, k * np * 0.85, c0), 1, S.CORE);
       }
     }
 
     if (isHeld) {
       // Strain veins from the core out to where the tether leaves the membrane.
       const pa = Math.atan2(pdy, pdx);
-      const ex = bx + pdx * r * 1.02, ey = by + pdy * r * 1.02;
+      const ex = bx + pdx * r * 0.92, ey = by + pdy * r * 0.92;
       for (let q = 0; q < 3; q++) {
         const av = pa + (q - 1) * 0.36;
-        this.rGlow.segment(bx + stx(0.5), by, bx + Math.cos(av) * r * 0.95, by + Math.sin(av) * r * 0.95,
-          r * 0.085, PAL.anchorCore, 0.50 * pulse, 17);
+        this.rGlow.segment(bx + stx(0.5), by, bx + Math.cos(av) * r * 0.88, by + Math.sin(av) * r * 0.88,
+          wCore(r * 0.07, 3.5), PAL.anchorLive, 0.42 * pulse, 3.5);
       }
       // The membrane flares where the line is pulling on it.
-      this.glow.puts(ex, ey, r * 2.6, scaled(PAL.anchorCore, 0.95 * pulse, c0), 1, S.GLOW);
-      this.glow.puts(ex, ey, r * 0.62, scaled(PAL.moteCore, 1.35 * pulse, c0), 1, S.CORE);
-      // One dim anamorphic bar. Not a star: a star is a lens artefact, and this
-      // is an object.
-      this.glow.push(bx, by, r * 13, r * 0.80, 0,
-        PAL.anchorMid[0] * 0.42 * pulse, PAL.anchorMid[1] * 0.42 * pulse, PAL.anchorMid[2] * 0.42 * pulse,
+      this.glow.puts(ex, ey, r * 2.0, scaled(PAL.anchorLive, 0.80 * pulse, c0), 1, S.GLOW);
+      this.glow.puts(ex, ey, r * 0.44, scaled(PAL.anchorCore, 1.30 * pulse, c0), 1, S.CORE);
+      // One dim anamorphic bar, tall enough that its core is not a hairline.
+      this.glow.push(bx, by, r * 9, r * 2.4, 0,
+        PAL.anchorMid[0] * 0.26 * pulse, PAL.anchorMid[1] * 0.24 * pulse, PAL.anchorMid[2] * 0.18 * pulse,
         1, S.STREAK);
     }
   }
@@ -718,12 +783,12 @@ export class Scene {
       pts[s * 2] = x + (noise1(y * 0.004 + t * 0.7) - 0.5) * 96 + Math.sin(y * 0.006 + t * 1.3) * 24;
       pts[s * 2 + 1] = y;
     }
-    // Body behind the front, then a hard bright leading filament.
-    this.rGlow.stroke(pts, { width: 120, color: PAL.hushGlow, alpha: 0.42, falloff: 1.1 });
-    this.rGlow.stroke(pts, { width: 34, color: PAL.hushEdge, alpha: 0.52, falloff: 3.4 });
+    // Body behind the front, then a bright leading edge at an honest width.
+    this.rGlow.stroke(pts, { width: 130, color: PAL.hushGlow, alpha: 0.42, falloff: 1.1 });
+    this.rGlow.stroke(pts, { width: 40, color: PAL.hushEdge, alpha: 0.50, falloff: 2.6 });
     this.rGlow.stroke(pts, {
-      width: 4.5, color: [1, 0.94, 1],
-      alpha: (f) => 0.42 + 0.38 * noise1(f * 21 + t * 3.3), falloff: 24,
+      width: wCore(4.6, 5), color: [1, 0.94, 1],
+      alpha: (f) => 0.38 + 0.34 * noise1(f * 21 + t * 3.3), falloff: 5,
     });
     // Tearing: short filaments dragged off the front into the dark.
     for (let s = 1; s < n - 1; s += 2) {
@@ -731,7 +796,7 @@ export class Scene {
       const flick = noise1(yy * 0.02 + t * 4.1);
       const len = 24 + flick * 130;
       this.rGlow.segment(pts[s * 2], yy, pts[s * 2] - len, yy + (flick - 0.5) * 60,
-        6 + flick * 8, PAL.hushEdge, 0.20 + 0.24 * flick, 5);
+        10 + flick * 12, PAL.hushEdge, 0.18 + 0.22 * flick, 2.2);
       this.glow.puts(pts[s * 2], yy, 130, scaled(PAL.hushEdge, 0.22 * (0.4 + flick), c0), 1, S.GLOW);
     }
   }
@@ -747,6 +812,8 @@ export class Scene {
     const sk = clamp01(player.speedSmooth / 1900);
 
     // Turbulence grows toward the tail: old wake has had time to be stirred.
+    // Low frequency and modest amplitude - sampling noise per point turns this
+    // into a sawtooth, which reads as a lightning bolt rather than a wake.
     for (let s = 0; s < n; s++) {
       const i = off + s * 2;
       const age = 1 - s / (n - 1);
@@ -754,7 +821,7 @@ export class Scene {
       if (s === 0) { dx = src[i + 2] - src[i]; dy = src[i + 3] - src[i + 1]; }
       else { dx = src[i] - src[i - 2]; dy = src[i + 1] - src[i - 1]; }
       const dl = Math.hypot(dx, dy) || 1;
-      const w = (noise1(s * 0.62 + t * 1.6) - 0.5) * age * age * (24 + sk * 36);
+      const w = (noise1(s * 0.20 + t * 0.8) - 0.5) * age * age * (4 + sk * 20);
       pts[s * 2] = src[i] - (dy / dl) * w;
       pts[s * 2 + 1] = src[i + 1] + (dx / dl) * w;
     }
@@ -766,12 +833,12 @@ export class Scene {
       alpha: (f) => (0.30 + sk * 0.34) * Math.pow(f, 0.9) * Math.pow(1 - f, 0.35), falloff: 1.6,
     });
     this.rGlow.stroke(pts, {
-      width: (f) => lerp(1.6, 15 + sk * 16, Math.pow(f, 1.7)), color: PAL.moteTrail,
-      alpha: (f) => (0.28 + sk * 0.44) * Math.pow(Math.sin(f * Math.PI * 0.92), 1.1), falloff: 4.5,
+      width: (f) => lerp(2, 16 + sk * 16, Math.pow(f, 1.7)), color: PAL.moteTrail,
+      alpha: (f) => (0.28 + sk * 0.44) * Math.pow(Math.sin(f * Math.PI * 0.92), 1.1), falloff: 3.0,
     });
     this.rGlow.stroke(pts, {
-      width: (f) => lerp(0.9, 6.5 + sk * 6, Math.pow(f, 2.2)), color: PAL.moteInner,
-      alpha: (f) => (0.34 + sk * 0.56) * Math.pow(f, 3.6), falloff: 15,
+      width: (f) => lerp(1.5, 9 + sk * 8, Math.pow(f, 2.2)), color: PAL.moteInner,
+      alpha: (f) => (0.34 + sk * 0.56) * Math.pow(f, 3.6), falloff: 5.5,
     });
 
     // Shed grain: keeps it from reading as a clean vector ribbon.
@@ -805,12 +872,12 @@ export class Scene {
       pts[s * 2 + 1] = ay + dy * f + py * wob;
     }
     // Warm at the bulb, cool at the mote: light is being drawn out and changed.
-    this.rGlow.stroke(pts, { width: (f) => lerp(24, 9, f), color: PAL.anchorMid, alpha: (f) => 0.22 * g * (1 - f * 0.7), falloff: 1.9 });
-    this.rGlow.stroke(pts, { width: (f) => lerp(7.5, 4.2, f), color: PAL.anchorCore, alpha: (f) => 0.72 * g * (1 - f * 0.55), falloff: 7 });
-    this.rGlow.stroke(pts, { width: (f) => lerp(4.4, 8.5, f), color: PAL.moteInner, alpha: (f) => 0.50 * g * Math.pow(f, 1.9), falloff: 6 });
+    this.rGlow.stroke(pts, { width: (f) => lerp(26, 11, f), color: PAL.anchorMid, alpha: (f) => 0.20 * g * (1 - f * 0.7), falloff: 1.5 });
+    this.rGlow.stroke(pts, { width: (f) => lerp(15, 9, f), color: PAL.anchorLive, alpha: (f) => 0.50 * g * (1 - f * 0.55), falloff: 3.2 });
+    this.rGlow.stroke(pts, { width: (f) => lerp(8, 14, f), color: PAL.moteInner, alpha: (f) => 0.38 * g * Math.pow(f, 1.9), falloff: 3.0 });
     this.rGlow.stroke(pts, {
-      width: 1.7, color: PAL.moteCore,
-      alpha: (f) => 0.80 * g * (0.5 + 0.5 * noise1(f * 8 + t * 9)), falloff: 26,
+      width: wCore(3.6, 5), color: PAL.moteCore,
+      alpha: (f) => 0.55 * g * (0.5 + 0.5 * noise1(f * 8 + t * 9)), falloff: 5,
     });
     // Energy running down the line, unevenly spaced so it is not a metronome.
     for (let q = 0; q < 3; q++) {
@@ -819,8 +886,8 @@ export class Scene {
       const wob = Math.sin(bt * 11 - t * 21) * 4.2 * e * slack;
       const bx = ax + dx * bt + px * wob, by = ay + dy * bt + py * wob;
       const kb = g * e * (0.72 - q * 0.17);
-      this.glow.puts(bx, by, 36, scaled(PAL.anchorCore, kb * 0.50, c0), 1, S.GLOW);
-      this.glow.puts(bx, by, 7.5, scaled(PAL.moteCore, kb * 1.5, c0), 1, S.CORE);
+      this.glow.puts(bx, by, 34, scaled(PAL.anchorLive, kb * 0.50, c0), 1, S.GLOW);
+      this.glow.puts(bx, by, 8.5, scaled(PAL.moteCore, kb * 1.4, c0), 1, S.CORE);
     }
   }
 
@@ -837,7 +904,6 @@ export class Scene {
     if (vl < 1e-3) { vx = 1; vy = 0; vl = 1; }
     const dx = vx / vl, dy = vy / vl;
     const ang = Math.atan2(dy, dx);
-    const ca = Math.cos(ang), sa = Math.sin(ang);
     // A smear conserves area: fast is longer AND thinner, never just bigger.
     const el = 1 + sk * 1.9, th = 1 / (1 + sk * 0.80);
 
@@ -850,8 +916,8 @@ export class Scene {
         const sx = tp[j * 2], sy = tp[j * 2 + 1];
         const a2 = Math.atan2(sy - tp[(j + 1) * 2 + 1], sx - tp[(j + 1) * 2]);
         const f = 1 - i / (N + 1);
-        const kk = f * f * sk * 0.60 * boost;
-        this.glow.push(sx, sy, R * 7.0 * f * el, R * 2.3 * f * th, a2,
+        const kk = f * f * sk * 0.55 * boost;
+        this.glow.push(sx, sy, R * 7.0 * f * el, R * 4.2 * f * th, a2,
           PAL.moteOuter[0] * kk, PAL.moteOuter[1] * kk, PAL.moteOuter[2] * kk, 1, S.STREAK);
       }
     }
@@ -860,12 +926,12 @@ export class Scene {
     this.glow.push(p.x, p.y, R * 21 * (1 + sk * 0.55), R * 18 * th, ang,
       PAL.moteOuter[0] * 0.16 * boost, PAL.moteOuter[1] * 0.16 * boost, PAL.moteOuter[2] * 0.16 * boost,
       1, S.GLOW);
-    for (let q = 0; q < 4; q++) {
-      const a2 = q * 1.5708 + t * 0.32 + noise1(t * 0.6 + q * 7.3) * 2.4;
-      const d2 = R * (2.0 + noise1(t * 0.45 + q * 3.1) * 2.6);
-      const sz = R * (4.6 + noise1(t * 0.5 + q * 11.7) * 3.8);
+    for (let q = 0; q < 5; q++) {
+      const a2 = q * 1.2566 + t * 0.32 + noise1(t * 0.6 + q * 7.3) * 2.6;
+      const d2 = R * (2.2 + noise1(t * 0.45 + q * 3.1) * 3.2);
+      const sz = R * (4.6 + noise1(t * 0.5 + q * 11.7) * 4.4);
       this.glow.puts(p.x + Math.cos(a2) * d2, p.y + Math.sin(a2) * d2, sz,
-        scaled(PAL.moteOuter, 0.15 * boost, c0), 1, S.GLOW);
+        scaled(PAL.moteOuter, 0.16 * boost, c0), 1, S.GLOW);
     }
     this.glow.push(p.x, p.y, R * 8.2 * Math.pow(el, 0.6), R * 7.4 * th, ang,
       PAL.moteOuter[0] * 0.52 * boost, PAL.moteOuter[1] * 0.52 * boost, PAL.moteOuter[2] * 0.52 * boost,
@@ -874,26 +940,21 @@ export class Scene {
       PAL.moteInner[0] * 1.05 * boost, PAL.moteInner[1] * 1.05 * boost, PAL.moteInner[2] * 1.05 * boost,
       1, S.GLOW);
 
-    // 3. caustic ring: the mote's light bent back through the water it displaces.
-    // Two radii in two tints reads as dispersion; brightest dead ahead.
-    const cr = R * (3.2 + Math.sin(t * 2.3) * 0.14) * (1 + sk * 0.42);
-    for (let pass = 0; pass < 3; pass++) {
-      const rk = pass === 0 ? 0.90 : pass === 1 ? 1.0 : 1.12;
-      const col = pass === 0 ? PAL.anchorCore : pass === 1 ? PAL.moteCore : PAL.moteOuter;
-      const amp = pass === 1 ? 0.68 : 0.26;
-      const nc = 22, cp = this._p1(nc);
-      for (let s = 0; s < nc; s++) {
-        const f = s / (nc - 1);
-        const a2 = (f * 2 - 1) * 2.65;
-        const rr = cr * rk * (1 + 0.06 * Math.sin(f * 7.3 + t * 1.9));
-        const lx = Math.cos(a2) * rr * (1 + sk * 0.55), ly = Math.sin(a2) * rr * (1 - sk * 0.28);
-        cp[s * 2] = p.x + lx * ca - ly * sa;
-        cp[s * 2 + 1] = p.y + lx * sa + ly * ca;
-      }
-      this.rGlow.stroke(cp, {
-        width: pass === 1 ? 2.4 : 3.6, color: col,
-        alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.25) * amp * (0.55 + 0.45 * boost), falloff: pass === 1 ? 22 : 9,
-      });
+    // 3. refraction bow: the mote's light bent back by the water it shoulders
+    // aside. Four soft fragments on an uneven arc *ahead* of the core - never a
+    // polyline and never closed, because any continuous thin curve around the
+    // player reads as a selection ring no matter how it is tinted.
+    const bowK = (0.22 + sk * 0.34) * boost;
+    for (let q = 0; q < 6; q++) {
+      const spread = (q * 0.38 - 0.88) + Math.sin(t * 0.7 + q * 2.3) * 0.11;
+      const rad = R * (2.15 + noise1(t * 0.5 + q * 5.7) * 0.75) * (1 + sk * 0.40);
+      const a2 = ang + spread;
+      const fx = p.x + Math.cos(a2) * rad * el * 0.8;
+      const fy = p.y + Math.sin(a2) * rad * el * 0.8;
+      const lobe = 1 - Math.abs(spread + 0.2) * 0.60;    // brightest just off-axis
+      const kk = bowK * clamp01(lobe) * (0.5 + noise1(t * 0.9 + q * 13.1) * 0.8);
+      this.glow.push(fx, fy, R * (1.05 + q * 0.10), R * 0.62, a2 + 1.5708,
+        PAL.moteInner[0] * kk, PAL.moteInner[1] * kk * 0.98, PAL.moteCore[2] * kk, 1, S.GLOW);
     }
 
     // 4. core: an anisotropic body with the dense point pushed forward, which is
@@ -910,13 +971,14 @@ export class Scene {
       1, S.CORE);
 
     // 5. anamorphic bleed, screen-horizontal. A real lens smears one axis; the
-    // old symmetric star was the giveaway that this was a sprite.
+    // old symmetric star was the giveaway that this was a sprite. Both bars are
+    // tall enough that their bright band is not a one-pixel scanline.
     const fl = 0.16 + lg * 1.05 + sk * 0.26;
     const rot = -(cam.rot || 0);
-    this.glow.push(p.x, p.y, R * (22 + lg * 62 + sk * 16), R * 1.05, rot,
-      PAL.moteOuter[0] * fl * 0.40, PAL.moteOuter[1] * fl * 0.46, PAL.moteOuter[2] * fl * 0.62, 1, S.STREAK);
-    this.glow.push(p.x, p.y, R * (9 + lg * 26), R * 0.34, rot,
-      PAL.moteCore[0] * fl * 0.85, PAL.moteCore[1] * fl * 0.85, PAL.moteCore[2] * fl * 0.85, 1, S.STREAK);
+    this.glow.push(p.x, p.y, R * (8 + lg * 50 + sk * 12), R * 3.6, rot,
+      PAL.moteOuter[0] * fl * 0.26, PAL.moteOuter[1] * fl * 0.30, PAL.moteOuter[2] * fl * 0.40, 1, S.STREAK);
+    this.glow.push(p.x, p.y, R * (8 + lg * 22), R * 2.6, rot,
+      PAL.moteCore[0] * fl * 0.42, PAL.moteCore[1] * fl * 0.42, PAL.moteCore[2] * fl * 0.42, 1, S.STREAK);
 
     // 6. the Hush breathing on your neck: a violet counter-rim, no HUD needed.
     const hp = g.hushProx || 0;
@@ -925,52 +987,53 @@ export class Scene {
         PAL.hushEdge[0] * hp * 0.55, PAL.hushEdge[1] * hp * 0.55, PAL.hushEdge[2] * hp * 0.55, 1, S.GLOW);
     }
 
-    // 7. shockwaves. Not donuts: a thin front with a hot leading edge, a wake
-    // behind it, and no back half at all.
-    if (lg > 0.02) this._shock(p.x, p.y, ang, lg, R * 2.2, R * 26, PAL.moteOuter, PAL.moteCore, 2.35, 3.7);
-    if (bg > 0.02) this._shock(p.x, p.y, ang + 2.6, bg, R * 3.0, R * 17, PAL.hazard, PAL.hazardRim, 1.95, 11.3);
+    // 7. shockwaves. Not donuts: a short bright front with a wake behind it and
+    // no back half at all.
+    if (lg > 0.02) this._shock(p.x, p.y, ang, lg, R * 2.2, R * 26, PAL.moteOuter, PAL.moteCore, 1.45, 3.7);
+    if (bg > 0.02) this._shock(p.x, p.y, ang + 2.6, bg, R * 3.0, R * 17, PAL.hazard, PAL.hazardRim, 1.20, 11.3);
   }
 
   /**
    * Expanding shock front. `k` runs 1 (born) -> 0 (spent); `ang` points along
-   * travel, `spread` is the arc half-angle.
+   * travel, `spread` is the arc half-angle - kept well under PI so the thing
+   * stays a bow rather than closing into a ring.
    */
   _shock(cx, cy, ang, k, r0, r1, col, hot, spread, seed) {
     const p = 1 - clamp01(k);
     const rad = r0 + (r1 - r0) * Math.pow(p, 0.55);
     const fade = Math.pow(clamp01(k), 0.70);
-    const n = 26;
+    const n = 22;
     const front = this._p2(n), wake = this._p3(n);
     for (let s = 0; s < n; s++) {
       const f = s / (n - 1);
       const a = ang + (f * 2 - 1) * spread;
       // A real front is not a circle.
-      const wob = 1 + 0.11 * (noise1(f * 5.5 + seed) - 0.5) * 2 + 0.045 * Math.sin(f * 9 + seed);
+      const wob = 1 + 0.13 * (noise1(f * 5.5 + seed) - 0.5) * 2 + 0.05 * Math.sin(f * 9 + seed);
       const cs = Math.cos(a), sn = Math.sin(a);
       front[s * 2] = cx + cs * rad * wob;
       front[s * 2 + 1] = cy + sn * rad * wob;
-      wake[s * 2] = cx + cs * rad * wob * 0.84;
-      wake[s * 2 + 1] = cy + sn * rad * wob * 0.84;
+      wake[s * 2] = cx + cs * rad * wob * 0.80;
+      wake[s * 2 + 1] = cy + sn * rad * wob * 0.80;
     }
     const lead = (f) => Math.pow(Math.sin(clamp01(f) * Math.PI), 1.35);
     this.rGlow.stroke(wake, {
-      width: rad * 0.30 * (0.35 + p), color: col,
+      width: rad * 0.34 * (0.35 + p), color: col,
       alpha: (f) => lead(f) * 0.085 * fade, falloff: 1.2,
     });
     this.rGlow.stroke(front, {
-      width: lerp(rad * 0.060, rad * 0.014, p) + 1.5, color: col,
-      alpha: (f) => lead(f) * 0.58 * fade, falloff: 5,
+      width: lerp(rad * 0.085, rad * 0.030, p) + wCore(3, 2.4), color: col,
+      alpha: (f) => lead(f) * 0.44 * fade, falloff: 2.4,
     });
     this.rGlow.stroke(front, {
-      width: lerp(4.5, 1.7, p), color: hot,
-      alpha: (f) => lead(f) * 0.85 * fade, falloff: 22,
+      width: lerp(wCore(6, 5), wCore(3.2, 5), p), color: hot,
+      alpha: (f) => lead(f) * 0.62 * fade, falloff: 5,
     });
     // Radial filaments streaming out behind the front.
     for (let q = 0; q < 3; q++) {
       const a = ang + (q - 1) * spread * 0.55;
       const cs = Math.cos(a), sn = Math.sin(a);
       this.rGlow.segment(cx + cs * rad * 0.55, cy + sn * rad * 0.55, cx + cs * rad, cy + sn * rad,
-        3.2, hot, 0.26 * fade * (1 - p * 0.55), 16);
+        wCore(4, 3.5), hot, 0.20 * fade * (1 - p * 0.55), 3.5);
     }
   }
 }

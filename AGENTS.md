@@ -111,6 +111,38 @@ premultiplied blending and light with additive blending; `render.js` shows the
 pass order. Sprite masks are stored gamma-encoded (`SPRITE_GAMMA`) so faint glow
 tails survive 8-bit quantisation.
 
+## The exposure contract (read this if you touch the image)
+
+The scene renders into an RGBA16F HDR target and `postfx.js` tonemaps it. Two
+different people author those halves, so without a shared reference they run
+away from each other. That already happened once: the water bulk sat at linear
+0.13, nothing in the frame exceeded 1.0, and the result was a milky mid-grey
+wall with no shadows, no highlights, and no shoulder for the tonemap to work on.
+
+**This is an abyss.** Targets, measured on the linear HDR scene *before*
+tonemapping, during gameplay:
+
+| statistic | target | why |
+|---|---|---|
+| `p50` (the bulk: water and rock) | **< 0.03** | most of the frame is deep shadow |
+| `p90` | < 0.15 | only a small part of the frame is lit |
+| `p99` | **> 0.25** | there must be real highlights |
+| `max` (emitter cores) | **> 6** | bloom and the tonemap shoulder need something genuinely hot |
+
+So: the environment authors a very dark, low bulk. Emitters — the mote core,
+anchor cores, plankton — are *bright*, well above 1.0. That contrast is what
+makes light look like light instead of like a blur filter.
+
+Measure it, do not guess:
+```js
+await page.evaluate(() => window.LUMEN.hdrStats())
+// -> { mean, p10, p50, p90, p99, max }  linear, pre-tonemap
+```
+And the final tonemapped frame should land at a mean sRGB luminance of roughly
+**0.08-0.20**. `node tools/check.mjs` asserts all of the above per scene, plus
+boot time, console errors, clipping, flatness, perf and determinism. **Run it
+before you declare done.**
+
 ## Pitfalls that have already bitten someone here
 - **Never put a backtick inside a GLSL template literal**, including in comments.
   It closes the string and breaks the whole file. Use single quotes in shader
@@ -125,6 +157,10 @@ tails survive 8-bit quantisation.
   during the simulated run. Drive simulation from `step`-reachable state only.
 - Write your file in **one atomic write**. A half-written file blocks every
   other agent's captures.
+- `-x ** 2` is a JavaScript **SyntaxError**. Write `-(x ** 2)`. This broke the
+  whole build once and blocked every other agent from capturing.
+- State that `newRun()` does not reset leaks between runs. Input is one such
+  thing: a probe that leaves the synthetic button held desyncs the next run.
 
 ## The quality bar
 A harsh critic will compare your output **blind, side by side** against the

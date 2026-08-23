@@ -76,6 +76,16 @@ const float SUN_SLANT = 0.215;   // world x the light drifts per unit of descent
 vec4  N (vec2 p){ return texture(uNoise, p); }
 float N1(vec2 p){ return texture(uNoise, p).r; }
 
+// uNoise packs four octaves into RGBA, so one fetch buys four frequencies. But
+// the tile is built by cross-fading four shifted copies, which averages the
+// variance away: a plain weighted SUM of channels sampled along a line measures
+// sd 0.04 about a mean of 0.6 - a field with no contrast, which is what starved
+// the first two passes of this file. Build from mean-centred deviations with an
+// explicit gain instead. GAIN is measured, not guessed: it restores sd ~0.21.
+const float DEBUG_FIELDS = 1.0;   // TEMP: field visualisation
+const float GAIN = 2.6;
+float dev(float v){ return v - 0.5; }
+
 vec2 unrot(vec2 p){ float c = cos(-uCamRot), s = sin(-uCamRot); return vec2(p.x*c - p.y*s, p.x*s + p.y*c); }
 
 // Screen -> world offset. sprites.js projects through uCamScale.y = -2/viewH,
@@ -111,13 +121,18 @@ vec3 absorb(vec3 c, float dist){
 float roofRaw(float wx){
   vec4 a = N(vec2(wx * 0.0000431, 0.137));
   vec4 b = N(vec2(wx * 0.0001400, 0.611));
-  return a.r * 0.40 + a.g * 0.22 + b.r * 0.26 + b.g * 0.16 + b.b * 0.10;
+  return 0.5 + (dev(a.r) * 1.12 + dev(a.g) * 0.34
+              + dev(b.g) * 0.30 + dev(b.a) * 0.14) * GAIN;
 }
-// Thresholded so roughly a quarter of the trench is genuinely open. Sitting the
-// threshold above the field's mean is what starved the whole frame of light on
-// the first pass: 'open' never reached 1, so nothing ever reached full value.
+// Measured against the real field: at soft=0, 20% of the trench is fully open
+// and 59% sealed, with median lit and sealed stretches both ~950 world units -
+// one bright hall and one dark reach per screen, the rhythm the frame hangs on.
+// 'soft' widens the transition about a FIXED midpoint, so blurring the beam
+// with depth spreads its light instead of deleting it. Widening one side only
+// costs real brightness: it is what left the mid-band water at 11% of target.
 float openAt(float raw, float soft){
-  return smoothstep(0.500 - soft * 0.160, 0.720 + soft * 0.700, raw);
+  float halfw = 0.110 + soft * 0.420;
+  return smoothstep(0.650 - halfw, 0.650 + halfw, raw);
 }
 
 // Downwelling light surviving to a point 'below' units under the roof. The
@@ -127,7 +142,7 @@ float openAt(float raw, float soft){
 float skyAt(float below, float raw){
   float open = openAt(raw, sat(below / 1900.0));
   float leak = 0.055 + 0.20 * openAt(raw, 1.0);   // thin rock, and bounce
-  return mix(leak, 1.0, open) * exp(-below / 1080.0);
+  return mix(leak, 1.0, open) * exp(-below / 1400.0);
 }
 
 vec3 mediumHue(float d){
@@ -155,25 +170,30 @@ float strata(vec2 w, out float fine){
   float bh = hash11(bi * 1.37 + 0.5);
   float bed = smoothstep(0.0, 0.13, bf) * (1.0 - smoothstep(0.74, 1.0, bf));
   vec4 g = N(w * 0.00135);                       // 185 / 93 / 46 / 23 units
-  fine = g.b * 0.62 + g.a * 0.38;
+  fine = sat(0.5 + (dev(g.b) * 0.85 + dev(g.a) * 0.50) * 1.9);
   float lam = sin(sy * 9.7 + tilt * 0.0042);
-  float vein = 1.0 - smoothstep(0.055, 0.0, abs(g.g - 0.5));
+  float vein = 1.0 - smoothstep(0.022, 0.0, abs(g.g - 0.5));
   return max(0.06, 1.0 + 1.15 * (bh - 0.5) + 0.34 * (bed - 0.5)
                        + 0.16 * lam + 0.40 * (fine - 0.5) - 0.34 * vein);
 }
 
-// Relief on the drawn silhouette. Biased into the rock, so the visible edge
-// pulls back from the swimmable band rather than intruding on it.
+// Surface roughness on the drawn silhouette. Deliberately small and strictly
+// one-signed: the drawn rock is always a little THICKER than the collision
+// rock, never thinner. A frame that draws rock as water gives the player an
+// invisible wall to crash into, which is the one lie this file must not tell.
+// The band's own 680-unit swing is the silhouette; this is just its texture.
 float relief(float wx, float seed){
   vec4 a = N(vec2(wx * 0.00046 + seed, seed * 0.71));
-  return (a.r * 0.52 + a.g * 0.28 + a.b * 0.14 + a.a * 0.10 - 0.30) * 74.0;
+  float broad = sat(0.5 + (dev(a.r) * 1.00 + dev(a.g) * 0.46) * GAIN);
+  float notch = sat(0.5 + (dev(a.b) * 0.90 + dev(a.a) * 0.55) * GAIN);
+  return 34.0 * pow(broad, 1.35) + 18.0 * pow(notch, 2.0);
 }
 
 // The rock the physics uses. Coverage in .a.
 vec4 trenchRock(vec2 w, float sky, float open, float caus){
   vec2 bd = bandAt(w.x);
-  float top = bd.x - relief(w.x, 3.1);
-  float bot = bd.y + relief(w.x, 11.7);
+  float top = bd.x + relief(w.x, 3.1);
+  float bot = bd.y - relief(w.x, 11.7);
   float soft = uViewSize.y * 0.0028;
   float dTop = top - w.y, dBot = w.y - bot;
   float cTop = sat(dTop / soft), cBot = sat(dBot / soft);
@@ -224,8 +244,8 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   vec2 w = toLayer(uv, s);
   vec4 na = N(vec2(w.x * 0.0000630 + seed, seed * 0.37));
   vec4 nb = N(vec2(w.x * 0.0001970 + seed * 1.7, seed * 0.83));
-  float nT = na.r * 0.46 + na.g * 0.24 + nb.r * 0.20 + nb.b * 0.10;
-  float nB = na.b * 0.40 + nb.g * 0.34 + na.a * 0.14 + nb.a * 0.12;
+  float nT = sat(0.5 + (dev(na.r) * 1.00 + dev(na.g) * 0.42 + dev(nb.b) * 0.20) * GAIN);
+  float nB = sat(0.5 + (dev(na.b) * 0.95 + dev(nb.g) * 0.48 + dev(nb.a) * 0.24) * GAIN);
   float top = -openT - nT * amp;
   float bot =  openB + nB * amp * 0.92;
   float soft = (uViewSize.y * 0.0055) / s;
@@ -312,8 +332,8 @@ void main(){
   float ramp = smoothstep(0.0, 240.0, below);
   float shim = 0.72 + 0.34 * sin(traceX * 0.0079 + uTime * 0.42)
                           * sin(traceX * 0.0215 - uTime * 0.27 + below * 0.0026);
-  float dust = 0.58 + 0.58 * N1(vec2(w.x * 0.00092 + flow.x * 0.05,
-                                     w.y * 0.00165 - uTime * 0.028));
+  float dust = 0.40 + 1.20 * sat(0.5 + dev(N1(vec2(w.x * 0.00092 + flow.x * 0.05,
+                                     w.y * 0.00165 - uTime * 0.028))) * 2.1);
   vec3 beamHue = absorb(uCSurf, below * 0.55 + 300.0);
   vec3 rays = beamHue * V_SHAFT * openShp * ramp * shim * dust * exp(-below / 1500.0);
   // The wide in-scatter halo either side of each beam.
@@ -337,7 +357,8 @@ void main(){
         float rad = 26.0 + hh * 0.20;
         float wob = (N1(vec2(w.y * 0.0011 + ci, uTime * 0.045)) - 0.5) * (30.0 + hh * 0.40);
         float dx = w.x - vx - wob;
-        float rip = 0.55 + 0.60 * N1(vec2(w.x * 0.0046 + ci, w.y * 0.0019 - uTime * 0.30));
+        float rip = 0.40 + 1.05 * sat(0.5 + dev(N1(vec2(w.x * 0.0046 + ci,
+                                       w.y * 0.0019 - uTime * 0.30))) * 2.2);
         vent = exp(-(dx * dx) / (rad * rad)) * exp(-hh / (430.0 + h1 * 640.0)) * rip;
         ventHot = exp(-(dx * dx) / 1500.0 - (hh * hh) / 11000.0);
       }
@@ -358,7 +379,7 @@ void main(){
   // ---------- silt: pools on the floor, and only where light finds it --------
   float above = max(0.0, bdN.y - w.y);
   vec4 sn = N(vec2(w.x * 0.00022 - uTime * 0.0035, w.y * 0.00052 + uTime * 0.0018));
-  float billow = sn.r * 0.50 + sn.g * 0.30 + sn.b * 0.20;
+  float billow = sat(0.5 + (dev(sn.r) * 1.00 + dev(sn.g) * 0.50 + dev(sn.b) * 0.28) * 2.1);
   col += absorb(uCSilt, 700.0) * V_SILT * exp(-above / (200.0 + 300.0 * billow))
        * (0.35 + 0.90 * billow) * sqrt(sat(sky * 3.0));
 
@@ -401,8 +422,8 @@ void main(){
     // A torn frontier, not a gradient: three scales of writhe along y, plus
     // tongues of nothing licking forward.
     vec4 fr = N(vec2(w.y * 0.00072, uTime * 0.019));
-    float front = (fr.r - 0.5) * 340.0 + (fr.g - 0.5) * 150.0 + (fr.b - 0.5) * 54.0;
-    front += pow(sat(N1(vec2(w.y * 0.0042 - 3.3, uTime * 0.026)) * 1.28), 5.0) * 560.0;
+    float front = (dev(fr.r) * 780.0 + dev(fr.g) * 330.0 + dev(fr.b) * 120.0);
+    front += pow(sat(0.5 + dev(N1(vec2(w.y * 0.0042 - 3.3, uTime * 0.026))) * 2.4), 4.0) * 620.0;
     float e = dxh - front;
 
     // Behind the front the water is unmade: it goes still, then colourless,
@@ -469,6 +490,10 @@ void main(){
   col += (hash12(gl_FragCoord.xy) - 0.5) * (0.00055 + lum * 0.0075);
 
   outColor = vec4(max(col, 0.0), 1.0);
+  if(DEBUG_FIELDS > 0.5){
+    // R = sharp beam mask, G = diffuse sky, B = far-wall coverage.
+    outColor = vec4(openShp, sky, r4.a + r3.a * 0.5, 1.0);
+  }
 }`;
 
 /** Palette entries are hue authorities only; brightness lives in the shader. */
