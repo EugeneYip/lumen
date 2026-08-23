@@ -408,7 +408,7 @@ export function boot() {
   window.game = game;
 
   const bootEl = document.getElementById('boot');
-  if (bootEl) { bootEl.classList.add('gone'); setTimeout(() => bootEl.remove(), 900); }
+  if (bootEl) bootEl.classList.add('gone');   // index.html owns removal
 
   if (headless) {
     // No rAF pump: the harness drives time explicitly for reproducible frames.

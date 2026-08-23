@@ -111,6 +111,21 @@ premultiplied blending and light with additive blending; `render.js` shows the
 pass order. Sprite masks are stored gamma-encoded (`SPRITE_GAMMA`) so faint glow
 tails survive 8-bit quantisation.
 
+## Pitfalls that have already bitten someone here
+- **Never put a backtick inside a GLSL template literal**, including in comments.
+  It closes the string and breaks the whole file. Use single quotes in shader
+  comments. This cost an agent its entire session's work.
+- **Never do per-step multiplies for damping/friction.** At 120Hz `v *= 0.86`
+  annihilates all velocity in under a second. Use `damp()` from `math.js`.
+- **Never schedule WebAudio automation per sim step.** Thousands of events on one
+  param at the same timestamp is quadratic in Chrome and made the capture
+  harness unusable.
+- In headless capture `render()` runs **once** at the end of thousands of
+  `step()` calls. Anything that depends on per-frame render state will not exist
+  during the simulated run. Drive simulation from `step`-reachable state only.
+- Write your file in **one atomic write**. A half-written file blocks every
+  other agent's captures.
+
 ## The quality bar
 A harsh critic will compare your output **blind, side by side** against the
 previous build and say which is better. It does not know or care which is yours.

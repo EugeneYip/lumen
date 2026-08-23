@@ -50,7 +50,16 @@
   };
   window.addEventListener('error', (e) => show(e.error?.stack || e.message));
   window.addEventListener('unhandledrejection', (e) => show(e.reason?.stack || e.reason));
-  import('./src/main.js').then(m => m.boot()).catch(e => show(e?.stack || e));
+  // The splash must be gone before the first captured frame, and must never
+  // linger over gameplay if a transition gets throttled.
+  const killBoot = () => {
+    const b = document.getElementById('boot');
+    if (b) { b.classList.add('gone'); b.remove(); }
+  };
+  const headless = new URLSearchParams(location.search).get('headless') === '1';
+  import('./src/main.js')
+    .then(m => { m.boot(); headless ? killBoot() : setTimeout(killBoot, 700); })
+    .catch(e => show(e?.stack || e));
 </script>
 </body>
 </html>

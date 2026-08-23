@@ -1,0 +1,248 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>LUMEN texture atlas</title>
+<style>
+  html,body{margin:0;background:#06080b;color:#c8d4e2;font:11px/1.25 ui-monospace,Menlo,monospace}
+  #wrap{position:relative}
+  canvas{position:absolute;left:0;top:0;display:block}
+</style></head>
+<body>
+<div id="wrap"><canvas id="gl"></canvas><canvas id="ov"></canvas></div>
+<script type="module">
+import { buildAll, S, SPRITE_GAMMA, SPRITE_LAYERS } from '../src/engine/textures.js';
+
+const q = new URLSearchParams(location.search);
+const PAGE = Number(q.get('page') || 0);
+
+const cg = document.getElementById('gl'), co = document.getElementById('ov');
+const gl = cg.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: true });
+if (!gl) throw new Error('no webgl2');
+
+const t0 = performance.now();
+const tex = buildAll(gl);
+const genMs = performance.now() - t0;
+
+// ---- programs ----
+function prog(vs, fs) {
+  const c = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
+    if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o) + '\n' + s); return o; };
+  const p = gl.createProgram();
+  gl.attachShader(p, c(gl.VERTEX_SHADER, '#version 300 es\n' + vs));
+  gl.attachShader(p, c(gl.FRAGMENT_SHADER, '#version 300 es\nprecision highp float;\n' + fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const nm = gl.getActiveUniform(p, i).name.replace('[0]', ''); u[nm] = gl.getUniformLocation(p, nm); }
+  return { p, u };
+}
+
+const VS = `
+uniform vec4 uRect; uniform vec2 uRes;
+out vec2 vUv;
+void main(){
+  vec2 c = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+  vUv = c;
+  vec2 px = uRect.xy + c * uRect.zw;
+  gl_Position = vec4(px / uRes * 2.0 - 1.0, 0.0, 1.0);
+  gl_Position.y = -gl_Position.y;
+}`;
+
+const spriteProg = prog(VS, `
+uniform highp sampler2DArray uAtlas;
+uniform float uLayer, uGain, uMode, uGamma;
+uniform vec3 uColor, uBg;
+in vec2 vUv; out vec4 o;
+void main(){
+  float m = pow(texture(uAtlas, vec3(vUv, uLayer)).a, uGamma);
+  if (uMode < 0.5) {                        // as the game sees it: HDR light, tonemapped
+    vec3 c = uColor * m * uGain + uBg;
+    o = vec4(1.0 - exp(-c), 1.0);
+  } else {                                  // raw mask + iso-contours every 0.1
+    float f = fract(m * 10.0);
+    float d = min(f, 1.0 - f) / max(fwidth(m) * 10.0, 1e-6);
+    float line = 1.0 - smoothstep(0.0, 1.2, d);
+    vec3 c = mix(vec3(m), vec3(0.25, 0.85, 1.0), line * 0.5 * step(0.004, m));
+    o = vec4(c, 1.0);
+  }
+}`);
+
+const blitProg = prog(VS, `
+uniform sampler2D uTex; uniform vec4 uSrc;
+in vec2 vUv; out vec4 o;
+void main(){ o = vec4(texture(uTex, uSrc.xy + vUv * uSrc.zw).rgb, 1.0); }`);
+
+const texProg = prog(VS, `
+uniform sampler2D uTex; uniform float uChan, uRepeat, uGain;
+in vec2 vUv; out vec4 o;
+void main(){
+  vec4 t = texture(uTex, vUv * uRepeat);
+  vec3 c = uChan > 3.5 ? t.rgb : vec3(uChan < 0.5 ? t.r : uChan < 1.5 ? t.g : uChan < 2.5 ? t.b : t.a);
+  o = vec4(c * uGain, 1.0);
+}`);
+
+// ---- offscreen for small-size (true mip) tests ----
+const FB = gl.createFramebuffer(), FT = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, FT);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.bindFramebuffer(gl.FRAMEBUFFER, FB);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, FT, 0);
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+let W = 1560, H = 200;
+function setSize(w, h) {
+  W = w; H = h;
+  for (const c of [cg, co]) { c.width = w; c.height = h; c.style.width = w + 'px'; c.style.height = h + 'px'; }
+  document.getElementById('wrap').style.height = h + 'px';
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.BLEND);
+  gl.clearColor(0.024, 0.031, 0.043, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+}
+
+function drawSprite(layer, rect, { mode = 0, gain = 1.6, color = [0.55, 0.85, 1.0], bg = [0.018, 0.026, 0.038], res = [W, H] } = {}) {
+  gl.useProgram(spriteProg.p);
+  gl.uniform4f(spriteProg.u.uRect, rect[0], rect[1], rect[2], rect[3]);
+  gl.uniform2f(spriteProg.u.uRes, res[0], res[1]);
+  gl.uniform1f(spriteProg.u.uLayer, layer);
+  gl.uniform1f(spriteProg.u.uGain, gain);
+  gl.uniform1f(spriteProg.u.uMode, mode);
+  gl.uniform1f(spriteProg.u.uGamma, SPRITE_GAMMA);
+  gl.uniform3fv(spriteProg.u.uColor, color);
+  gl.uniform3fv(spriteProg.u.uBg, bg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex.sprites);
+  gl.uniform1i(spriteProg.u.uAtlas, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+/** Render the sprite at its true pixel size (correct mip), then magnify NEAREST. */
+function drawSmall(layer, size, dest, opts) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, FB);
+  gl.viewport(0, 0, size, size);
+  gl.clearColor(0.024, 0.031, 0.043, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  drawSprite(layer, [0, 0, size, size], { ...opts, res: [size, size] });
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(blitProg.p);
+  gl.uniform4f(blitProg.u.uRect, dest[0], dest[1], dest[2], dest[3]);
+  gl.uniform2f(blitProg.u.uRes, W, H);
+  gl.uniform4f(blitProg.u.uSrc, 0, 0, size / 256, size / 256);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, FT);
+  gl.uniform1i(blitProg.u.uTex, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function drawTex(t, rect, { chan = 4, repeat = 1, gain = 1 } = {}) {
+  gl.useProgram(texProg.p);
+  gl.uniform4f(texProg.u.uRect, rect[0], rect[1], rect[2], rect[3]);
+  gl.uniform2f(texProg.u.uRes, W, H);
+  gl.uniform1f(texProg.u.uChan, chan);
+  gl.uniform1f(texProg.u.uRepeat, repeat);
+  gl.uniform1f(texProg.u.uGain, gain);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.uniform1i(texProg.u.uTex, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ---- labels ----
+const ctx = co.getContext('2d');
+function label(s, x, y, col = '#8fa6bd', size = 11, align = 'left') {
+  ctx.font = `${size}px ui-monospace, Menlo, monospace`;
+  ctx.fillStyle = col; ctx.textAlign = align; ctx.textBaseline = 'top';
+  ctx.fillText(s, x, y);
+}
+function box(x, y, w, h, col = 'rgba(255,255,255,0.10)') {
+  ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+}
+
+const NAMES = Object.entries(S).sort((a, b) => a[1] - b[1]);
+
+// ================================================================= pages ====
+const BIG = 168, ROW = 196, PAD = 14;
+const SMALLS = [[48, 2], [24, 4], [12, 8], [8, 10]];
+
+function spritePage(from, to) {
+  const rows = to - from;
+  setSize(1180, rows * ROW + 46);
+  label(`LUMEN sprite kit  —  layers ${from}..${to - 1} of ${SPRITE_LAYERS}   buildAll ${genMs.toFixed(0)}ms`, 12, 12, '#dfe9f5', 13);
+  label('light (HDR, tonemapped)        mask + isolines/0.1        true size 48 / 24 / 12 / 8 px (magnified, real mips)', 12, 28, '#5d7490');
+  for (let i = from; i < to; i++) {
+    const row = i - from, y = 46 + row * ROW;
+    const nm = (NAMES.find(e => e[1] === i) || ['?'])[0];
+    label(`${i}  ${nm}`, 12, y + 6, '#e8f1fb', 12);
+    let x = 108;
+    drawSprite(i, [x, y, BIG, BIG]); box(x, y, BIG, BIG); x += BIG + PAD;
+    drawSprite(i, [x, y, BIG, BIG], { mode: 1 }); box(x, y, BIG, BIG); x += BIG + PAD;
+    for (const [s, mag] of SMALLS) {
+      const d = s * mag;
+      drawSmall(i, s, [x, y + (BIG - d) / 2, d, d]);
+      box(x, y + (BIG - d) / 2, d, d, 'rgba(255,255,255,0.06)');
+      label(`${s}px`, x, y + BIG - 12, '#4d647c', 10);
+      x += Math.max(d, 46) + PAD;
+    }
+  }
+}
+
+function supportPage() {
+  setSize(1180, 900);
+  label(`support textures   buildAll ${genMs.toFixed(0)}ms`, 12, 12, '#dfe9f5', 13);
+  const T = 190;
+  let x = 12, y = 40;
+  for (let c = 0; c < 4; c++) {
+    drawTex(tex.noise, [x, y, T, T], { chan: c }); box(x, y, T, T);
+    label(`noise .${'rgba'[c]}  1x`, x, y + T + 4, '#8fa6bd');
+    x += T + 12;
+  }
+  y += T + 26; x = 12;
+  drawTex(tex.noise, [x, y, T * 2, T * 2], { chan: 0, repeat: 3 }); box(x, y, T * 2, T * 2);
+  label('noise .r  3x3 tiled  (seam check)', x, y + T * 2 + 4, '#8fa6bd');
+  x += T * 2 + 16;
+  drawTex(tex.dirt, [x, y, T * 2, T * 2], { chan: 0, gain: 1 }); box(x, y, T * 2, T * 2);
+  label('lens dirt 1x', x, y + T * 2 + 4, '#8fa6bd');
+  x += T * 2 + 16;
+  drawTex(tex.dirt, [x, y, T, T], { chan: 0, repeat: 2 }); box(x, y, T, T);
+  label('dirt 2x2 (seam)', x, y + T + 4, '#8fa6bd');
+  drawTex(tex.dirt, [x, y + T + 20, T, T], { chan: 0, gain: 3 }); box(x, y + T + 20, T, T);
+  label('dirt x3 gain', x, y + T * 2 + 24, '#8fa6bd');
+  y += T * 2 + 30;
+  drawTex(tex.spectrum, [12, y, 600, 40]); box(12, y, 600, 40);
+  label('spectrum LUT', 12, y + 44, '#8fa6bd');
+}
+
+// stacking test: how the falloff family layers up
+function stackPage() {
+  setSize(1180, 560);
+  label('falloff family — is there real variety? each drawn same size, then stacked', 12, 12, '#dfe9f5', 13);
+  const fam = ['CORE', 'GLOW', 'VOLUME', 'VEIL', 'HALO', 'RING'].filter(n => n in S);
+  const T = 176; let x = 12;
+  for (const n of fam) {
+    drawSprite(S[n], [x, 36, T, T], { gain: 1.5 }); box(x, 36, T, T);
+    label(n, x, 36 + T + 4, '#8fa6bd');
+    x += T + 10;
+  }
+  // additive stack, mimicking how render.js layers light
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  const cx = 300, cy = 300;
+  const drawAdd = (n, size, gain, col) => { if (!(n in S)) return;
+    drawSprite(S[n], [cx - size / 2, cy - size / 2, size, size], { gain, color: col, bg: [0, 0, 0] }); };
+  drawAdd('VEIL', 460, 0.30, [0.10, 0.32, 0.55]);
+  drawAdd('VOLUME', 230, 0.55, [0.25, 0.65, 0.95]);
+  drawAdd('GLOW', 130, 1.1, [0.45, 0.85, 1.0]);
+  drawAdd('CORE', 54, 2.6, [0.9, 1.0, 1.0]);
+  gl.disable(gl.BLEND);
+  box(cx - 240, cy - 240, 480, 480);
+  label('stacked: VEIL+VOLUME+GLOW+CORE (a real light)', cx - 240, cy + 244, '#8fa6bd');
+}
+
+if (PAGE === 0) spritePage(0, Math.min(10, SPRITE_LAYERS));
+else if (PAGE === 1) spritePage(10, Math.min(20, SPRITE_LAYERS));
+else if (PAGE === 2) spritePage(20, SPRITE_LAYERS);
+else if (PAGE === 3) supportPage();
+else stackPage();
+
+window.__genMs = genMs;
+window.__ready = true;
+</script>
+</body></html>

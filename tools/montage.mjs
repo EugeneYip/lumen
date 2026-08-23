@@ -79,15 +79,24 @@ if (MODE === 'pair') {
   await mkdir(OUT, { recursive: true });
 
   const fa = await pngs(A), fb = await pngs(B);
-  const n = Math.min(fa.length, fb.length);
-  if (!n) { console.error('no comparable frames'); process.exit(1); }
+  // Pair by scene name, not by index: a mismatched scene list would otherwise
+  // silently compare a launch frame against a title frame.
+  const tag = (f) => basename(f, '.png').replace(/^frame-\d*-?/, '') || f;
+  const mapB = new Map(fb.map(f => [tag(f), f]));
+  const pairs = fa.map(f => [f, mapB.get(tag(f))]).filter(([, b]) => b);
+  const n = pairs.length;
+  if (!n) {
+    console.error(`no comparable frames (A: ${fa.map(tag).join(',')} | B: ${fb.map(tag).join(',')})`);
+    process.exit(1);
+  }
 
   const key = [];
   for (let i = 0; i < n; i++) {
-    const scene = basename(fa[i], '.png').replace(/^frame-\d*-?/, '') || String(i);
+    const [af, bf] = pairs[i];
+    const scene = tag(af);
     const flip = rnd() < 0.5;
-    const left = flip ? join(B, fb[i]) : join(A, fa[i]);
-    const right = flip ? join(A, fa[i]) : join(B, fb[i]);
+    const left = flip ? join(B, bf) : join(A, af);
+    const right = flip ? join(A, af) : join(B, bf);
     // assume 16:9 sources; the cell keeps aspect via object-fit anyway
     const cellW = (TOTAL - 3) / 2, cellH = Math.round(cellW * 9 / 16);
     const html = SHELL(`<div class=wrap>
@@ -98,7 +107,7 @@ if (MODE === 'pair') {
     const out = join(OUT, `pair-${String(i).padStart(2, '0')}-${scene}.png`);
     await shoot(html, TOTAL, cellH, out);
     key.push({ file: basename(out), scene, LEFT: flip ? 'B' : 'A', RIGHT: flip ? 'A' : 'B',
-      A: relative(ROOT, join(A, fa[i])), B: relative(ROOT, join(B, fb[i])) });
+      A: relative(ROOT, join(A, af)), B: relative(ROOT, join(B, bf)) });
     console.log(`  ${basename(out)}`);
   }
   await writeFile(join(OUT, 'key.json'), JSON.stringify({ A: relative(ROOT, A), B: relative(ROOT, B), pairs: key }, null, 2));
