@@ -39,6 +39,7 @@ const REACH = 620;
 const GRAVITY = 1850;
 const DRAG_Q = 0.00028, DRAG_L = 0.17;
 const RADIUS = 15, WALL_REST = 0.58;
+const ROPE_MIN = 190, ROPE_MAX = 560;   // the annulus a tethered mote sweeps
 // The vent is a current with a velocity target, and its strength scales with the
 // trench - so the corridor profile below is what decides how good a rescue the
 // floor is. Keep these in step with P.vent* or the arcs lie about the low line.
@@ -180,7 +181,7 @@ export class World {
   /** The rising trend, pure in x. The sequencer uses this, never difficultyAt. */
   _trend(x) {
     const t = clamp01(x / 31000);
-    return clamp01(0.35 * t + 0.65 * smoothstep(t)) * lerp(0.55, 1, smoothstep(clamp01(x / 3000)));
+    return clamp01(0.35 * t + 0.65 * smoothstep(t)) * lerp(0.40, 1, smoothstep(clamp01(x / 6000)));
   }
 
   /**
@@ -572,6 +573,7 @@ export class World {
     }
 
     this._layAnchors(p, r, A, d);
+    this._pruneTraps(A, d);
     this._layHazards(p, r, A, H, d);
     this._layPlankton(p, r, A, H, K, d);
     this._layDecor(p, r, D);
@@ -598,7 +600,7 @@ export class World {
     // Never ask for more than a fraction of the modelled carry. The arc tracks
     // reality at the median but over-predicts by up to 1.5x in the tail, and the
     // tail is precisely where an unfair gap would live.
-    const reachX = this._ax + (this._arcBuf[(this._arcN - 1) * 2] - this._ax) * 0.82;
+    const reachX = this._ax + (this._arcBuf[(this._arcN - 1) * 2] - this._ax) * 0.80;
     const x = reachX < wantX ? reachX : wantX;
     if (x <= this._ax + 120) return null;
 
@@ -656,22 +658,31 @@ export class World {
       A.push(a); this._ax = a.x; this._ay = a.y; k = 1;
     }
     let x = this._ax + this._gapFor(p, r, 0, d);
+    const prim = [];
     while (x < p.x1 && guard++ < 40) {
       const a = this._anchorAt(p, r, x, k, d);
       if (!a) { x += 130; continue; }
-      A.push(a);
+      prim.push(a);
       this._ax = a.x; this._ay = a.y;
-      // One high line covers a corridor only ~940 tall (2 * reach - the line's
-      // own offset), so anything deeper leaves dead water above the floor that
-      // nothing can be grabbed from. A low line closes that, and where the two
-      // lines are more than a reach apart it also reads as a real second route:
-      // safe high, fast low.
-      const bot = this.bandBot(a.x);
-      if (bot - a.y > 700 && r.chance(p.twin ? 0.72 : 0.34)) {
-        const lo = this._lowAnchor(r, a, p.twin ? 680 : 470);
-        if (lo) A.push(lo);
-      }
       x = a.x + this._gapFor(p, r, ++k, d);
+    }
+    for (let i = 0; i < prim.length; i++) A.push(prim[i]);
+
+    // One high line covers a corridor only ~940 tall (2 * reach less the line's
+    // own offset), so anything deeper leaves water above the floor that nothing
+    // can be grabbed from. A low line closes that, and where the two lines are
+    // more than a reach apart it also reads as a real second route: safe high,
+    // fast low.
+    // Only under a bulb that has a successor here: a low bulb past the last
+    // primary cannot be checked for an exit, because its exit would live in a
+    // phrase that does not exist yet - and an unverified low bulb is a trap.
+    const lastX = prim.length ? prim[prim.length - 1].x : -Infinity;
+    for (let i = 0; i + 1 < prim.length; i++) {
+      const a = prim[i];
+      if (this.bandBot(a.x) - a.y <= 700) continue;
+      if (!r.chance(p.twin ? 0.72 : 0.34)) continue;
+      const lo = this._lowAnchor(r, a, p.twin ? 680 : 470);
+      if (lo && lo.x < lastX - 60) A.push(lo);
     }
   }
 
@@ -683,7 +694,45 @@ export class World {
     const rad = r.range(19, 26);
     const y = clamp(bot - r.range(215, 430), top + rad * 1.7 + 26, bot - (rad * 5.2 + 40));
     if (y - a.y < minSep) return null;
-    return this._mkAnchor(r, x, y, rad, top, bot);
+    const lo = this._mkAnchor(r, x, y, rad, top, bot);
+    lo.low = true;
+    return lo;
+  }
+
+  /** Is there any bulb ahead that a release from `a` actually reaches? */
+  _hasExit(A, a, d) {
+    this._arc(a.x, a.y, d, a.x + 1700);
+    const n = this._arcN, buf = this._arcBuf;
+    // Tighter than the primary chain's 0.80: this bulb was inserted, not placed
+    // against an arc, and near the floor the vent current makes the model most
+    // optimistic of all. Err toward dropping it.
+    const lim = a.x + (buf[(n - 1) * 2] - a.x) * 0.68;
+    const R2 = REACH * REACH * 0.49;
+    for (let j = 0; j < A.length; j++) {
+      const b = A[j];
+      if (b === a || b.x <= a.x + 60 || b.x > lim + 240) continue;
+      for (let s = 0; s < n; s++) {
+        const dx = buf[s * 2] - b.x, dy = buf[s * 2 + 1] - b.y;
+        if (dx * dx + dy * dy < R2) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The primary chain is reachable by construction - each bulb is placed against
+   * the arc from the one before it. A low-road bulb is inserted opportunistically
+   * and gets no such guarantee, so one with no exit strands the mote. Drop it and
+   * let the vent current cover that water instead.
+   */
+  _pruneTraps(A, d) {
+    let lastPrim = -Infinity;
+    for (let i = 0; i < A.length; i++) if (!A[i].low && A[i].x > lastPrim) lastPrim = A[i].x;
+    for (let i = A.length - 1; i >= 0; i--) {
+      const a = A[i];
+      if (!a.low || a.x >= lastPrim) continue;   // its exit may live in the next phrase
+      if (!this._hasExit(A, a, d)) A.splice(i, 1);
+    }
   }
 
   _bayAnchors(p, r, A, d) {
@@ -778,12 +827,32 @@ export class World {
     return true;
   }
 
-  _urchin(r, H, p, x, y, radLo, radHi) {
+  /**
+   * A tethered mote cannot dodge the bottom of its own arc - it is on rails
+   * until it lets go. So a hazard at swing radius almost directly beneath a bulb
+   * is not a timing choice, it is a toll: grab that bulb and you are hit. Keep
+   * the bottom of the swing annulus clear. To the side of it hazards are fair
+   * game, because there you still have a line past them - and that is where a
+   * hazard genuinely does change when you release.
+   */
+  _swingClear(A, x, y, kill) {
+    for (let i = 0; i < A.length; i++) {
+      const a = A[i];
+      const dx = x - a.x, dy = y - a.y;
+      const d = Math.hypot(dx, dy);
+      if (d > ROPE_MAX + kill + 40 || d < ROPE_MIN - kill - 40) continue;
+      if (Math.abs(Math.atan2(dx, dy)) < 0.80) return false;   // 0 = straight down
+    }
+    return true;
+  }
+
+  _urchin(r, H, p, x, y, radLo, radHi, A) {
     x = clamp(x, Math.max(p.x0 + 20, START_SAFE), p.x1 - 20);
     if (x <= START_SAFE) return;
     const rad = r.range(radLo, radHi);
     if (!this._fits(x, y, rad, 0)) return;
     const kill = rad * 0.62 + RADIUS;
+    if (A && !this._swingClear(A, x, y, kill)) return;
     if (!this._spaced(H, x, y, kill)) return;
     if (!this._passable(H, x, y - kill, y + kill)) return;
     H.push({
@@ -792,7 +861,7 @@ export class World {
     });
   }
 
-  _jelly(r, H, p, x, y, ampWant) {
+  _jelly(r, H, p, x, y, ampWant, A) {
     x = clamp(x, Math.max(p.x0 + 20, START_SAFE), p.x1 - 20);
     if (x <= START_SAFE) return;
     const rad = r.range(34, 52);
@@ -800,6 +869,7 @@ export class World {
     const kill = rad * 0.62 + RADIUS;
     const amp = Math.min(ampWant, y - top - kill - 80, bot - y - kill - 80);
     if (amp < 40 || !this._fits(x, y, rad, amp)) return;
+    if (A && !this._swingClear(A, x, y, kill + amp)) return;
     if (!this._spaced(H, x, y, kill + amp)) return;
     if (!this._passable(H, x, y - amp - kill, y + amp + kill)) return;
     H.push({
@@ -817,27 +887,27 @@ export class World {
 
     switch (p.hazard) {
       case 'wall': {
-        const n = r.int(1, 2);
+        const n = r.int(1, 1 + Math.round(d * 2));
         for (let i = 0; i < n; i++) {
           const x = at(r.range(0.15, 0.85));
           const up = r.chance(0.5);
-          this._urchin(r, H, p, x, up ? this._onCeil(r, p, x) : this._onFloor(r, p, x), 38, 62);
+          this._urchin(r, H, p, x, up ? this._onCeil(r, p, x) : this._onFloor(r, p, x), 38, 62, A);
         }
         break;
       }
       case 'floor': {
-        const n = r.int(2, 4 + Math.round(d * 2));
+        const n = r.int(1, 3 + Math.round(d * 3));
         for (let i = 0; i < n; i++) {
           const x = at((i + r.range(0.2, 0.8)) / n);
-          this._urchin(r, H, p, x, this._onFloor(r, p, x), 42, 70);
+          this._urchin(r, H, p, x, this._onFloor(r, p, x), 42, 70, A);
         }
         break;
       }
       case 'ceil': {
-        const n = r.int(2, 3);
+        const n = r.int(1, 2 + Math.round(d * 2));
         for (let i = 0; i < n; i++) {
           const x = at((i + r.range(0.2, 0.8)) / n);
-          this._urchin(r, H, p, x, this._onCeil(r, p, x), 40, 66);
+          this._urchin(r, H, p, x, this._onCeil(r, p, x), 40, 66, A);
         }
         break;
       }
@@ -850,8 +920,8 @@ export class World {
           const tl = Math.hypot(s.tx, s.ty) || 1;
           const off = r.range(215, 310) * (r.chance(0.5) ? 1 : -1);
           const hx = s.x - (s.ty / tl) * off, hy = s.y + (s.tx / tl) * off;
-          if (r.chance(0.45)) this._jelly(r, H, p, hx, hy, r.range(80, 190));
-          else this._urchin(r, H, p, hx, hy, 40, 62);
+          if (r.chance(0.45)) this._jelly(r, H, p, hx, hy, r.range(80, 190), A);
+          else this._urchin(r, H, p, hx, hy, 40, 62, A);
         }
         break;
       }
@@ -860,21 +930,21 @@ export class World {
         // other side of it. The pinch chooses your line before you arrive.
         const side = r.chance(0.5);
         const x = at(clamp(p.fc + (r.chance(0.5) ? -1 : 1) * p.fw * r.range(0.85, 1.05), 0.08, 0.92));
-        this._urchin(r, H, p, x, side ? this._onCeil(r, p, x) : this._onFloor(r, p, x), 34, 52);
+        this._urchin(r, H, p, x, side ? this._onCeil(r, p, x) : this._onFloor(r, p, x), 34, 52, A);
         break;
       }
       case 'field': {
-        const n = r.int(3, 6 + Math.round(d * 3));
+        const n = r.int(2, 4 + Math.round(d * 4));
         for (let i = 0; i < n; i++) {
           const x = at((i + r.range(0.15, 0.85)) / n);
           const floor = r.chance((i & 1) === 0 ? 0.76 : 0.28);
-          this._urchin(r, H, p, x, floor ? this._onFloor(r, p, x) : this._onCeil(r, p, x), 42, 70);
+          this._urchin(r, H, p, x, floor ? this._onFloor(r, p, x) : this._onCeil(r, p, x), 42, 70, A);
         }
         // Plus a couple hanging in the middle of the swing line.
         for (let i = 0; i < A.length - 1; i++) {
           if (!r.chance(0.42)) continue;
           const s = this._arcBetween(A[i], A[i + 1], d, r.range(0.35, 0.7));
-          if (s) this._jelly(r, H, p, s.x, s.y + r.range(180, 330), r.range(90, 200));
+          if (s) this._jelly(r, H, p, s.x, s.y + r.range(180, 330), r.range(90, 200), A);
         }
         break;
       }
@@ -882,9 +952,9 @@ export class World {
         const cx = at(p.fc);
         for (let i = 0; i < r.int(2, 4); i++) {
           const x = cx + r.range(-0.32, 0.32) * p.len * p.fw;
-          this._urchin(r, H, p, x, this._onFloor(r, p, x), 44, 72);
+          this._urchin(r, H, p, x, this._onFloor(r, p, x), 44, 72, A);
         }
-        if (r.chance(0.6)) { const x = cx + r.range(-120, 120); this._urchin(r, H, p, x, this._onCeil(r, p, x), 38, 58); }
+        if (r.chance(0.6)) { const x = cx + r.range(-120, 120); this._urchin(r, H, p, x, this._onCeil(r, p, x), 38, 58, A); }
         break;
       }
       case 'vent': {
@@ -892,7 +962,7 @@ export class World {
         const v = p.vents || [];
         for (let i = 0; i < v.length; i++) {
           if (!r.chance(0.5)) continue;
-          this._urchin(r, H, p, v[i], this.bandBot(v[i]) - r.range(150, 330), 38, 58);
+          this._urchin(r, H, p, v[i], this.bandBot(v[i]) - r.range(150, 330), 38, 58, A);
         }
         break;
       }
@@ -900,12 +970,12 @@ export class World {
         for (let k = 0; k <= p.bayN; k++) {
           if (!r.chance(0.42)) continue;
           const x = p.x0 + p.len * (k / p.bayN);
-          this._urchin(r, H, p, x, this._onFloor(r, p, x), 40, 64);
+          this._urchin(r, H, p, x, this._onFloor(r, p, x), 40, 64, A);
         }
         if (r.chance(0.7)) {
           const u = (r.int(0, p.bayN - 1) + 0.5) / p.bayN;
           const x = p.x0 + p.len * u;
-          this._jelly(r, H, p, x, (this.bandTop(x) + this.bandBot(x)) * 0.5, r.range(120, 240));
+          this._jelly(r, H, p, x, (this.bandTop(x) + this.bandBot(x)) * 0.5, r.range(120, 240), A);
         }
         break;
       }
@@ -926,6 +996,7 @@ export class World {
             const a2 = Math.min(amp, y - top - rad - 110, bot - y - rad - 110);
             if (a2 < 40) continue;
             const kk = rad * 0.62 + RADIUS;
+            if (!this._swingClear(A, x, y, kk + a2)) continue;
             if (!this._passable(H, x, y - a2 - kk, y + a2 + kk)) continue;
             H.push({
               kind: KIND.JELLY, x: x + r.range(-26, 26), y, y0: y, r: rad,
@@ -937,7 +1008,7 @@ export class World {
         break;
       }
       default: {   // 'sparse'
-        if (r.chance(0.45)) { const x = at(r()); this._urchin(r, H, p, x, this._onFloor(r, p, x), 40, 66); }
+        if (r.chance(0.45)) { const x = at(r()); this._urchin(r, H, p, x, this._onFloor(r, p, x), 40, 66, A); }
         break;
       }
     }
