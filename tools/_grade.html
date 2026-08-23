@@ -1,0 +1,149 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>LUMEN grade bench</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style></head>
+<body><canvas id="gl"></canvas>
+<script type="module">
+// Scratch bench: pushes a KNOWN HDR test pattern through Post so the grade can
+// be judged (hue through the shoulder, bloom falloff, near-black banding)
+// without depending on whatever the game scene currently looks like.
+import { createContext, compile, FS_VS, drawFullscreen, GLSL_COMMON } from '../src/engine/gl.js';
+import { buildAll } from '../src/engine/textures.js';
+import { Post, GRADE } from '../src/engine/postfx.js';
+
+const q = new URLSearchParams(location.search);
+const W = Number(q.get('w') || 1600), H = Number(q.get('h') || 900);
+const MUL = Number(q.get('mul') || 1);
+const STATE = q.get('state') || 'idle';
+
+const cv = document.getElementById('gl');
+cv.width = W; cv.height = H; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+const { gl } = createContext(cv);
+
+const PATTERN_FS = `
+${GLSL_COMMON}
+uniform vec2 uRes;
+uniform float uMul;
+in vec2 vUv; out vec4 outColor;
+
+vec3 hueOf(int i){
+  if(i==0) return vec3(1.00, 0.66, 0.24);   // amber anchor
+  if(i==1) return vec3(0.18, 0.82, 1.00);   // cyan mote
+  if(i==2) return vec3(0.48, 1.00, 0.72);   // mint plankton
+  if(i==3) return vec3(1.00, 0.18, 0.36);   // magenta hazard
+  if(i==4) return vec3(0.52, 0.28, 1.00);   // violet hush
+  return vec3(1.0);
+}
+
+float emit(vec2 s, vec2 p, float aspect, float k){
+  vec2 d = (s - p) * vec2(aspect, 1.0);
+  float r = length(d);
+  return exp(-r*r*(2600.0/k)) + pow(max(0.0, 1.0 - r/(0.06*sqrt(k))), 4.0)*0.14;
+}
+
+void main(){
+  float aspect = uRes.x / uRes.y;
+  vec2 s = vec2(vUv.x, 1.0 - vUv.y);
+  vec3 c = vec3(0.0);
+
+  if(s.y < 0.10){
+    // exposure ramp, 2^-9 .. 2^3: reads the toe and the shoulder at a glance
+    c = vec3(exp2(mix(-9.0, 3.0, s.x)));
+  } else if(s.y < 0.135){
+    c = vec3(0.0);
+  } else if(s.y < 0.205){
+    // six hues at HDR 3.5 - the hue-through-the-shoulder test
+    c = hueOf(int(floor(s.x * 6.0))) * 3.5;
+  } else if(s.y < 0.235){
+    c = vec3(0.0);
+  } else if(s.y < 0.295){
+    // the same six at 0.8 - hue fidelity below display white
+    c = hueOf(int(floor(s.x * 6.0))) * 0.8;
+  } else if(s.y < 0.325){
+    c = vec3(0.0);
+  } else if(s.y < 0.38){
+    // grey steps 2^-8 .. 2^-1
+    c = vec3(exp2(-8.0 + floor(s.x * 8.0)));
+  } else {
+    // --- the abyss: near-black teal, slow gradient, point emitters ---
+    float g = (s.y - 0.38) / 0.62;
+    c = vec3(0.0016, 0.0072, 0.0140) * mix(2.8, 0.14, g);
+
+    // rulers: thin bright lines read CA and edge softness across the frame
+    if(s.y > 0.400 && s.y < 0.428)
+      c += vec3(1.8) * smoothstep(1.4, 0.0, abs(mod(gl_FragCoord.x, 44.0) - 22.0));
+    if(abs(s.x - 0.455) < 0.005)
+      c += vec3(1.8) * smoothstep(1.4, 0.0, abs(mod(gl_FragCoord.y, 44.0) - 22.0));
+
+    // three rows of emitters, two stops apart each
+    for(int i=0;i<4;i++){
+      float fi = float(i);
+      float px = 0.045 + fi * 0.088;
+      float I = exp2(-1.5 + fi * 2.0);          // 0.35 1.4 5.7 22.6
+      c += emit(s, vec2(px, 0.520), aspect, 1.0) * hueOf(0) * I;
+      c += emit(s, vec2(px, 0.645), aspect, 1.0) * hueOf(1) * I;
+      c += emit(s, vec2(px, 0.770), aspect, 1.0) * hueOf(2) * I;
+    }
+    // hero pair, side by side and equally hot: if these two cores look the
+    // same colour, the tonemap is not preserving hue.
+    c += emit(s, vec2(0.62, 0.600), aspect, 8.0) * hueOf(0) * 18.0;
+    c += emit(s, vec2(0.82, 0.600), aspect, 8.0) * hueOf(1) * 18.0;
+    // a lone dim mote far from anything, to check it still reads
+    c += emit(s, vec2(0.72, 0.870), aspect, 1.0) * hueOf(2) * 0.9;
+
+    // near-black wedge along the bottom: pure banding test
+    if(s.y > 0.925) c = vec3(0.10, 0.42, 0.55) * (s.x * 0.026);
+  }
+  outColor = vec4(c * uMul, 1.0);
+}`;
+
+// ?g=halation:1.2,veil:0.5 overrides GRADE for A/B without editing defaults
+for (const kv of (q.get('g') || '').split(',').filter(Boolean)) {
+  const [k, v] = kv.split(':');
+  if (k in GRADE) GRADE[k] = Number(v);
+}
+
+const pPattern = compile(gl, FS_VS, PATTERN_FS, 'pattern');
+const tex = buildAll(gl);
+const post = new Post(gl, tex);
+post.resize(W, H);
+
+const STATES = {
+  idle:   {},
+  launch: { launchGlow: 0.95, flash: 0.22, flashCol: [0.55, 0.85, 1], attached: false },
+  fast:   { speedK: 0.95, launchGlow: 0.2 },
+  hush:   { hushProx: 0.88, speedK: 0.35 },
+  slow:   { slow: 0.8, speedK: 0.4 },
+  dead:   { mode: 'dead', deadT: 1.2 },
+  teth:   { attached: true, launchGlow: 0.1 },
+};
+
+const ctx = Object.assign({
+  t: 3.25, dt: 1 / 60, mode: 'play', deadT: 0,
+  depth: 420, difficulty: 0.4, attached: false, speed: 900,
+  speedK: 0, hushProx: 0, launchGlow: 0, brushGlow: 0, tetherGlow: 0,
+  slow: 0, flash: 0, flashCol: [1, 1, 1], fade: 1, envDim: 1,
+  waves: [{ live: false }, { live: false }],
+  cam: { worldToUv: () => [0.5, 0.5] },
+}, STATES[STATE] || {});
+
+post.beginScene();
+gl.useProgram(pPattern.program);
+gl.uniform2f(pPattern.u.uRes, W, H);
+gl.uniform1f(pPattern.u.uMul, MUL);
+drawFullscreen(gl);
+post.render(ctx);
+
+// crude timing: 40 composites back to back
+const t0 = performance.now();
+for (let i = 0; i < 40; i++) post.render(ctx);
+gl.finish();
+window.__ms = (performance.now() - t0) / 40;
+post.beginScene();
+gl.useProgram(pPattern.program);
+gl.uniform2f(pPattern.u.uRes, W, H);
+gl.uniform1f(pPattern.u.uMul, MUL);
+drawFullscreen(gl);
+post.render(ctx);
+window.__ready = true;
+</script>
+</body></html>
