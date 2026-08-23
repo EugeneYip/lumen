@@ -51,7 +51,7 @@ const CORE_MIN = 4.2;    // world units: below this a ribbon core aliases to dot
 // core sitting at 1.2 leaves the entire response curve unexercised and light
 // stops looking like light. Hot regions are kept a few pixels wide so the bulk
 // of the frame stays deep shadow (p50 < 0.03).
-const HOT = 12;          // the mote nucleus: the hottest thing in the world
+const HOT = 13;          // the mote nucleus: the hottest thing in the world
 
 /** Ribbon width that renders a visible core `core` units wide at `falloff`. */
 const wCore = (core, falloff) => Math.max(core, CORE_MIN) * Math.sqrt(falloff / 0.693);
@@ -640,7 +640,7 @@ export class Scene {
     const ccx = bx + stx(cf), ccy = lerp(axTop, axBot, cf) + sty(cf);
     this.glow.push(ccx, ccy, r * 0.92, r * 0.80, 0,
       PAL.anchorCore[0] * k * 3.4, PAL.anchorCore[1] * k * 3.0, PAL.anchorCore[2] * k * 2.1, 1, S.GLOW);
-    this.glow.push(ccx, ccy, r * 3.4, r * 3.0, 0,
+    this.glow.push(ccx, ccy, r * 6.5, r * 5.6, 0,
       PAL.anchorCore[0] * k * 11, PAL.anchorCore[1] * k * 9.6, PAL.anchorCore[2] * k * 6.4, 1, S.CORE);
 
     // Rim that catches the bulb's own light. Warm, and subordinate to the core.
@@ -959,7 +959,7 @@ export class Scene {
       PAL.moteInner[0] * 4.0 * boost, PAL.moteInner[1] * 4.0 * boost, PAL.moteInner[2] * 4.0 * boost,
       1, S.CORE);
     const nx = p.x + dx * R * 0.34 * el, ny = p.y + dy * R * 0.34 * el;
-    this.glow.push(nx, ny, R * 19 * Math.pow(el, 0.30), R * 16 * th, ang,
+    this.glow.push(nx, ny, R * 22 * Math.pow(el, 0.30), R * 18.5 * th, ang,
       PAL.moteCore[0] * HOT * boost, PAL.moteCore[1] * HOT * boost, PAL.moteCore[2] * HOT * boost,
       1, S.CORE);
     this.glow.push(p.x - dx * R * 0.7 * el, p.y - dy * R * 0.7 * el, R * 0.9, R * 0.55, ang,
@@ -1000,27 +1000,29 @@ export class Scene {
   _shock(cx, cy, ang, k, r0, r1, col, hot, spread, seed) {
     const p = 1 - clamp01(k);
     const rad = r0 + (r1 - r0) * Math.pow(p, 0.55);
-    const fade = Math.pow(clamp01(k), 0.85);
+    const fade = Math.pow(clamp01(k), 1.30);
 
     // Displaced water: elongated *across* travel, so it reads as a wall being
     // shouldered aside rather than a ball centred on the player.
-    const pk = fade * 0.26;
+    const pk = fade * 0.30;
     this.glow.push(cx + Math.cos(ang) * rad * 0.30, cy + Math.sin(ang) * rad * 0.30,
       rad * 1.4, rad * 2.3, ang, col[0] * pk, col[1] * pk, col[2] * pk, 1, S.GLOW);
 
-    for (let q = 0; q < 7; q++) {
+    // Splash, not needles: elongated S.GLOW has no hard core anywhere, so these
+    // stay smears. S.STREAK's tight band turned them into clean drawn spikes.
+    for (let q = 0; q < 5; q++) {
       const h1 = noise1(q * 3.7 + seed), h2 = noise1(q * 8.3 + seed + 41);
-      const a = ang + (q / 6 - 0.5) * 2 * spread + (h1 - 0.5) * 0.30;
-      const rr = rad * (0.70 + h2 * 0.50);
+      const a = ang + (q / 4 - 0.5) * 2 * spread + (h1 - 0.5) * 0.42;
+      const rr = rad * (0.62 + h2 * 0.42);
       const lobe = Math.pow(Math.cos(clamp((a - ang) / spread, -1, 1) * 1.35), 2);
-      const kk = fade * lobe * (0.30 + h1 * 0.80) * (1 - p * 0.30);
-      this.glow.push(cx + Math.cos(a) * rr * 0.70, cy + Math.sin(a) * rr * 0.70,
-        rr * (0.55 + h2 * 0.45), rad * 0.15 + 7, a,
-        col[0] * kk, col[1] * kk, col[2] * kk, 1, S.STREAK);
-      if (h1 > 0.45) {
-        this.glow.push(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr,
-          rr * 0.30, rad * 0.10 + 6, a,
-          hot[0] * kk * 1.5, hot[1] * kk * 1.5, hot[2] * kk * 1.5, 1, S.STREAK);
+      const kk = fade * lobe * (0.34 + h1 * 0.80) * (1 - p * 0.45);
+      this.glow.push(cx + Math.cos(a) * rr * 0.52, cy + Math.sin(a) * rr * 0.52,
+        rr * (0.42 + h2 * 0.30), rad * 0.26 + 10, a,
+        col[0] * kk, col[1] * kk, col[2] * kk, 1, S.GLOW);
+      if (h1 > 0.50) {
+        this.glow.push(cx + Math.cos(a) * rr * 0.78, cy + Math.sin(a) * rr * 0.78,
+          rr * 0.26, rad * 0.15 + 8, a,
+          hot[0] * kk * 1.3, hot[1] * kk * 1.3, hot[2] * kk * 1.3, 1, S.GLOW);
       }
     }
   }

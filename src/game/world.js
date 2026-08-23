@@ -31,8 +31,10 @@ const GEN_AHEAD = 3200;        // world units of lookahead to keep populated
 const START_SAFE = 1500;       // no hazards before this x - the opening teaches
 
 // Mirrors of player.js. Generation must not import it (that would close an
-// import cycle), so these are copies; the reachability margin below is wide
-// enough that a moderate physics retune cannot turn a gap unfair.
+// import cycle), so these are copies. Do not trust them on their own: the arc
+// they feed is calibrated against the real Player class by tools/_reach.mjs,
+// which sweeps release timings and asserts no anchor is a dead end. Re-run it
+// whenever these change.
 const REACH = 620;
 const GRAVITY = 1850;
 const DRAG_Q = 0.00028, DRAG_L = 0.17;
@@ -177,7 +179,7 @@ export class World {
 
   /** The rising trend, pure in x. The sequencer uses this, never difficultyAt. */
   _trend(x) {
-    const t = clamp01(x / 42000);
+    const t = clamp01(x / 31000);
     return clamp01(0.35 * t + 0.65 * smoothstep(t)) * lerp(0.55, 1, smoothstep(clamp01(x / 3000)));
   }
 
@@ -283,15 +285,15 @@ export class World {
     const calmPrev = t <= 0.24 && prev2 && prev2.ten <= 0.30;
     const W = [];
     const add = (k, w) => { if (w > 0 && k !== prev.kind) { W.push(k); W.push(w); } };
-    add(PH.OPEN, calmPrev ? 0 : lerp(1.5, 0.5, d));
+    add(PH.OPEN, calmPrev ? 0 : lerp(1.5, 0.34, d));
     add(PH.WEAVE, lerp(1.1, 1.8, d) * (t < 0.32 ? 1.6 : 0.8));
     add(PH.LEAP, x0 > 2400 ? lerp(0.7, 1.5, d) : 0);
     add(PH.DESCENT, x0 > 3400 ? 1.1 : 0);
     add(PH.ASCENT, x0 > 4600 ? 0.85 : 0);
     add(PH.PINCH, x0 > 2800 ? lerp(0.70, 1.60, d) : 0);
     add(PH.CHAMBER, calmPrev ? 0 : lerp(0.9, 0.65, d) * (t > 0.45 ? 1.6 : 0.7));
-    add(PH.GARDEN, calmPrev ? 0 : lerp(1.2, 0.8, d) * (t > 0.45 ? 1.8 : 0.5));
-    add(PH.GAUNTLET, x0 > 7000 ? lerp(0.2, 1.7, d) : 0);
+    add(PH.GARDEN, calmPrev ? 0 : lerp(1.2, 0.55, d) * (t > 0.45 ? 1.8 : 0.5));
+    add(PH.GAUNTLET, x0 > 7000 ? lerp(0.2, 2.3, d) : 0);
     add(PH.SHAFT, x0 > 12000 ? lerp(0.15, 0.75, d) : 0);
     if (!W.length) return PH.OPEN;
     let sum = 0;
@@ -312,13 +314,14 @@ export class World {
     let bayN = 0, bayTop = 0, bayBot = 0;
     let wavN = 0, wavAmp = 0;
     let line = 'mid', twin = false, hazard = 'sparse', pk = 'trail', decor = 'mixed';
+    let vary = 0.05;             // vertical spread of the bulb line within a phrase
 
     switch (kind) {
       case PH.OPEN:
         len = r.range(900, 1500); hh = r.range(455, 575); dCy = r.range(-170, 170);
         rough = r.range(0.75, 1.05);
         wavN = r.range(0.8, 1.6); wavAmp = r.range(60, 150);
-        gapLo = 380; gapHi = 480; ten = 0.22;
+        gapLo = 380; gapHi = 480; ten = 0.22; vary = 0.11;
         break;
 
       case PH.WEAVE:
@@ -368,7 +371,7 @@ export class World {
         len = r.range(1300, 2000); hh = r.range(740, 960); dCy = r.range(-270, 160);
         rough = r.range(0.9, 1.2);
         fw = 0.5; fTop = -r.range(140, 300); fBot = r.range(110, 240);
-        gapLo = 510; gapHi = 700; ten = 0.18;
+        gapLo = 510; gapHi = 700; ten = 0.18; vary = 0.13;
         line = 'high'; twin = true; pk = 'cloud'; decor = 'vista';
         break;
 
@@ -376,7 +379,7 @@ export class World {
         len = r.range(950, 1450); hh = r.range(535, 665); dCy = r.range(-130, 210);
         rough = r.range(0.7, 1.0);
         wavN = r.range(0.9, 1.7); wavAmp = r.range(70, 165);
-        gapLo = 415; gapHi = 540; ten = 0.10;
+        gapLo = 415; gapHi = 540; ten = 0.10; vary = 0.15;
         hazard = 'none'; pk = 'garden'; decor = 'lush';
         break;
 
@@ -467,7 +470,7 @@ export class World {
       fc, fw, fwInv: fw > 0 ? 1 / fw : 0, fTop, fBot,
       bayN, bayTop, bayBot,
       wavN, wavAmp, wavPh: r() * TAU,
-      rough, ten, tIn: (prevTen + ten) * 0.5,
+      rough, ten, tIn: (prevTen + ten) * 0.5, vary,
       gapLo, gapHi, longAt, longGap,
       line, twin, hazard, pk, decor,
       objFrom: Math.max(x0, -700),
@@ -485,7 +488,9 @@ export class World {
    */
   _arc(ax, ay, d, maxX) {
     const rope = lerp(360, 300, d);          // after reeling, above P.ropeMin
-    const spd = lerp(1150, 1600, d);         // swing speed plus P.releaseBoost
+    // Measured, not assumed: a real loaded release leaves at ~750-960 (p10-p90
+    // over a hold sweep). Guessing high here is what produced dead-end anchors.
+    const spd = lerp(880, 1080, d);
     let x = ax + rope * LA_S, y = ay + rope * LA_C;
     let vx = spd * LA_C, vy = -spd * LA_S;
     const b = this._arcBuf;
@@ -590,8 +595,11 @@ export class World {
    */
   _anchorAt(p, r, wantX, k, d, radWant) {
     this._arc(this._ax, this._ay, d, wantX);
-    const reachX = this._arcBuf[(this._arcN - 1) * 2];
-    const x = reachX < wantX ? reachX - 40 : wantX;
+    // Never ask for more than a fraction of the modelled carry. The arc tracks
+    // reality at the median but over-predicts by up to 1.5x in the tail, and the
+    // tail is precisely where an unfair gap would live.
+    const reachX = this._ax + (this._arcBuf[(this._arcN - 1) * 2] - this._ax) * 0.82;
+    const x = reachX < wantX ? reachX : wantX;
     if (x <= this._ax + 120) return null;
 
     const top = this.bandTop(x), bot = this.bandBot(x);
@@ -611,7 +619,7 @@ export class World {
     // One line also only covers about 2*reach of corridor, so in a tall chamber
     // it drifts toward the middle instead of hugging the roof.
     const drift = Math.max(0, hh - 950) * 0.00017;
-    const frac = clamp((zig ? 0.55 : pol.f) + drift + r.range(-0.05, 0.05), 0.07, 0.54);
+    const frac = clamp((zig ? 0.55 : pol.f) + drift + r.range(-p.vary, p.vary), 0.07, 0.56);
     const yArc = this._arcYAt(x);
     let y = clamp(top + Math.min(hh, 1500) * frac, yArc - pol.up, yArc + pol.down);
     y = clamp(y, lo, hi);
@@ -818,7 +826,7 @@ export class World {
         break;
       }
       case 'floor': {
-        const n = r.int(2, 4);
+        const n = r.int(2, 4 + Math.round(d * 2));
         for (let i = 0; i < n; i++) {
           const x = at((i + r.range(0.2, 0.8)) / n);
           this._urchin(r, H, p, x, this._onFloor(r, p, x), 42, 70);
@@ -856,7 +864,7 @@ export class World {
         break;
       }
       case 'field': {
-        const n = r.int(3, 6);
+        const n = r.int(3, 6 + Math.round(d * 3));
         for (let i = 0; i < n; i++) {
           const x = at((i + r.range(0.15, 0.85)) / n);
           const floor = r.chance((i & 1) === 0 ? 0.76 : 0.28);
@@ -1184,7 +1192,7 @@ export class World {
     // A far, desaturated stratum in every phrase. Without it a wide chamber is
     // an empty frame, and there is nothing for the near silhouettes to read
     // against.
-    for (let i = 0, n = r.int(2, 4); i < n; i++) {
+    for (let i = 0, n = r.int(2, 4) + Math.round(p.len / 900); i < n; i++) {
       const up = r.chance(0.5);
       const fx = clamp(at(r()), p.x0 + 10, p.x1 - 10);
       D.push({
@@ -1217,11 +1225,12 @@ export class World {
         if (r.chance(0.75)) this._spireRidge(D, r, p, at(r()), r.range(160, 300), r.int(2, 5), false);
         break;
 
-      case 'vista':          // scale: big far formations, almost nothing near
-        for (let i = 0, n = r.int(2, 4); i < n; i++) {
+      case 'vista':          // scale: big far formations, sparse near ones
+        for (let i = 0, n = r.int(3, 5); i < n; i++) {
           this._spireRidge(D, r, p, at(r()), r.range(220, 420), r.int(3, 6), r.chance(0.5));
         }
-        if (r.chance(0.75)) this._kelpBed(D, r, p, at(r()), 220, r.int(4, 9), r.range(0.3, 0.9));
+        this._kelpBed(D, r, p, at(r()), 220, r.int(4, 9), r.range(0.3, 0.9));
+        if (r.chance(0.7)) this._anemoneColony(D, r, p, at(r()), 150, r.int(3, 7), true);
         break;
 
       case 'kelpwood': {
