@@ -35,14 +35,16 @@ await page.setViewport({ width: 1600, height: 900 });
 
 for (const c of CASES) {
   const [state, mul, gover] = c.split(':');
-  const url = `http://127.0.0.1:${PORT}/tools/_grade.html?state=${state}&mul=${mul || 1}&g=${encodeURIComponent(gover || '')}`;
+  const url = `http://127.0.0.1:${PORT}/tools/_grade.html?scene=${process.env.SCENE || 'bars'}&state=${state}&mul=${mul || 1}&g=${encodeURIComponent(gover || '')}`;
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   try { await page.waitForFunction('window.__ready === true', { timeout: 25000, polling: 50 }); }
   catch { errs.push(c + ' never ready'); continue; }
-  const ms = await page.evaluate(() => window.__ms);
+  const m = await page.evaluate(() => ({ ms: window.__ms, mean: window.__mean, hdr: window.__hdr }));
   const name = `g-${state}-x${String(mul || 1).replace('.', '_')}${gover ? '-' + gover.replace(/[:.]/g, '_') : ''}.png`;
   await page.screenshot({ path: join(OUT, name), clip: { x: 0, y: 0, width: 1600, height: 900 } });
-  console.log(`${name}   post ${ms.toFixed(2)}ms/frame`);
+  const h = m.hdr;
+  console.log(`${name}\n   post ${m.ms.toFixed(2)}ms  finalMean ${m.mean.toFixed(4)}`
+    + `  | hdr p50 ${h.p50.toFixed(4)} p90 ${h.p90.toFixed(3)} p99 ${h.p99.toFixed(3)} max ${h.max.toFixed(1)}`);
 }
 await browser.close();
 server.close();

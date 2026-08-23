@@ -89,6 +89,7 @@ async function runAutopilot(seed) {
   const r = await page.evaluate(async (secs) => {
     const g = window.game, FIXED = 1 / 120;
     g.startPlay();
+    g.input.setSynthetic(false); g.input.endFrame();   // newRun does not clear it
     const steps = Math.round(secs / FIXED);
     const speeds = [], deaths = [], distSeries = [];
     let attachedSteps = 0, stallSteps = 0, floorSteps = 0, releases = 0, wasAttached = false, runs = 1;
@@ -266,6 +267,240 @@ async function runPolicy(seed, secs) {
   return r;
 }
 
+// ------------------------------------------------------------------ hold ----
+/**
+ * The decision, measured. Same world, same start; the only variable is how long
+ * the button is held before it comes up. If distance is monotonic in hold time
+ * then holding is always right and there is no decision to make. We want an
+ * interior maximum with a visible penalty on both sides of it.
+ */
+async function runHold(seed, secs) {
+  const page = await newPage(seed);
+  const r = await page.evaluate(async (fxSrc, rigSrc, secs) => {
+    const g = window.game, FIXED = 1 / 120;
+    const fx = eval(fxSrc), RIG = eval(rigSrc);
+    const out = [];
+    for (let h = 0.1; h <= 2.81; h += 0.1) {
+      g.startPlay();
+      const w = g.world; RIG.clear(w);
+      const p = g.player;
+      const speeds = [];
+      let releases = 0, qSum = 0;
+      const steps = Math.round(secs / FIXED);
+      for (let i = 0; i < steps; i++) {
+        const was = p.attached;
+        const want = p.attached ? p.holdTime < h : true;
+        p.update(FIXED, w, { held: want }, fx, i * FIXED);
+        w.update(FIXED, i * FIXED, Math.max(p.x, 0));
+        if (was && !p.attached) { releases++; qSum += p.releaseQ || 0; }
+        speeds.push(p.speed);
+        if (!p.alive) break;
+      }
+      out.push({
+        hold: +h.toFixed(1), dist: Math.round(p.maxX / 10), releases,
+        vMean: Math.round(speeds.reduce((s, x) => s + x, 0) / Math.max(1, speeds.length)),
+        q: +(qSum / Math.max(1, releases)).toFixed(2),
+        alive: p.alive, cause: p.deathCause || '-',
+      });
+    }
+    return out;
+  }, FX_SRC, RIG_SRC, secs);
+  await page.close();
+  return r;
+}
+
+// ------------------------------------------------------------------- cam ----
+/** Log camera state across a launch: does it anticipate, punch, and settle? */
+async function runCam(seed, secs) {
+  const page = await newPage(seed);
+  const r = await page.evaluate(async (secs) => {
+    const g = window.game, FIXED = 1 / 120;
+    g.startPlay();
+    g.input.setSynthetic(false); g.input.endFrame();
+    const out = [];
+    let lastSeq = g.player.launchSeq, capture = -1;
+    let maxRot = 0, maxShake = 0, maxPunch = 0, zMin = 9, zMax = 0;
+    const steps = Math.round(secs / FIXED);
+    for (let i = 0; i < steps; i++) {
+      g.input.setSynthetic(g.autopilot());
+      g.step(FIXED);
+      g.input.endFrame();
+      const p = g.player, c = g.cam;
+      maxRot = Math.max(maxRot, Math.abs(c.rot));
+      maxShake = Math.max(maxShake, Math.hypot(c.shakeX, c.shakeY));
+      maxPunch = Math.max(maxPunch, Math.hypot(c.punchX, c.punchY));
+      zMin = Math.min(zMin, c.zoom); zMax = Math.max(zMax, c.zoom);
+      // grab the window around the first well-timed launch after 3s
+      if (capture < 0 && p.launchSeq !== lastSeq && i * FIXED > 3 && (p.releaseQ || 0) > 0.5) capture = i;
+      lastSeq = p.launchSeq;
+      if (capture >= 0 && i >= capture - 42 && i <= capture + 108 && (i - capture) % 6 === 0) {
+        out.push({
+          d: i - capture, wind: +(p.windUp || 0).toFixed(2), antic: +c.antic.toFixed(2),
+          lag: Math.round(c.baseX - p.x), punch: Math.round(c.punchX),
+          zoom: +c.zoom.toFixed(3), rot: +(c.rot * 57.3).toFixed(2),
+          shake: Math.round(Math.hypot(c.shakeX, c.shakeY)), v: Math.round(p.speed),
+          rw: +(p.releaseWindow || 0).toFixed(2), q: +(p.releaseQ || 0).toFixed(2),
+        });
+      }
+    }
+    return { out, maxRot: +(maxRot * 57.3).toFixed(2), maxShake: Math.round(maxShake), maxPunch: Math.round(maxPunch), zMin: +zMin.toFixed(3), zMax: +zMax.toFixed(3) };
+  }, secs);
+  await page.close();
+  return r;
+}
+
+// ----------------------------------------------------------------- stuck ----
+/** Run the autopilot, catch the worst no-progress window, dump what happened. */
+async function runStuck(seed, secs) {
+  const page = await newPage(seed);
+  const r = await page.evaluate(async (secs) => {
+    const g = window.game, FIXED = 1 / 120;
+    g.startPlay();
+    g.input.setSynthetic(false); g.input.endFrame();
+    const steps = Math.round(secs / FIXED);
+    let run = 0, best = null, lastX = g.player.x;
+    const ring = [];
+    for (let i = 0; i < steps; i++) {
+      g.input.setSynthetic(g.autopilot());
+      g.step(FIXED);
+      g.input.endFrame();
+      const p = g.player, w = g.world;
+      if (g.mode === 'dead') { g.startPlay(); run = 0; lastX = g.player.x; ring.length = 0; continue; }
+      if (p.x - lastX < 0.05) run++; else run = 0;
+      lastX = p.x;
+      if (i % 12 === 0) {
+        ring.push({
+          t: +(i * FIXED).toFixed(2), x: Math.round(p.x), y: Math.round(p.y),
+          top: Math.round(w.bandTop(p.x)), bot: Math.round(w.bandBot(p.x)),
+          v: Math.round(p.speed), vx: Math.round(p.vx), vy: Math.round(p.vy),
+          att: p.attached ? 1 : 0, hold: +p.holdTime.toFixed(2),
+          rope: Math.round(p.rope), ax: p.anchor ? Math.round(p.anchor.x) : 0,
+          ay: p.anchor ? Math.round(p.anchor.y) : 0,
+          draft: +(p.inDraft || 0).toFixed(2), rw: +(p.releaseWindow || 0).toFixed(2),
+          anc: g.world.pickAnchor(p.x, p.y, p.vx, p.vy, 620) ? 1 : 0,
+          dgr: g._pathDanger(p, 0.42) ? 1 : 0,
+        });
+        if (ring.length > 90) ring.shift();
+      }
+      if (run > 140 && (!best || run > best.run)) best = { run, at: i * FIXED, trace: [...ring] };
+    }
+    return best;
+  }, secs);
+  await page.close();
+  return r;
+}
+
+// ------------------------------------------------------------------ tune ----
+/**
+ * Sweep P overrides against the autopilot without editing the file. ES modules
+ * are cached, so importing player.js from the page hands back the same object
+ * main.js is using and mutating P takes effect live.
+ *
+ *   --mode tune --vals "gravity=1560;gravity=1700;gravity=2050" --seeds 3,7,11
+ */
+async function runTune(seed, variants, secs) {
+  const page = await newPage(seed);
+  const r = await page.evaluate(async (variants, secs) => {
+    const g = window.game, FIXED = 1 / 120;
+    const mod = await import('/src/game/player.js');
+    const base = { ...mod.P };
+    const out = [];
+    for (const v of variants) {
+      Object.assign(mod.P, base);
+      for (const [k, val] of Object.entries(v.set)) mod.P[k] = val;
+      g.startPlay();
+      g.input.setSynthetic(false); g.input.endFrame();   // newRun does not clear it
+      const speeds = [];
+      let att = 0, draft = 0, floor = 0, stall = 0, noAnc = 0, free = 0;
+      let deaths = 0, totalDist = 0, runStart = g.player.x, releases = 0, wasAtt = false;
+      const steps = Math.round(secs / FIXED);
+      for (let i = 0; i < steps; i++) {
+        g.input.setSynthetic(g.autopilot());
+        g.step(FIXED);
+        g.input.endFrame();
+        const p = g.player;
+        if (g.mode === 'dead') {
+          deaths++; totalDist += p.maxX - runStart;
+          g.startPlay(); runStart = g.player.x; wasAtt = false;
+          continue;
+        }
+        speeds.push(p.speed);
+        if (p.attached) att++; else {
+          free++;
+          if (!g.world.pickAnchor(p.x, p.y, p.vx, p.vy, mod.P.reach)) noAnc++;
+        }
+        if (wasAtt && !p.attached) releases++;
+        wasAtt = p.attached;
+        if ((p.inDraft || 0) > 0.02) draft++;
+        if ((g.world.bandBot(p.x) - p.y) < 200) floor++;
+        if (p.speed < 220) stall++;
+      }
+      totalDist += g.player.maxX - runStart;
+      const n = Math.max(1, speeds.length);
+      out.push({
+        label: v.label, dist: Math.round(totalDist / 10), deaths, releases,
+        v: Math.round(speeds.reduce((s, x) => s + x, 0) / n),
+        att: att / n, draft: draft / n, floor: floor / n, stall: stall / n,
+        noAnc: noAnc / Math.max(1, free),
+      });
+    }
+    Object.assign(mod.P, base);
+    return out;
+  }, variants, secs);
+  await page.close();
+  return r;
+}
+
+// ----------------------------------------------------------------- phase ----
+/**
+ * The real decision variable. A closed loop that grabs whatever is in reach and
+ * lets go the moment the rope passes `deg` ahead of the anchor while swinging
+ * forward. Sweeping `deg` sweeps "when do I let go" directly, with the pendulum
+ * period taken out of the picture. This curve is the game.
+ */
+async function runPhase(seed, secs) {
+  const page = await newPage(seed);
+  const r = await page.evaluate(async (fxSrc, rigSrc, secs) => {
+    const g = window.game, FIXED = 1 / 120;
+    const fx = eval(fxSrc), RIG = eval(rigSrc);
+    const out = [];
+    for (let deg = -30; deg <= 90.1; deg += 5) {
+      g.startPlay();
+      const w = g.world; RIG.clear(w);
+      const p = g.player;
+      const target = deg * Math.PI / 180;
+      const speeds = [];
+      let releases = 0, qSum = 0, stall = 0;
+      const steps = Math.round(secs / FIXED);
+      for (let i = 0; i < steps; i++) {
+        let want = true;
+        if (p.attached) {
+          const phi = RIG.phi(p, p.anchor);
+          if (p.holdTime > 0.06 && RIG.rising(p, p.anchor) && phi >= target) want = false;
+          if (p.holdTime > 3.2) want = false;          // never hang forever
+        }
+        const was = p.attached;
+        p.update(FIXED, w, { held: want }, fx, i * FIXED);
+        w.update(FIXED, i * FIXED, Math.max(p.x, 0));
+        if (was && !p.attached) { releases++; qSum += p.releaseQ || 0; }
+        speeds.push(p.speed);
+        if (p.speed < 220) stall++;
+        if (!p.alive) break;
+      }
+      out.push({
+        deg, dist: Math.round(p.maxX / 10), releases,
+        vMean: Math.round(speeds.reduce((s, x) => s + x, 0) / Math.max(1, speeds.length)),
+        q: +(qSum / Math.max(1, releases)).toFixed(2),
+        stallFrac: stall / Math.max(1, speeds.length),
+        alive: p.alive, cause: p.deathCause || '-',
+      });
+    }
+    return out;
+  }, FX_SRC, RIG_SRC, secs);
+  await page.close();
+  return r;
+}
+
 // ------------------------------------------------------------------ pump ----
 async function runPump(seed) {
   const page = await newPage(seed);
@@ -349,7 +584,7 @@ try {
         `${String(r.seed).padEnd(5)}${pad(r.finalDist, 5)}${pad(r.totalDist, 5)} ${pad(r.runs, 4)} ${cs.padEnd(16)}` +
         `${pad(Math.round(pct(r.speeds, 0.10)), 5)}/${pad(Math.round(pct(r.speeds, 0.5)), 4)}/${pad(Math.round(pct(r.speeds, 0.9)), 4)}/${pad(Math.round(Math.max(...r.speeds)), 4)}` +
         `  ${pad(f1(r.attachFrac * 100), 5)}  ${pad(f1(r.stallFrac * 100), 5)}  ${pad(f1(r.floorFrac * 100), 5)}  ${pad(f1(r.draftFrac * 100), 5)}  ${pad(f1(r.noAnchorFrac * 100), 5)}  ${pad(r.minHushLag, 6)}` +
-        `${r.worstStuck > 120 ? '  STUCK!' : ''}`
+        `${r.worstStuck > 120 ? '  STUCK ' + f1(r.worstStuck / 120) + 's' : ''}`
       );
     }
     const all = rows.flatMap(r => r.speeds);
@@ -382,6 +617,82 @@ try {
       }
       const sl = rows.find(r => r.kind === 'sloppy');
       console.log(`  good/sloppy = ${f1(good.dist / Math.max(1, sl.dist))}x   good/mash = ${f1(good.dist / Math.max(1, rows.find(r => r.kind === 'mash').dist))}x   good/cling = ${f1(good.dist / Math.max(1, rows.find(r => r.kind === 'cling').dist))}x\n`);
+    }
+  } else if (MODE === 'hold') {
+    for (const s of SEEDS) {
+      const rows = await runHold(s, SECS);
+      const best = rows.reduce((b, r) => (r.dist > b.dist ? r : b), rows[0]);
+      console.log(`\nseed ${s} - distance vs hold time over ${SECS}s (no hazards, no Hush)`);
+      console.log(' hold  dist(m)  rel  vMean    q  payoff');
+      for (const r of rows) {
+        const bar = '#'.repeat(Math.max(0, Math.round((r.dist / Math.max(1, best.dist)) * 34)));
+        console.log(`${pad(r.hold, 5)} ${pad(r.dist, 8)} ${pad(r.releases, 4)} ${pad(r.vMean, 6)} ${pad(r.q, 4)}  ${bar}${r.hold === best.hold ? ' <= best' : ''}${r.alive ? '' : ' died:' + r.cause}`);
+      }
+      const first = rows[0], last = rows[rows.length - 1];
+      console.log(`best hold=${best.hold}s dist=${best.dist}m   short(0.1s)=${first.dist}m (${f1(first.dist / best.dist * 100)}%)   long(${last.hold}s)=${last.dist}m (${f1(last.dist / best.dist * 100)}%)`);
+      console.log(best.hold > first.hold && best.hold < last.hold ? 'INTERIOR OPTIMUM: holding has a cost as well as a benefit.' : 'MONOTONIC: no decision to make.');
+    }
+  } else if (MODE === 'cam') {
+    for (const s of SEEDS) {
+      const r = await runCam(s, SECS);
+      console.log(`\nseed ${s}: camera across one good launch (d = steps from release)`);
+      console.log(`  extremes over ${SECS}s: |rot| max ${r.maxRot}deg  shake max ${r.maxShake}u  punch max ${r.maxPunch}u  zoom ${r.zMin}..${r.zMax}`);
+      console.log('    d  wind antic   lag punch   zoom    rot shake    v   rw    q');
+      for (const q of r.out) {
+        console.log(`${pad(q.d, 5)} ${pad(q.wind, 5)} ${pad(q.antic, 5)} ${pad(q.lag, 5)} ${pad(q.punch, 5)} ${pad(q.zoom, 6)} ${pad(q.rot, 6)} ${pad(q.shake, 5)} ${pad(q.v, 4)} ${pad(q.rw, 4)} ${pad(q.q, 4)}`);
+      }
+    }
+  } else if (MODE === 'stuck') {
+    for (const s of SEEDS) {
+      const r = await runStuck(s, SECS);
+      if (!r) { console.log(`seed ${s}: no stall over ${SECS}s`); continue; }
+      console.log(`\nseed ${s}: worst stall ${f1(r.run / 120)}s ending at t=${f1(r.at)}s`);
+      console.log('    t      x      y    top    bot    v     vx    vy att hold rope     ax     ay draft   rw anc dgr');
+      for (const q of r.trace) {
+        console.log(`${pad(q.t, 5)} ${pad(q.x, 6)} ${pad(q.y, 6)} ${pad(q.top, 6)} ${pad(q.bot, 6)} ${pad(q.v, 4)} ${pad(q.vx, 6)} ${pad(q.vy, 6)} ${pad(q.att, 3)} ${pad(q.hold, 4)} ${pad(q.rope, 4)} ${pad(q.ax, 6)} ${pad(q.ay, 6)} ${pad(q.draft, 5)} ${pad(q.rw, 4)} ${pad(q.anc, 3)} ${pad(q.dgr, 3)}`);
+      }
+    }
+  } else if (MODE === 'tune') {
+    const variants = String(arg('vals', 'gravity=2050')).split(';').map(spec => ({
+      label: spec.trim(),
+      set: Object.fromEntries(spec.split(',').map(kv => {
+        const [k, v] = kv.split('=');
+        return [k.trim(), Number(v)];
+      })),
+    }));
+    const agg = new Map();
+    for (const s of SEEDS) {
+      const rows = await runTune(s, variants, SECS);
+      console.log(`\nseed ${s} (${SECS}s each)`);
+      console.log('  variant                   dist(m) deaths  rel  vMean   att%  draft% floor% stall% noAnc%');
+      for (const r of rows) {
+        console.log(`  ${r.label.padEnd(24)} ${pad(r.dist, 7)} ${pad(r.deaths, 6)} ${pad(r.releases, 4)} ${pad(r.v, 6)} ${pad(f1(r.att * 100), 6)} ${pad(f1(r.draft * 100), 6)} ${pad(f1(r.floor * 100), 6)} ${pad(f1(r.stall * 100), 6)} ${pad(f1(r.noAnc * 100), 6)}`);
+        const a = agg.get(r.label) || { dist: 0, deaths: 0, v: 0, att: 0, draft: 0, noAnc: 0, n: 0 };
+        a.dist += r.dist; a.deaths += r.deaths; a.v += r.v; a.att += r.att; a.draft += r.draft; a.noAnc += r.noAnc; a.n++;
+        agg.set(r.label, a);
+      }
+    }
+    console.log('\nACROSS ALL SEEDS');
+    console.log('  variant                   dist(m) deaths  vMean   att%  draft% noAnc%');
+    const sorted = [...agg.entries()].sort((a, b) => b[1].dist - a[1].dist);
+    for (const [label, a] of sorted) {
+      console.log(`  ${label.padEnd(24)} ${pad(a.dist, 7)} ${pad(a.deaths, 6)} ${pad(Math.round(a.v / a.n), 6)} ${pad(f1(a.att / a.n * 100), 6)} ${pad(f1(a.draft / a.n * 100), 6)} ${pad(f1(a.noAnc / a.n * 100), 6)}`);
+    }
+  } else if (MODE === 'phase') {
+    for (const s of SEEDS) {
+      const rows = await runPhase(s, SECS);
+      const best = rows.reduce((b, r) => (r.dist > b.dist ? r : b), rows[0]);
+      const worst = rows.reduce((b, r) => (r.dist < b.dist ? r : b), rows[0]);
+      console.log(`\nseed ${s} - distance vs RELEASE PHASE over ${SECS}s (no hazards, no Hush)`);
+      console.log('  deg  dist(m)  rel  vMean    q  stall%  payoff');
+      for (const r of rows) {
+        const bar = '#'.repeat(Math.max(0, Math.round((r.dist / Math.max(1, best.dist)) * 34)));
+        console.log(`${pad(r.deg, 5)} ${pad(r.dist, 8)} ${pad(r.releases, 4)} ${pad(r.vMean, 6)} ${pad(r.q, 4)} ${pad(f1(r.stallFrac * 100), 6)}  ${bar}${r.deg === best.deg ? ' <= best' : ''}`);
+      }
+      const inner = best.deg > rows[0].deg && best.deg < rows[rows.length - 1].deg;
+      console.log(`best ${best.deg}deg=${best.dist}m  worst ${worst.deg}deg=${worst.dist}m  spread=${f1(best.dist / Math.max(1, worst.dist))}x  ${inner ? 'INTERIOR OPTIMUM' : 'EDGE OPTIMUM'}`);
+      const wide = rows.filter(r => r.dist > best.dist * 0.88).length;
+      console.log(`sweet spot (>=88% of best): ${wide} samples = ${wide * 5}deg wide`);
     }
   } else if (MODE === 'pump') {
     const rows = await runPump(SEEDS[0]);

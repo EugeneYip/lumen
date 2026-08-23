@@ -22,7 +22,7 @@ const { gl } = createContext(cv);
 const PATTERN_FS = `
 ${GLSL_COMMON}
 uniform vec2 uRes;
-uniform float uMul;
+uniform float uMul, uAbyss;
 in vec2 vUv; out vec4 outColor;
 
 vec3 hueOf(int i){
@@ -44,6 +44,26 @@ void main(){
   float aspect = uRes.x / uRes.y;
   vec2 s = vec2(vUv.x, 1.0 - vUv.y);
   vec3 c = vec3(0.0);
+
+  if(uAbyss > 0.5){
+    // A field authored to the exposure contract: p50 < 0.03, p90 < 0.15,
+    // p99 > 0.25, cores well above 6. This is the input the grade is FOR.
+    float n = fbm(vec2(s.x * 5.0, s.y * 3.0) + 11.0, 5);
+    float ridge = smoothstep(0.62, 0.38, s.y + 0.10 * fbm(vec2(s.x * 3.0, 7.0), 3));
+    float b = 0.016 + 0.075 * n * n + 0.030 * ridge * n;
+    c = vec3(0.10, 0.42, 0.55) * b;
+    for(int i=0;i<6;i++){
+      float fi = float(i);
+      float px = 0.10 + fi * 0.155;
+      float py = 0.34 + 0.30 * fract(fi * 0.37 + 0.2);
+      float I  = exp2(-1.0 + fi * 1.15);            // 0.5 .. 24
+      c += emit(s, vec2(px, py), aspect, 1.0) * hueOf(int(mod(fi, 3.0))) * I;
+    }
+    c += emit(s, vec2(0.46, 0.78), aspect, 6.0) * hueOf(1) * 26.0;
+    c += emit(s, vec2(0.78, 0.24), aspect, 5.0) * hueOf(0) * 20.0;
+    outColor = vec4(c * uMul, 1.0);
+    return;
+  }
 
   if(s.y < 0.10){
     // exposure ramp, 2^-9 .. 2^3: reads the toe and the shoulder at a glance
@@ -126,12 +146,46 @@ const ctx = Object.assign({
   cam: { worldToUv: () => [0.5, 0.5] },
 }, STATES[STATE] || {});
 
-post.beginScene();
-gl.useProgram(pPattern.program);
-gl.uniform2f(pPattern.u.uRes, W, H);
-gl.uniform1f(pPattern.u.uMul, MUL);
-drawFullscreen(gl);
+const ABYSS = q.get('scene') === 'abyss' ? 1 : 0;
+function drawPattern() {
+  post.beginScene();
+  gl.useProgram(pPattern.program);
+  gl.uniform2f(pPattern.u.uRes, W, H);
+  gl.uniform1f(pPattern.u.uMul, MUL);
+  if (pPattern.u.uAbyss) gl.uniform1f(pPattern.u.uAbyss, ABYSS);
+  drawFullscreen(gl);
+}
+drawPattern();
+
+// HDR stats of the synthetic scene, same definition as LUMEN.hdrStats()
+{
+  const sw = post.scene.w, sh = post.scene.h;
+  const buf = new Float32Array(sw * sh * 4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, post.scene.fbo);
+  gl.readPixels(0, 0, sw, sh, gl.RGBA, gl.FLOAT, buf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const L = [];
+  for (let i = 0; i < sw * sh; i += 7) {
+    L.push(0.2126 * buf[i * 4] + 0.7152 * buf[i * 4 + 1] + 0.0722 * buf[i * 4 + 2]);
+  }
+  L.sort((a, b) => a - b);
+  const pc = (p) => L[Math.min(L.length - 1, Math.floor(p * L.length))];
+  window.__hdr = { p50: pc(0.50), p90: pc(0.90), p99: pc(0.99), max: L[L.length - 1] };
+}
+
 post.render(ctx);
+
+// final mean sRGB luminance of the graded frame
+{
+  const buf = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  let sum = 0, n = 0;
+  for (let i = 0; i < W * H; i += 5) {
+    sum += (0.2126 * buf[i * 4] + 0.7152 * buf[i * 4 + 1] + 0.0722 * buf[i * 4 + 2]) / 255;
+    n++;
+  }
+  window.__mean = sum / n;
+}
 
 // crude timing: 40 composites back to back
 const px = new Uint8Array(4);
@@ -140,11 +194,7 @@ const t0 = performance.now();
 for (let i = 0; i < 60; i++) post.render(ctx);
 gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);                     // force sync
 window.__ms = (performance.now() - t0) / 60;
-post.beginScene();
-gl.useProgram(pPattern.program);
-gl.uniform2f(pPattern.u.uRes, W, H);
-gl.uniform1f(pPattern.u.uMul, MUL);
-drawFullscreen(gl);
+drawPattern();
 post.render(ctx);
 window.__ready = true;
 </script>

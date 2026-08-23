@@ -74,6 +74,7 @@ for (const seed of SEEDS) {
       if (g.mode === 'dead') {
         deaths.push({ cause: p.deathCause || '?', x: Math.round(p.maxX), t: +(g.t - runStart).toFixed(1) });
         bestX = Math.max(bestX, p.maxX); sumX += p.maxX;
+        g.input.setSynthetic(false); g.input.endFrame();
         g.startPlay(); runs++; runStart = g.t;
         continue;
       }
@@ -125,7 +126,73 @@ for (const seed of SEEDS) {
 
     // band profile sweep
     let bMin = 1e9, bMax = -1e9;
-    for (let x = 0; x < 46000; x += 40) { const h = w.bandBot(x) - w.bandTop(x); if (h < bMin) bMin = h; if (h > bMax) bMax = h; }
+    const hs = [];
+    for (let x = 0; x < 46000; x += 40) {
+      const h = w.bandBot(x) - w.bandTop(x);
+      hs.push(h);
+      if (h < bMin) bMin = h; if (h > bMax) bMax = h;
+    }
+    hs.sort((a, b) => a - b);
+    const hq = (q) => Math.round(hs[Math.min(hs.length - 1, Math.floor(q * hs.length))]);
+    // how often is a wall actually on screen? camera shows 1080 vertically
+    const framed = Math.round(100 * hs.filter(h => h < 1500).length / hs.length);
+
+    // phrase vocabulary over the same stretch
+    const kinds = {};
+    let np = 0;
+    for (const ph of w.phrases) { if (ph.x0 > 46000) continue; kinds[ph.kind] = (kinds[ph.kind] || 0) + 1; np++; }
+    const phLen = np ? Math.round(46000 / np) : 0;
+
+    // Corridor coverage: sample the whole swimmable cross-section and ask what
+    // fraction of it has no anchor within reach. This is the real cause of
+    // starvation - dead water that nothing can be grabbed from.
+    let cells = 0, dead = 0, deadLow = 0, cellsLow = 0;
+    {
+      const as = w.anchors;
+      const cx0 = Math.max(300, w.hushX + 600);
+      for (let x = cx0; x < w.genX - 400; x += 120) {
+        const top = w.bandTop(x), bot = w.bandBot(x);
+        for (let q = 1; q <= 6; q++) {
+          const y = top + (bot - top) * (q / 7);
+          let ok = false;
+          for (let i = 0; i < as.length; i++) {
+            const a = as[i];
+            if (a.x < x - REACH) continue;
+            if (a.x > x + REACH) break;
+            const dx = a.x - x, dy = a.y - y;
+            if (dx * dx + dy * dy < REACH * REACH) { ok = true; break; }
+          }
+          cells++; if (!ok) dead++;
+          if (q >= 5) { cellsLow++; if (!ok) deadLow++; }   // the lower third
+        }
+      }
+    }
+
+    // Where do anchors actually sit in the corridor? The line policy asks for a
+    // fraction of the band, but the arc-relative placement can override it, so
+    // measure the result rather than trusting the intent.
+    const fr = [], toFloor = [];
+    for (const a of w.anchors) {
+      const t2 = w.bandTop(a.x), b2 = w.bandBot(a.x);
+      if (b2 - t2 < 1) continue;
+      fr.push((a.y - t2) / (b2 - t2));
+      toFloor.push(b2 - a.y);
+    }
+    fr.sort((a, b) => a - b); toFloor.sort((a, b) => a - b);
+    const fq = (q) => fr.length ? +fr[Math.floor(q * (fr.length - 1))].toFixed(2) : 0;
+    const tq = (q) => toFloor.length ? Math.round(toFloor[Math.floor(q * (toFloor.length - 1))]) : 0;
+
+    // plankton + decor density, and anchor reachability from its predecessor
+    const dens = Math.round(1000 * w.plankton.length / Math.max(1, (w.genX - w.hushX)));
+    const ddens = Math.round(1000 * w.decor.length / Math.max(1, (w.genX - w.hushX)));
+    const as = w.anchors.slice().sort((a, b) => a.x - b.x);
+    let unreach = 0, worstStep = 0;
+    for (let i = 1; i < as.length; i++) {
+      const dx = as[i].x - as[i - 1].x, dy = as[i].y - as[i - 1].y;
+      const sep = Math.hypot(dx, dy);
+      if (sep > worstStep) worstStep = sep;
+      if (dx > 1100) unreach++;
+    }
 
     return {
       runs, deaths, bestX: Math.round(bestX), avgX: Math.round(sumX / runs),
@@ -139,6 +206,12 @@ for (const seed of SEEDS) {
       nAnchors: xs.length, inRock, checkedAnchors,
       bandMinRun: Math.round(minBand), bandMaxRun: Math.round(maxBand),
       bandMinSweep: Math.round(bMin), bandMaxSweep: Math.round(bMax),
+      bandP10: hq(0.1), bandP50: hq(0.5), bandP90: hq(0.9), framed,
+      kinds, phLen, dens, ddens, unreach, worstStep: Math.round(worstStep),
+      deadPct: Math.round(100 * dead / Math.max(1, cells)),
+      deadLowPct: Math.round(100 * deadLow / Math.max(1, cellsLow)),
+      frP10: fq(0.1), frP50: fq(0.5), frP90: fq(0.9),
+      flP10: tq(0.1), flP50: tq(0.5), flP90: tq(0.9),
     };
   }, SECS);
   rows.push({ seed, ...out });
@@ -168,6 +241,27 @@ for (const r of rows) {
     String(r.inRock + '/' + r.checkedAnchors).padStart(8)
   );
 }
+console.log('\nband height  p10/p50/p90   min/max    wall%   dead%  deadLow%  plank/1k  decor/1k  phLen  gap>1100');
+for (const r of rows) {
+  console.log(String(r.seed).padStart(4) +
+    `   ${r.bandP10}/${r.bandP50}/${r.bandP90}`.padEnd(22) +
+    `${r.bandMinSweep}/${r.bandMaxSweep}`.padEnd(12) +
+    String(r.framed + '%').padStart(8) +
+    String(r.deadPct + '%').padStart(8) +
+    String(r.deadLowPct + '%').padStart(10) +
+    String(r.dens).padStart(10) +
+    String(r.ddens).padStart(10) +
+    String(r.phLen).padStart(7) +
+    String(r.unreach).padStart(10));
+}
+console.log('\nanchor position   band-fraction p10/p50/p90     height-above-floor p10/p50/p90');
+for (const r of rows) {
+  console.log(String(r.seed).padStart(4) +
+    `      ${r.frP10} / ${r.frP50} / ${r.frP90}`.padEnd(34) +
+    `      ${r.flP10} / ${r.flP50} / ${r.flP90}`);
+}
+console.log('\nphrase mix:');
+for (const r of rows) console.log(`  seed ${r.seed}: ` + Object.entries(r.kinds).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+':'+v).join(' '));
 console.log('\ndeath causes:', JSON.stringify(causeTally));
 for (const r of rows) {
   console.log(`  seed ${r.seed}: ` + r.deaths.map(d => `${d.cause}@${Math.round(d.x / 10)}m/${d.t}s`).join(' '));

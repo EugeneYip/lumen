@@ -299,8 +299,8 @@ void main(){
   // --- the Hush: the image loses its colour and its blacks close up, from the
   //     left, where the wall is. ---
   float hm = uHush * (1.0 - smoothstep(0.0, 0.60, vUv.x));
-  col = mix(col, vec3(dot(col, LUMA)), hm * 0.74);
-  col *= 1.0 - hm * 0.42;
+  col = mix(col, vec3(dot(col, LUMA)), hm * 0.85);
+  col *= 1.0 - hm * 0.48;
   col += uHushTint * hm * hm * 0.04;
 
   // Glass loses contrast off-axis. Cheaper than modelling it, reads the same.
@@ -327,19 +327,19 @@ void main(){
 const BLOOM_LEVELS = 6;
 // Widest mips carry a little more than their share, which is what turns the
 // cascade into a long low tail instead of one fat halo.
-const UP_WEIGHT = [1, 1, 1.06, 1.14, 1.22, 1.28];
+const UP_WEIGHT = [1, 1, 1.06, 1.10, 1.02, 0.88];
 
 /**
  * The look, in one place. main.js hands over raw frame state; everything from
  * here down is a post-processing decision.
  */
 export const GRADE = {
-  exposure: 1.22,
+  exposure: 1.15,
   threshold: 0.86,
   knee: 0.58,
-  veilFloor: 0.020,       // veiling glare - see BRIGHT_FS
-  veil: 0.30,             // wide, low amplitude, long tail
-  veilWiden: 1.10,        // bright sources spread further, not just harder
+  veilFloor: 0.018,       // veiling glare - see BRIGHT_FS
+  veil: 0.24,             // wide, low amplitude, long tail
+  veilWiden: 0.80,        // bright sources spread further, not just harder
   halo: 0.40,             // tight halation hugging sources
   halation: 0.55,         // red-shifted DoG ring
   haloStride: 1.05,       // tight gaussian, quarter-res texels
@@ -350,24 +350,24 @@ export const GRADE = {
   chroma: 0.0013,
   defocus: 0.0034,
   barrel: 0.030,
-  vignette: 0.62,
-  vigFocal: 1.02,
+  vignette: 0.68,
+  vigFocal: 0.95,
   vigCorner: 0.28,
-  white: 15.0,            // linear value that lands on display white
+  white: 11.0,            // linear value that lands on display white
   hueKeep: 6.0,           // higher = hue survives further up the shoulder
   saturation: 1.06,
-  contrast: 0.170,
-  lift: 0.034,
+  contrast: 0.190,
+  lift: 0.013,
   grain: 0.048,
   grainChroma: 0.32,
-  absorb: [0.125, 0.042, 0.024],
-  scatter: 0.0075,
-  scatterEdge: 1.20,
-  shadowTint: [0.740, 0.955, 1.000],
-  highTint: [1.000, 0.938, 0.842],
-  liftCol: [0.055, 0.400, 0.520],
-  scatterCol: [0.090, 0.450, 0.580],
-  streakTint: [0.860, 0.960, 1.140],
+  absorb: [0.070, 0.026, 0.016],
+  scatter: 0.0016,
+  scatterEdge: 2.40,
+  shadowTint: [0.860, 1.000, 0.985],
+  highTint: [1.000, 0.950, 0.868],
+  liftCol: [0.050, 0.420, 0.390],
+  scatterCol: [0.075, 0.420, 0.440],
+  streakTint: [0.900, 0.970, 1.100],
   halationTint: [1.000, 0.320, 0.145],
   hushTint: [0.420, 0.200, 0.850],
 };
@@ -467,7 +467,7 @@ export class Post {
     const diff = clampN(ctx.difficulty || 0);
     const depthK = clampN((ctx.depth || 0) / 1400);
     // The Hush leans in early but only closes its fist at the end.
-    const hush = clampN(hp * (0.40 + 0.60 * hp));
+    const hush = clampN(hp * (0.62 + 0.38 * hp));
 
     const waves = (ctx.waves || []).map((w) => {
       if (!w.live) return [0, 0, 0, 0];
@@ -479,7 +479,7 @@ export class Post {
 
     return {
       time: ctx.t || 0,
-      exposure: G.exposure * (1 + lg * 0.22 + bg * 0.05) * (1 - deadK * 0.30) * (1 - hush * 0.06),
+      exposure: G.exposure * (1 + lg * 0.13 + bg * 0.04) * (1 - deadK * 0.30) * (1 - hush * 0.06),
       threshold: G.threshold * (1 - lg * 0.10),
       knee: G.knee,
       veilFloor: G.veilFloor,
@@ -506,7 +506,7 @@ export class Post {
 
       // A launch drops the white point: the frame punches into the shoulder
       // instead of just getting brighter.
-      white: G.white * (1 - lg * 0.22 - bg * 0.05),
+      white: G.white * (1 - lg * 0.14 - bg * 0.04),
       hueKeep: G.hueKeep,
       saturation: G.saturation * (1 - slow * 0.20) * (1 - deadK * 0.35),
       contrast: G.contrast + sk * 0.05 + deadK * 0.06 + diff * 0.03,
@@ -526,8 +526,9 @@ export class Post {
       grain: G.grain * (1 + deadK * 0.60 + slow * 0.35),
       grainChroma: G.grainChroma,
 
-      // Pre-tonemap now, so it needs headroom to still read as a flash.
-      flash: (ctx.flash || 0) * 2.6,
+      // Pre-tonemap, so it rolls off instead of clipping. Modest: this is
+      // added flat to every pixel before the curve.
+      flash: (ctx.flash || 0) * 0.85,
       flashCol: ctx.flashCol || [1, 1, 1],
       fade: ctx.fade ?? 1,
       desat: deadK * 0.45,
