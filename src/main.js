@@ -81,6 +81,7 @@ class Game {
     this.slow = 0;
     this.deadT = 0;
     this.startGrace = 1.4;
+    this._apPeak = 0;
     if (!initial) this.hud.deathT = 0;
   }
 
@@ -265,21 +266,28 @@ class Game {
     const danger = this._pathDanger(p, 0.42);
 
     if (p.attached) {
-      const a = p.anchor;
-      const ahead = p.x > a.x + 24;
-      const rising = p.vy < -40;
-      const stalled = p.holdTime > 0.9 && Math.abs(p.spin) < 0.55;
-      const wantRelease = (p.holdTime > 0.10 && ahead && rising) || stalled;
-      // Hanging on through a hazard is safer than launching into it.
-      if (danger && p.holdTime < 1.9) return true;
-      return !wantRelease && p.holdTime < 2.0;
+      // Release on the falling edge of releaseValue. The physics exposes that
+      // signal precisely because the distance-optimal release is a narrow
+      // interior optimum (10-25 degrees ahead of the anchor), so "ahead and
+      // rising" - what this used to do - systematically let go too late.
+      const v = p.releaseValue || 0;
+      const falling = v < this._apPeak - 1e-4;
+      this._apPeak = Math.max(this._apPeak * 0.995, v);
+      const loaded = p.holdTime > PP.loadTime;
+      if (loaded && v > 0.42 && falling) return false;
+      if (p.holdTime > 2.2) return false;              // never hang indefinitely
+      // Riding out a hazard beats launching into it, but only while the swing
+      // is still carrying us forward.
+      if (danger && p.holdTime < 1.4 && p.vx > 0) return true;
+      return true;
     }
 
+    this._apPeak = 0;
     const a = w.pickAnchor(p.x, p.y, p.vx, p.vy, PP.reach);
     if (!a) return false;
     const d = Math.hypot(a.x - p.x, a.y - p.y);
     // Grab early when sinking or threatened; otherwise wait for a tight radius.
-    const gate = (lowInBand || danger || p.vy > 320) ? 0.99 : 0.86;
+    const gate = (lowInBand || danger || p.vy > 320) ? 0.99 : 0.88;
     return d < PP.reach * gate;
   }
 

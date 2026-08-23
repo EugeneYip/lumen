@@ -112,7 +112,13 @@ for (const seed of SEEDS) {
         if (best < P.reach * 0.75) break;      // comfortably reachable, stop sweeping
       }
       n++; sumBest += Math.min(best, 2000);
-      if (best > P.reach) { dead++; worst.push({ x: Math.round(A.x), y: Math.round(A.y), d: Math.round(best) }); }
+      if (best > P.reach) {
+        const t2 = w.bandTop(A.x), b2 = w.bandBot(A.x);
+        dead++;
+        worst.push({ x: Math.round(A.x), d: Math.round(best),
+          fr: +((A.y - t2) / (b2 - t2)).toFixed(2), low: !!A.low,
+          kind: w._phraseAt(A.x).kind });
+      }
       else if (best > P.reach * 0.92) near++;
     }
     worst.sort((a, b) => b.d - a.d);
@@ -130,5 +136,5 @@ for (const r of rows) {
     String(r.dead).padStart(12) + String(r.near).padStart(14) + String(r.avgBest).padStart(20));
 }
 for (const r of rows) {
-  if (r.worst.length) console.log(`  seed ${r.seed} worst: ` + r.worst.map(w => `x${w.x} d${w.d}`).join('  '));
+  if (r.worst.length) console.log(`  seed ${r.seed} worst: ` + r.worst.map(w => `x${w.x} d${w.d} frac${w.fr}${w.low ? ' LOW' : ''} ${w.kind}`).join(' | '));
 }
