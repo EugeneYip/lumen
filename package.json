@@ -1,0 +1,13 @@
+{
+  "name": "lumen",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/serve.js",
+    "shots": "node tools/shoot.mjs"
+  },
+  "dependencies": {
+    "puppeteer": "^25.8.0"
+  }
+}
