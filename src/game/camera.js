@@ -19,6 +19,7 @@ import { noise1 } from '../engine/rng.js';
 const DESIGN_H = 1080;   // world units visible vertically at zoom 1
 const MAX_BANK = 0.105;  // rad. 6 degrees is plenty to feel and safe to watch.
 const MAX_SHAKE = 150;   // world units of impact offset, hard cap
+const PUNCH_MAX = 210;   // ...and of launch follow-through
 const NIMP = 3;          // impulse slots; fixed pool, no per-frame allocation
 
 export class Camera {
@@ -133,9 +134,9 @@ export class Camera {
         // leading reads as nothing.
         const dx = p.launchDirX === undefined ? vx / vl : p.launchDirX;
         const dy = p.launchDirY === undefined ? vy / vl : p.launchDirY;
-        this.punchVX -= dx * 620 * k;
-        this.punchVY -= dy * 380 * k;
-        this.zkVel += 1.9 * k;                   // widen, then settle back
+        this.punchVX -= dx * 1250 * k;
+        this.punchVY -= dy * 760 * k;
+        this.zkVel += 3.6 * k;                   // widen, then settle back
         this._axisX = dx; this._axisY = dy;
       }
       this._launchSeq = lseq;
@@ -176,10 +177,12 @@ export class Camera {
     const s2 = spring(this.baseY, this.baseVY, ty, 0.62, 1.00, dt);
     this.baseY = s2[0]; this.baseVY = s2[1];
 
-    const s3 = spring(this.punchX, this.punchVX, 0, 1.35, 0.62, dt);
-    this.punchX = s3[0]; this.punchVX = s3[1];
-    const s4 = spring(this.punchY, this.punchVY, 0, 1.35, 0.62, dt);
-    this.punchY = s4[0]; this.punchVY = s4[1];
+    // Low frequency on purpose: a stiff spring turns the impulse into a tick
+    // you cannot see. This one travels, then follows through.
+    const s3 = spring(this.punchX, this.punchVX, 0, 0.85, 0.62, dt);
+    this.punchX = clamp(s3[0], -PUNCH_MAX, PUNCH_MAX); this.punchVX = s3[1];
+    const s4 = spring(this.punchY, this.punchVY, 0, 0.85, 0.62, dt);
+    this.punchY = clamp(s4[0], -PUNCH_MAX, PUNCH_MAX); this.punchVY = s4[1];
 
     // ---- speed zoom, with hysteresis so a swing cannot pump the lens ------
     // The reference only follows speed once speed leaves a dead band around it,
@@ -195,7 +198,7 @@ export class Camera {
     this.zk = s5[0]; this.zkVel = s5[1];
 
     const wide = smoothstep(clamp01((this.zoomRef - 620) / 1500)) * 0.32;
-    const denom = 1 + wide + (opts.zoomOut || 0) + this.zk * 0.055 - this.antic * 0.045;
+    const denom = 1 + wide + (opts.zoomOut || 0) + this.zk * 0.34 - this.antic * 0.055;
     this.zoomTarget = 1 / Math.max(0.55, denom);
     const s6 = spring(this.zoom, this.zoomVel, this.zoomTarget, 0.55, 1.00, dt);
     this.zoom = s6[0]; this.zoomVel = s6[1];
@@ -236,7 +239,11 @@ export class Camera {
       this.turnSmooth = damp(this.turnSmooth, 0, 5.5, dt);
     }
     this._pvx = vx; this._pvy = vy; this._pvl = vl;
-    const bankT = clamp(this.turnSmooth * 0.026, -MAX_BANK, MAX_BANK);
+    // Weighted toward the tether, because that is where the arc is: a swing
+    // leans hard and flips as the arc reverses, while free flight only leans a
+    // little into the dive. Driving it from path curvature alone gave a constant
+    // crooked horizon instead of a bank.
+    const bankT = clamp((p.spin || 0) * 0.026 + this.turnSmooth * 0.006, -MAX_BANK, MAX_BANK);
     const s7 = spring(this.bank, this.bankVel, bankT, 0.50, 1.00, dt);
     this.bank = clamp(s7[0], -MAX_BANK * 1.2, MAX_BANK * 1.2); this.bankVel = s7[1];
     this.rot = this.bank + this.shakeRot;

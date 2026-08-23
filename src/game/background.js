@@ -177,7 +177,7 @@ vec3 medium(float wy, float sky){
   // sky=1 untouched - the one lever that lowers p50 without also lowering the
   // brightest water. A sqrt lift here does the exact opposite: it raises the
   // floor and flattens everything into a single mid-grey band.
-  return mediumHue(depthOf(wy)) * (V_FLOOR + V_LIT * pow(sky, 1.75));
+  return mediumHue(depthOf(wy)) * (V_FLOOR + V_LIT * pow(sky, 2.05));
 }
 
 // ------------------------------------------------------------------- rock ---
@@ -237,7 +237,10 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus){
   float slope = ((roof ? br.x : br.y) - (roof ? bl.x : bl.y)) / (2.0 * h);
   // Tight core plus a small skirt. A wide skirt is pure p90 cost: it triples
   // the lit area for a highlight the eye reads entirely from its inner edge.
-  float rim = exp(-into / 20.0) + 0.20 * exp(-into / 52.0);
+  // Broken along its length by the rock's own fine grain - free, since strata
+  // already fetched it. A constant-width, constant-brightness edge glow is the
+  // clearest tell of a shader filter rather than light landing on rock.
+  float rim = (exp(-into / 20.0) + 0.20 * exp(-into / 52.0)) * (0.40 + 1.20 * fine);
 
   if(roof){
     // Backlit underside. What light it has is bounced up off the water plus the
@@ -248,7 +251,7 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus){
     c += uCSilt * V_SILT * 0.7 * exp(-into / 150.0) * sqrt(sat(sky * 3.0));
   } else {
     // Upward-facing: takes the beam directly, and takes its caustic net.
-    c += uCSurf * V_RIM * rim * sky * (0.55 + 1.30 * caus);
+    c += uCSurf * V_RIM * rim * sky * (0.45 + 1.15 * caus);
     c += uCSurf * V_SHAFT * 0.22 * exp(-into / 80.0) * sky * caus;
     c += uCSilt * V_SILT * 1.1 * exp(-into / 190.0) * sqrt(sat(sky * 3.0));
   }
@@ -509,8 +512,8 @@ void main(){
          * (exp(-(e * e) / 165.0) * 0.85 + exp(-(e * e) / 3400.0) * 0.15);
     // Far glow: inverse-square, not Gaussian, so the dread arrives on screen
     // well before the wall does.
-    float far = max(e, 0.0) / 620.0;
-    col += uCHushGlow * V_HUSH * 0.105 * rimVar / (1.0 + far * far);
+    float far = max(e, 0.0) / 480.0;
+    col += uCHushGlow * V_HUSH * 0.055 * rimVar / (1.0 + far * far);
 
     // Fracture: hairline cracks reaching ahead of the front, the water coming
     // apart before it goes. Row spacing warped so it never reads as a grid.
@@ -541,10 +544,10 @@ void main(){
   // Approach pressure: a violet bruise creeping in from the left, so the wall
   // is felt even when it is entirely off screen.
   if(uHushProx > 0.01){
-    float g = pow(1.0 - uv.x, 2.0) * uHushProx;
+    float g = pow(1.0 - uv.x, 2.6) * uHushProx;
     col = mix(col, mix(col, vec3(dot(col, vec3(0.25, 0.62, 0.13))), 0.42)
-                 * vec3(0.66, 0.54, 1.20), g * 0.85);
-    col += uCHushGlow * V_HUSH * 0.030 * g;
+                 * vec3(0.66, 0.54, 1.20), g * 0.55);
+    col += uCHushGlow * V_HUSH * 0.014 * g;
   }
 
   col *= uIntensity * mix(1.0, 0.90, uDiff);

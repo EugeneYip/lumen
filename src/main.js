@@ -13,6 +13,8 @@ import { Camera } from './game/camera.js';
 import { Scene } from './game/render.js';
 import { Background } from './game/background.js';
 import { Hud } from './game/hud.js';
+import { SpriteDebug } from './engine/sprites.js';
+import { RibbonDebug } from './engine/ribbons.js';
 
 const FIXED = 1 / 120;
 const MAX_STEPS = 8;
@@ -441,6 +443,9 @@ export function boot() {
   const headless = q.get('headless') === '1';
   const seed = Number(q.get('seed') || 7) || 7;
 
+  SpriteDebug.layers = q.get('debugLayers') === '1';
+  SpriteDebug.off = q.get('noSprites') === '1';
+  RibbonDebug.off = q.get('noRibbons') === '1';
   const game = new Game({ headless, seed });
   window.game = game;
 

@@ -47,6 +47,7 @@ export const P = {
   retetherDelay: 0.12,
   swimAssist: 900,           // tangential authority while tethered
   swimCeiling: 2400,         // assist tapers to nothing by this speed
+  backAssist: 0.35,          // ...and how little of it drives an upstream arc
 
   wallRestitution: 0.58,
   wallFrictionRate: 1.8,     // per-second, not per-step
@@ -64,8 +65,10 @@ export const P = {
 
   brushDist: 1.55,           // multiple of hazard radius that counts as a graze
   planktonMagnet: 46,
-  windUpRate: 1.05,          // wind-up charge per second at a perfect phase
-  windUpBleed: 0.14,         // ...and what it loses hanging at a useless one
+  windUpRate: 5.50,          // wind-up charge per second at a perfect phase.
+                             // Tuned against the measured optimal hold (~0.6s):
+                             // slower than this and no release is ever loaded.
+  windUpBleed: 0.55,         // ...and what it loses hanging at a useless one
   dilateGap: 0.85,           // min seconds between time-dilation pinches
 };
 
@@ -226,7 +229,12 @@ export class Player {
         let dir = this.vx * tx + this.vy * ty;
         if (Math.abs(dir) < 24) dir = tx;          // nearly still: pick forward
         const sgn = dir >= 0 ? 1 : -1;
-        const k = P.swimAssist * clamp01(1 - this.speed / P.swimCeiling);
+        let k = P.swimAssist * clamp01(1 - this.speed / P.swimCeiling);
+        // The assist reinforces the way the swing is already going, but it will
+        // not work hard at driving you upstream. Without this it happily pumped
+        // a backward arc, and a single bad grab could drive the mote into the
+        // Hush under full power.
+        if (tx * sgn < 0) k *= P.backAssist;
         this.vx += tx * sgn * k * dt;
         this.vy += ty * sgn * k * dt;
       }
@@ -338,7 +346,7 @@ export class Player {
     this.catchSeq++;
     a.used++;
     fx.sound('attach', { pan: 0, speed: s, q: this.catchQ });
-    fx.ring(a.x, a.y, 0.8 + this.catchJolt * 0.7);
+    fx.ring(a.x, a.y, 0.55 + this.catchJolt * 0.45);
     fx.sparks(this.x, this.y, 7 + Math.round(this.catchJolt * 12),
       this.vx * 0.15, this.vy * 0.15, 'attach');
     if (this.catchJolt > 0.30) fx.shake(this.catchJolt * 0.22);

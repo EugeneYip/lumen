@@ -93,6 +93,50 @@ for (let i = 0; i <= G_N; i++) {
 }
 const enc = (v) => GLUT[(Math.sqrt(v < 0 ? 0 : v > 1 ? 1 : v) * G_N) | 0];
 
+/** Stored byte -> linear. Needed to build the mip chain in the right space. */
+const DEC = new Float32Array(256);
+for (let i = 0; i < 256; i++) DEC[i] = Math.pow(i / 255, SPRITE_GAMMA);
+
+/**
+ * Mip chain, built by hand in LINEAR space.
+ *
+ * gl.generateMipmap box-filters the STORED bytes, and the store is gamma
+ * encoded - so it averages the wrong quantity. Averaging in gamma space is not
+ * averaging: one bright texel beside three dark ones decodes to 0.047 instead
+ * of 0.25. High-contrast structure therefore bleeds energy out of the peak at
+ * every level while a flat faint tail survives exactly, so a few levels down
+ * the core has died, the tail dominates, and the whole tile decodes to a
+ * near-uniform grey. That is the flat grey square a sprite drawn at 8-12px
+ * turned into - dozens of them per frame, reading as untextured debug quads.
+ *
+ * Decode to linear, box-filter 2x2, re-encode, upload each level. Energy is
+ * conserved, so a small dot stays a small dot.
+ */
+function uploadMips(gl, tex, layer, size, bytes) {
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+  let w = size, h = size;
+  let lin = new Float32Array(w * h);
+  for (let i = 0, p = 3; i < lin.length; i++, p += 4) lin[i] = DEC[bytes[p]];
+  let level = 0;
+  while (w > 1 || h > 1) {
+    const nw = w > 1 ? w >> 1 : 1, nh = h > 1 ? h >> 1 : 1;
+    const next = new Float32Array(nw * nh);
+    for (let y = 0; y < nh; y++) {
+      const y0 = Math.min(y * 2, h - 1) * w, y1 = Math.min(y * 2 + 1, h - 1) * w;
+      for (let x = 0; x < nw; x++) {
+        const x0 = Math.min(x * 2, w - 1), x1 = Math.min(x * 2 + 1, w - 1);
+        next[y * nw + x] = (lin[y0 + x0] + lin[y0 + x1] + lin[y1 + x0] + lin[y1 + x1]) * 0.25;
+      }
+    }
+    w = nw; h = nh; lin = next; level++;
+    const out = new Uint8Array(w * h * 4);
+    const o32 = new Uint32Array(out.buffer);
+    for (let i = 0; i < lin.length; i++) o32[i] = enc(lin[i]) * 0x01010101;
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, level, 0, 0, layer, w, h, 1,
+                     gl.RGBA, gl.UNSIGNED_BYTE, out);
+  }
+}
+
 /**
  * Runs fn(nx, ny, r, a) over a centred [-1,1] square; returns RGBA bytes.
  * `wantAngle` gates the atan2, which costs about as much as a whole cheap
@@ -257,8 +301,8 @@ function buildTables() {
   for (let k = 0; k < 17; k++) {
     const h1 = hash2(k + 3, 611), h2 = hash2(k + 3, 727), h3 = hash2(k + 3, 883);
     THORN_S[k * 3] = (k / 17) * TAU + (h1 - 0.5) * (TAU / 17) * 0.95;  // uneven
-    THORN_S[k * 3 + 1] = 0.44 + Math.pow(h2, 1.4) * 0.52;              // uneven reach
-    THORN_S[k * 3 + 2] = 0.045 + h3 * 0.042;                           // base thickness
+    THORN_S[k * 3 + 1] = 0.54 + Math.pow(h2, 1.4) * 0.42;              // uneven reach
+    THORN_S[k * 3 + 2] = 0.058 + h3 * 0.050;                           // base thickness
   }
 
   PETAL_C = new Float64Array(8 * 3);
@@ -311,12 +355,18 @@ function buildTables() {
 
 // ---------------------------------------------------------------- profiles ---
 
-/** CORE: near-delta hot point. Draw small, with gain > 1. */
+/**
+ * CORE: near-delta hot point. Draw small, with gain > 1.
+ * The skirt is compressed to r<0.67 rather than running to the tile edge, for
+ * two reasons: it leaves a dark margin so every mip level still reads as a
+ * round dot instead of a filled tile, and it keeps the hot region compact when
+ * the scene multiplies this by 10-30x for the HDR core contract - a broad skirt
+ * just blows out into a featureless white disc at that gain.
+ */
 const pCore = (r) => {
   if (r >= 1) return 0;
   const c = Math.exp(-r * r * 105);
-  // just enough skirt that the mip chain gives a round dot, not a grey square
-  const knee = Math.pow(1 - r, 8) * 0.24;
+  const knee = Math.pow(Math.max(0, 1 - r * 1.5), 7) * 0.34;
   return clamp01(c + knee);
 };
 
@@ -356,7 +406,8 @@ function pSpark(nx, ny, r) {
   const ax = Math.abs(nx), ay = Math.abs(ny);
   const long = Math.exp(-(ny * ny) / 0.0034) * Math.pow(Math.max(0, 1 - ax), 2.6) * 0.55;
   const shortB = Math.exp(-(nx * nx) / 0.0062) * Math.pow(Math.max(0, 1 - ay), 3.4) * 0.24;
-  const halo = Math.pow(1 - r, 4.0) * 0.22;
+  // halo kept inside r<0.77 so the tile has a dark margin at every mip level
+  const halo = Math.pow(Math.max(0, 1 - r * 1.3), 4.0) * 0.28;
   return clamp01(c + long + shortB + halo);
 }
 
@@ -366,7 +417,9 @@ function pSpark(nx, ny, r) {
 function pPlankton(nx, ny, r) {
   if (r >= 1) return 0;
   const nucleus = Math.exp(-r * r * 28);
-  const halo = Math.pow(1 - r, 3.2) * 0.36;
+  // compressed to r<0.74: a dark margin is what keeps this a dot rather than a
+  // filled square once the mip chain takes over below ~16px
+  const halo = Math.pow(Math.max(0, 1 - r * 1.35), 3.0) * 0.46;
   const dx = nx - 0.15, dy = ny + 0.13;
   const glint = Math.exp(-(dx * dx + dy * dy) * 20) * 0.22;
   return clamp01(nucleus + halo + glint);
@@ -466,7 +519,9 @@ function pAnamorph(nx, ny) {
   const core = Math.exp(-(ny * ny) / (0.014 + 0.030 * u * u)) * fall * stri * 0.86;
   const body = Math.exp(-(ny * ny) / 0.085) * Math.pow(Math.max(0, 1 - u), 1.0) * 0.30;
   const veil = Math.exp(-(ny * ny) / 0.40) * Math.pow(Math.max(0, 1 - u), 0.7) * 0.10;
-  return clamp01(core + body + veil);
+  // the wide veil is still ~0.008 at the top and bottom edges, and CLAMP_TO_EDGE
+  // would smear that along the whole border - so close it off explicitly
+  return clamp01((core + body + veil) * (1 - smoothstep((Math.abs(ny) - 0.84) / 0.16)));
 }
 
 /**
@@ -495,7 +550,9 @@ function pThorn(nx, ny, r, a) {
     const v = Math.exp(-q * q) * along;
     if (v > sp) sp = v;   // max, not sum: overlapping spines must not blow out
   }
-  const BR = 0.31;
+  // Body radius: the old flat profile massed at 0.42, and dropping to 0.31 made
+  // urchins read as small spiky balls instead of the frame's main threat.
+  const BR = 0.40;
   const inb = 1 - smoothstep((r - BR) / 0.05);
   // pattern fades out before the rim, so there are no tick marks around a dial
   const pat = clamp01(1 - r / BR);
@@ -658,8 +715,12 @@ export function buildSpriteArray(gl) {
   buildTables();
   const tex = textureArray(gl, { width: SPRITE_SIZE, height: SPRITE_SIZE, layers: SPRITE_LAYERS });
   const P = SPRITE_SIZE;
-  const put = (layer, fn, ang = false) => uploadLayer(gl, tex, layer, P, P, paint(P, fn, ang));
-  const putR = (layer, fn) => uploadLayer(gl, tex, layer, P, P, paintRadial(P, fn));
+  const emit = (layer, bytes) => {
+    uploadLayer(gl, tex, layer, P, P, bytes);
+    uploadMips(gl, tex, layer, P, bytes);   // linear-space chain; see uploadMips
+  };
+  const put = (layer, fn, ang = false) => emit(layer, paint(P, fn, ang));
+  const putR = (layer, fn) => emit(layer, paintRadial(P, fn));
 
   putR(S.GLOW, pGlow);
   putR(S.CORE, pCore);
@@ -684,8 +745,7 @@ export function buildSpriteArray(gl) {
   put(S.ANAMORPH, (x, y) => pAnamorph(x, y));
   put(S.FILAMENT, (x, y) => pFilament(x, y));
 
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
-  gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+  // No generateMipmap: uploadMips has already written every level, correctly.
   return tex;
 }
 

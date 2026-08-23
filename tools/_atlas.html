@@ -236,7 +236,44 @@ function stackPage() {
   label('stacked: VEIL+VOLUME+GLOW+CORE (a real light)', cx - 240, cy + 244, '#8fa6bd');
 }
 
-if (PAGE === 0) spritePage(0, Math.min(10, SPRITE_LAYERS));
+// 1:1 REAL sizes. No offscreen render, no NEAREST magnification - the previous
+// small-size columns magnified an 8x8 buffer, which makes anything look like a
+// grid of giant blocks and is exactly how you convince yourself you have a bug
+// you do not have. Additive blending with bg=0 so a zero mask contributes
+// literally nothing: any rectangle visible here is really in the texture.
+// Inspect with:  node tools/crop.mjs shots/x/atlas-p5.png X,Y,W,H out.png 4
+function smallPage() {
+  const SZ = [6, 8, 10, 12, 16, 20, 24, 32, 48];
+  const STRETCH = [[48, 12], [96, 24], [160, 20]];
+  const rowH = 60;
+  setSize(1140, SPRITE_LAYERS * rowH + 34);
+  label('1:1 real sizes, additive. squares 6..48px, then 4:1 / 8:1 stretched.',
+        10, 8, '#dfe9f5', 12);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  for (let i = 0; i < SPRITE_LAYERS; i++) {
+    const y = 26 + i * rowH;
+    let x = 92;
+    for (const s of SZ) {
+      drawSprite(i, [x + (48 - s) / 2, y + (48 - s) / 2, s, s], { gain: 1.8, bg: [0, 0, 0] });
+      x += 56;
+    }
+    x += 18;
+    for (const [w, h] of STRETCH) {
+      drawSprite(i, [x, y + (48 - h) / 2, w, h], { gain: 1.8, bg: [0, 0, 0] });
+      x += w + 14;
+    }
+  }
+  gl.disable(gl.BLEND);
+  for (let i = 0; i < SPRITE_LAYERS; i++) {
+    const nm = (NAMES.find(e => e[1] === i) || ['?'])[0];
+    label(i + ' ' + nm, 4, 26 + i * rowH + 20, '#8fa6bd', 10);
+  }
+  let lx = 92;
+  for (const s of SZ) { label(s + 'px', lx + 12, 18, '#4d647c', 9); lx += 56; }
+}
+
+if (PAGE === 5) smallPage();
+else if (PAGE === 0) spritePage(0, Math.min(10, SPRITE_LAYERS));
 else if (PAGE === 1) spritePage(10, Math.min(20, SPRITE_LAYERS));
 else if (PAGE === 2) spritePage(20, SPRITE_LAYERS);
 else if (PAGE === 3) supportPage();

@@ -44,6 +44,9 @@ void main(){
   outColor = vec4(vColor.rgb * a, a);
 }`;
 
+/** Debug switch: skip the ribbon pass entirely (?noRibbons=1). */
+export const RibbonDebug = { off: false };
+
 export class Ribbons {
   constructor(gl, capacityVerts = 24576) {
     this.gl = gl; this.cap = capacityVerts; this.n = 0;
@@ -185,6 +188,7 @@ export class Ribbons {
     // slowly relative to a frame, so a one-frame-old value is exact enough and
     // keeps this free of any API change.
     if (cam && cam.viewH) this.ppu = cam.pixelH / cam.viewH;
+    if (RibbonDebug.off) { this.n = 0; return 0; }
     if (this.n === 0) return 0;
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);

@@ -63,7 +63,7 @@ const PH = {
 // one at a time so a deep run keeps producing something it has not shown yet.
 const SET_GATE = {
   [PH.CATHEDRAL]: 11000, [PH.KELPWOOD]: 6500, [PH.VENTFIELD]: 9000,
-  [PH.BLOOM]: 14000, [PH.MONOLITH]: 16000,
+  [PH.BLOOM]: 13000, [PH.MONOLITH]: 12000,
 };
 const SET_LIST = [PH.KELPWOOD, PH.VENTFIELD, PH.CATHEDRAL, PH.BLOOM, PH.MONOLITH];
 
@@ -258,13 +258,26 @@ export class World {
     }
 
     if (i - this._lastSet >= 5 && r.chance(lerp(0.08, 0.36, d))) {
-      let best = null, bestSeen = Infinity;
+      let bestSeen = Infinity;
       for (const k of SET_LIST) {
         if (x0 < SET_GATE[k]) continue;
         const seen = this._setSeen[k] === undefined ? -99 : this._setSeen[k];
-        if (seen < bestSeen) { bestSeen = seen; best = k; }
+        if (seen < bestSeen) bestSeen = seen;
       }
-      if (best) { this._lastSet = i; this._setSeen[best] = i; return best; }
+      if (bestSeen < Infinity) {
+        // Prefer the stalest, but choose randomly among equals: pure staleness
+        // is a strict rotation, and every seed then shows its landmarks in the
+        // same order.
+        const pool = [];
+        for (const k of SET_LIST) {
+          if (x0 < SET_GATE[k]) continue;
+          const seen = this._setSeen[k] === undefined ? -99 : this._setSeen[k];
+          if (seen === bestSeen) pool.push(k);
+        }
+        const best = pool[Math.min(pool.length - 1, (r() * pool.length) | 0)];
+        this._lastSet = i; this._setSeen[best] = i;
+        return best;
+      }
     }
 
     const calmPrev = t <= 0.24 && prev2 && prev2.ten <= 0.30;

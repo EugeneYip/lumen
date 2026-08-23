@@ -236,7 +236,7 @@ async function runPolicy(seed, secs) {
         if (p.attached) {
           const a = p.anchor;
           const deg = RIG.phi(p, a) * 180 / Math.PI;
-          if (kind === 'good') want = !(p.holdTime > 0.18 && RIG.rising(p, a) && deg > 26 && deg < 62);
+          if (kind === 'good') want = !(p.holdTime > 0.18 && RIG.rising(p, a) && deg > 8 && deg < 30);
           else if (kind === 'sloppy') want = p.holdTime < 0.34;
           else if (kind === 'mash') want = p.holdTime < 0.05;
           else if (kind === 'cling') want = p.holdTime < 2.4;

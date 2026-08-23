@@ -39,6 +39,7 @@ const FS = `
 ${GLSL_COMMON}
 uniform highp sampler2DArray uAtlas;
 uniform float uGamma;
+uniform float uDebugLayers;   // >0: false-colour every quad by its atlas layer
 
 in vec2 vUv;
 in vec4 vColor;
@@ -49,8 +50,22 @@ void main(){
   float m = texture(uAtlas, vec3(vUv, vLayer)).a;
   m = pow(m, uGamma);
   float a = m * vColor.a;
-  outColor = vec4(vColor.rgb * a, a);
+  vec3 c = vColor.rgb;
+  if (uDebugLayers > 0.5) {
+    // Decorrelated hue per layer, so an artefact's colour names its layer.
+    float h = fract(vLayer * 0.14758);
+    c = 3.0 * (0.5 + 0.5 * cos(6.28318530718 * (h + vec3(0.0, 0.33, 0.67))));
+  }
+  outColor = vec4(c * a, a);
 }`;
+
+/**
+ * Debug switches, driven by query params in main.js. `layers` false-colours
+ * every quad by its atlas layer so an artefact's colour names its source;
+ * `off` skips the whole pass, which is how you find out whether an artefact
+ * is a sprite at all.
+ */
+export const SpriteDebug = { layers: false, off: false };
 
 export class SpriteBatch {
   constructor(gl, atlas, capacity = 4096) {
@@ -98,6 +113,7 @@ export class SpriteBatch {
 
   flush(cam) {
     if (this.n === 0) return 0;
+    if (SpriteDebug.off) { const n = this.n; this.n = 0; return n; }
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.data, 0, this.n * FLOATS);
@@ -106,6 +122,7 @@ export class SpriteBatch {
     gl.uniform2f(this.prog.u.uCamScale, cam.sx, cam.sy);
     gl.uniform1f(this.prog.u.uCamRot, cam.rot || 0);
     gl.uniform1f(this.prog.u.uGamma, SPRITE_GAMMA);
+    gl.uniform1f(this.prog.u.uDebugLayers, SpriteDebug.layers ? 1 : 0);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.atlas);
     gl.uniform1i(this.prog.u.uAtlas, 0);
