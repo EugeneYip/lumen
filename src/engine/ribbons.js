@@ -62,6 +62,22 @@ export class Ribbons {
     gl.bindVertexArray(null);
     this._nx = new Float32Array(512);
     this._ny = new Float32Array(512);
+    this._mi = new Float32Array(512);
+
+    // Sub-pixel-wide ribbons alias and shimmer badly under a moving camera.
+    // We widen anything thinner than `minPx` and scale its alpha down by the
+    // same factor, which conserves energy: the line keeps its apparent
+    // brightness but stops flickering. `ppu` is refreshed from each flush, so
+    // callers never have to know about any of this.
+    this.minPx = 1.3;
+    this.ppu = 0;            // pixels per world unit, 0 = unknown
+  }
+
+  /** Width floor and matching alpha compensation for a requested world width. */
+  _fit(w) {
+    if (!this.ppu) return 1;
+    const px = w * this.ppu;
+    return px < this.minPx ? this.minPx / Math.max(px, 1e-4) : 1;
   }
 
   reset() { this.n = 0; return this; }
@@ -96,23 +112,43 @@ export class Ribbons {
     if (count < 2) return;
     const wf = typeof width === 'function' ? width : () => width;
     const af = typeof alpha === 'function' ? alpha : () => alpha;
-    let nx = this._nx, ny = this._ny;
-    if (nx.length < count) { nx = this._nx = new Float32Array(count * 2); ny = this._ny = new Float32Array(count * 2); }
+    let nx = this._nx, ny = this._ny, mi = this._mi;
+    if (nx.length < count) {
+      nx = this._nx = new Float32Array(count * 2);
+      ny = this._ny = new Float32Array(count * 2);
+      mi = this._mi = new Float32Array(count * 2);
+    }
 
-    // per-vertex normals (averaged, miter-limited)
+    // Per-vertex normals. At a bend, the averaged normal is shorter than the
+    // segment normals by cos(theta/2), which pinches the ribbon; scaling by
+    // 1/cos restores constant width. Clamped so a hairpin cannot explode.
+    const MITER_LIMIT = 2.6;
     for (let i = 0; i < count; i++) {
       const i0 = Math.max(0, i - 1), i1 = Math.min(count - 1, i + 1);
       let dx = pts[i1 * 2] - pts[i0 * 2], dy = pts[i1 * 2 + 1] - pts[i0 * 2 + 1];
       const L = Math.hypot(dx, dy) || 1;
       dx /= L; dy /= L;
       nx[i] = -dy; ny[i] = dx;
+
+      let m = 1;
+      if (i > 0 && i < count - 1) {
+        let ax = pts[i * 2] - pts[(i - 1) * 2], ay = pts[i * 2 + 1] - pts[(i - 1) * 2 + 1];
+        let bx = pts[(i + 1) * 2] - pts[i * 2], by = pts[(i + 1) * 2 + 1] - pts[i * 2 + 1];
+        const la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1;
+        ax /= la; ay /= la; bx /= lb; by /= lb;
+        const cosHalf = Math.sqrt(Math.max(0.02, (1 + (ax * bx + ay * by)) * 0.5));
+        m = Math.min(MITER_LIMIT, 1 / cosHalf);
+      }
+      mi[i] = m;
     }
 
     const r = color[0], g = color[1], b = color[2];
     for (let i = 0; i < count - 1; i++) {
       const t0 = i / (count - 1), t1 = (i + 1) / (count - 1);
-      const h0 = wf(t0) * 0.5, h1 = wf(t1) * 0.5;
-      const a0 = af(t0), a1 = af(t1);
+      const w0 = wf(t0), w1 = wf(t1);
+      const k0 = this._fit(w0), k1 = this._fit(w1);
+      const h0 = w0 * k0 * 0.5 * mi[i], h1 = w1 * k1 * 0.5 * mi[i + 1];
+      const a0 = af(t0) / k0, a1 = af(t1) / k1;
       const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3];
       const ax = x0 - nx[i] * h0, ay = y0 - ny[i] * h0;
       const bx = x0 + nx[i] * h0, by = y0 + ny[i] * h0;
@@ -131,7 +167,10 @@ export class Ribbons {
   segment(x0, y0, x1, y1, width, color, alpha = 1, falloff = 9) {
     let dx = x1 - x0, dy = y1 - y0;
     const L = Math.hypot(dx, dy) || 1;
-    const nxv = -dy / L * width * 0.5, nyv = dx / L * width * 0.5;
+    const k = this._fit(width);
+    const w = width * k;
+    alpha /= k;
+    const nxv = -dy / L * w * 0.5, nyv = dx / L * w * 0.5;
     const r = color[0], g = color[1], b = color[2];
     this._vert(x0 - nxv, y0 - nyv, -1, r, g, b, alpha, falloff);
     this._vert(x0 + nxv, y0 + nyv, 1, r, g, b, alpha, falloff);
@@ -142,6 +181,10 @@ export class Ribbons {
   }
 
   flush(cam) {
+    // Refresh the pixel scale for the *next* batch of strokes. The camera moves
+    // slowly relative to a frame, so a one-frame-old value is exact enough and
+    // keeps this free of any API change.
+    if (cam && cam.viewH) this.ppu = cam.pixelH / cam.viewH;
     if (this.n === 0) return 0;
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);

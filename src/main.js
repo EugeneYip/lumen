@@ -42,7 +42,8 @@ class Game {
     this.muted = localStorage.getItem('lumen.muted') === '1';
 
     this.mode = 'title';        // title | play | dead | paused
-    this.t = 0;                 // sim clock (seconds)
+    this.t = 0;                 // monotonic sim clock, never reset (seek bookkeeping)
+    this.runT = 0;              // per-run animation clock; everything visual uses this
     this.acc = 0;
     this.slow = 0;              // 0..1 time dilation
     this.hitstop = 0;
@@ -69,6 +70,7 @@ class Game {
     this.cam.snapTo(this.player.x + 300, this.player.y);
     this.cam.trauma = 0;
     this.runT = 0;
+    this.acc = 0;
     this.topSpeed = 0;
     this.bestMult = 1;
     this.envDim = 1;
@@ -137,10 +139,10 @@ class Game {
     if (this.mode === 'title') {
       // slow drift so the title screen is alive, not a screenshot
       this.runT += dt;
-      w.update(dt, this.t, 600);
+      w.update(dt, this.runT, 600);
       this.particles.update(dt);
-      const cx = 520 + Math.sin(this.t * 0.09) * 240;
-      const cy = -180 + Math.sin(this.t * 0.07 + 1.3) * 130;
+      const cx = 520 + Math.sin(this.runT * 0.09) * 240;
+      const cy = -180 + Math.sin(this.runT * 0.07 + 1.3) * 130;
       this.cam.update(dt, { x: cx, y: cy, vx: 120, vy: 0 }, { leadScale: 0.2, zoomOut: 0.12 });
       w.hushX = -3200;
       this._decay(dt);
@@ -151,7 +153,7 @@ class Game {
     this.runT += dt;
 
     if (this.mode === 'play') {
-      p.update(dt, w, this.input, this.fx, this.t);
+      p.update(dt, w, this.input, this.fx, this.runT);
       this.topSpeed = Math.max(this.topSpeed, p.speed);
       this.bestMult = Math.max(this.bestMult, p.mult);
       if (!p.alive) {
@@ -163,7 +165,7 @@ class Game {
       }
     } else if (this.mode === 'dead') {
       this.deadT += dt;
-      p.update(dt, w, this.input, this.fx, this.t);   // no-op while dead, keeps timers moving
+      p.update(dt, w, this.input, this.fx, this.runT); // no-op while dead, keeps timers moving
       this.envDim = damp(this.envDim, 0.42, 1.4, dt);
     }
 
@@ -177,7 +179,7 @@ class Game {
       if (p.x - w.hushX > maxLag) w.hushX = p.x - maxLag;
     }
 
-    w.update(dt, this.t, Math.max(p.x, w.hushX));
+    w.update(dt, this.runT, Math.max(p.x, w.hushX));
     this.particles.update(dt);
 
     // --- camera ---
@@ -211,8 +213,9 @@ class Game {
       // core handles
       gl: this.gl, cam, world: this.world, player: p,
       particles: this.particles, ambient: this.ambient, tex: this.tex, caps: this.caps,
-      // clocks
-      t: this.t, dt: frameDt, runT: this.runT, deadT: this.deadT,
+      // clocks: `t` is run-relative so a replayed seed animates identically;
+      // `simT` is the monotonic clock the capture harness seeks against.
+      t: this.runT, simT: this.t, dt: frameDt, runT: this.runT, deadT: this.deadT,
       // state
       mode: this.mode, alive: p.alive,
       depth: Math.max(0, p.maxX * METRES), best: this.best,
