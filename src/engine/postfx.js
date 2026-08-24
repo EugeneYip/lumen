@@ -8,15 +8,15 @@
 //     -> streak       2 widening horizontal passes  (anamorphic)
 //     -> composite    spectral CA / astigmatic edge / speed smear, water medium,
 //                     cos^4 vignette, hue-preserving filmic, split tone,
-//                     clumped film grain, TPDF dither
+//                     black point, clumped film grain, TPDF dither
 //
 // Two bloom characters with independent weights is the whole point: a single
 // blur radius for everything reads as a filter, not as light in a room. And the
 // tonemap runs on the peak channel, not per-channel, so a hot cyan core lands
 // on cyan-white and a hot amber core on amber-white instead of both on grey.
 //
-// Two things in here were wrong for a long time and are worth naming so they do
-// not come back:
+// Four things in here were wrong for a long time and are worth naming so they
+// do not come back:
 //   1. Dispersion and the speed smear shared one radial excursion, so the
 //      spectral weights rode the smear. A 2px fringe is a lens; a 20px one is
 //      confetti. They are now separate displacements - see the composite.
@@ -24,9 +24,24 @@
 //      point a hard CLIP. Everything above it landed on the same pixel, so hot
 //      cores read as featureless white discs. It is normalised by the curve's
 //      asymptote now - see tonemapHue.
+//   3. The shadow colour was ADDED. uLiftCol's green channel alone left ~0.004
+//      under every pixel of the frame, and 0.004 through the sRGB curve is
+//      code 14 - so the abyss bottomed out at L14, 0.0% of any frame on any
+//      seed ever reached L8, and the whole image lived in a 32-value band on
+//      top of a teal pedestal. Ablating that one term took the shadow fraction
+//      from 0.0% to 29%. The blacks are subtracted now, and the trench colour
+//      survives as chroma rather than as level - see the black point.
+//   4. The speed smear was anchored on the frame centre. The camera is locked
+//      to the mote, so the mote is the still point of the motion field: the
+//      world streaks past it, it does not streak. Anchoring on the centre
+//      smeared the protagonist at exactly the speeds where the frame most
+//      needs a focal point, and it saturated 'soft', which throws away the
+//      sharp full-res tap. Measured 1.3:1 core-over-surround at speed against
+//      5.6:1 while tethered. The smear has its own origin now.
 import { compile, RenderTarget, drawFullscreen, FS_VS, GLSL_COMMON, Blend, texture2D } from './gl.js';
 
 const clampN = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const clampR = (x, a, b) => (x < a ? a : x > b ? b : x);
 const lerpN = (a, b, t) => a + (b - a) * t;
 const mix3 = (a, b, t) => [lerpN(a[0], b[0], t), lerpN(a[1], b[1], t), lerpN(a[2], b[2], t)];
 const scale3 = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
@@ -155,14 +170,15 @@ ${GLSL_COMMON}
 uniform sampler2D uScene, uHalf, uVeil, uHaloB, uHaloC, uStreak, uDirt, uSpectrum;
 uniform vec2  uRes;
 uniform float uTime, uExposure;
-uniform float uVeilAmt, uVeilWiden, uHaloAmt, uHalation, uStreakAmt, uDirtAmt;
+uniform float uVeilAmt, uVeilWiden, uVeilCap, uHaloAmt, uHalation, uStreakAmt, uDirtAmt;
 uniform vec3  uStreakTint, uHalationTint;
 uniform float uChroma, uDefocus, uSmear, uBarrel;
+uniform vec2  uSmearOrg;
 uniform float uVignette, uVigFocal, uVigCorner;
-uniform float uWhite, uHueKeep, uSat, uContrast, uLift;
+uniform float uWhite, uHueKeep, uSat, uContrast, uLift, uBlack;
 uniform vec3  uShadowTint, uHighTint, uLiftCol;
 uniform vec3  uAbsorb, uScatterCol;
-uniform float uScatter, uScatterEdge;
+uniform float uScatter, uScatterEdge, uScatterBase;
 uniform float uGrain, uGrainChroma;
 uniform float uFlash;  uniform vec3 uFlashCol;
 uniform float uFade, uDesat, uHush;  uniform vec3 uHushTint;
@@ -238,6 +254,18 @@ void main(){
   dirR.x /= aspect;                        // back to uv units
   vec2 perp = vec2(-dirR.y, dirR.x);
 
+  // The motion field has a different centre from the lens, and that difference
+  // is load-bearing. The camera is locked to the mote, so the mote is the
+  // still point: the world streaks past it and it does not streak. Anchoring
+  // the smear on the lens axis instead blurred the protagonist at exactly the
+  // speeds where the frame most needs a focal point, and it drove 'soft' to 1
+  // there, which throws away the sharp full-res tap in favour of a smeared
+  // half-res one. Glass stays on the lens axis; only the motion moves.
+  vec2 ccS = (vUv - uSmearOrg) * vec2(aspect, 1.0);
+  float rlenS = length(ccS);
+  vec2 dirS = ccS / max(rlenS, 1e-5);
+  dirS.x /= aspect;
+
   // Barrel pulls inward only, so no pass ever samples outside the frame.
   vec2 uv = 0.5 + cc * (1.0 - uBarrel * r2);
   uv = shockwave(uv, uWave0);
@@ -252,7 +280,7 @@ void main(){
   //     mote fringes instead of splitting into separated colour copies. ---
   float caK  = uChroma * (0.14 + rn2 * 1.25);
   float defK = uDefocus * rn2 * rn;
-  float smK  = uSmear * min(rlen, 0.62);
+  float smK  = uSmear * min(rlenS, 0.62);
   float jit  = ign(fc + 13.0) - 0.5;
 
   // Three spectral bins, normalised so the trio sums to unity in every channel.
@@ -273,7 +301,7 @@ void main(){
   for(int i=0;i<6;i++){
     float d = ((float(i) + 0.5 + jit) / 3.0) - 1.0;      // -1 .. 1
     float w = exp(-d * d * 2.4);
-    vec2 base = uv + dirR * (d * smK) + perp * (d * defK);
+    vec2 base = uv + dirS * (d * smK) + perp * (d * defK);
     acc += (texture(uHalf, base + dirR * caK).rgb * swO
           + texture(uHalf, base).rgb              * swM
           + texture(uHalf, base - dirR * caK).rgb * swI) * w;
@@ -283,7 +311,9 @@ void main(){
 
   // On axis nothing is displaced, so keep the full-res tap; the dispersed
   // version fades in exactly where the lens stops being sharp. That is also
-  // where the edge softness comes from - it is one effect, not two.
+  // where the edge softness comes from - it is one effect, not two. With the
+  // smear anchored on the mote this now stays near zero AT the mote at any
+  // speed, which is the whole point: the protagonist keeps its full-res peak.
   float soft = clamp((caK + smK + defK) * uRes.x / 2.2 - 0.35, 0.0, 1.0);
   vec3 col = mix(texture(uScene, uv).rgb, acc, soft) * uExposure;
 
@@ -294,10 +324,16 @@ void main(){
   vec3 veil = vec3(texture(uVeil, uv + dirR * ca2).r,
                    texture(uVeil, uv).g,
                    texture(uVeil, uv - dirR * ca2).b);
-  // Brighter sources should spread FURTHER, not merely harder: lifting the
-  // tail where the veil is already hot pushes its visible edge outward.
+  // 'Spread further, not harder', done the right way round. The old form was
+  // a gain on the BRIGHT end - up to 2.5x under the launch and speed boosts -
+  // which is a halo burying the core that cast it, and it is what the focal
+  // contrast metric was reporting. Lifting the faint TAIL is what actually
+  // moves a halo's visible edge outward; the bright near-halo saturates at
+  // uVeilCap instead, so a hotter source spreads wider without also stacking
+  // veil on top of itself. Done on luminance, so hue is untouched.
+  float vk = max(uVeilCap, 1e-3);
   float vl = dot(veil, LUMA);
-  veil *= 1.0 + uVeilWiden * vl / (1.0 + vl);
+  veil *= (1.0 + uVeilWiden * vk / (vk + vl)) / (1.0 + vl / vk);
   // Dirt lives in the veil only - it is grime catching stray light, so it can
   // only show where there is stray light to catch.
   float dirt = texture(uDirt, vUv * vec2(aspect, 1.0) * 0.82 + vec2(0.11, 0.07)).r;
@@ -317,11 +353,15 @@ void main(){
 
   // --- the water you are inside. Absorption eats red first; inscatter lifts
   //     the frame toward its edges, where the sightline through water is
-  //     longest. Both belong before the curve so the curve sees real light. ---
+  //     longest. Both belong before the curve so the curve sees real light.
+  //     The edge term used to sit on a constant of 1.0, which is a haze floor
+  //     on the middle of the frame - precisely where the deepest water is
+  //     supposed to be, and where the eye is. It is nearly all path length
+  //     now, so the centre can go dark and the corners still breathe. ---
   float path = 1.0 + 1.45 * rn2;
   vec3 kA = uAbsorb * path;
   col *= 1.0 - kA + 0.5 * kA * kA;          // exp(-kA) to 2 terms; kA stays small
-  col += uScatterCol * (uScatter * (1.0 + uScatterEdge * rn2));
+  col += uScatterCol * (uScatter * (uScatterBase + uScatterEdge * rn2));
 
   // --- vignette as light loss, not as a dark disc pasted on the result.
   //     cos^4 of the field angle, plus a little mechanical corner cut. ---
@@ -337,8 +377,29 @@ void main(){
   //     grade takes a side in the shadows and the other in the highlights. ---
   float L = dot(col, LUMA);
   col *= mix(uShadowTint, uHighTint, smoothstep(0.0, 0.72, L));
-  // Blacks stay near-black but keep the trench's colour rather than going dead.
-  col += uLiftCol * uLift * (1.0 - smoothstep(0.0, 0.34, L));
+
+  // --- the black point, and the reason this file used to have no blacks.
+  //     The shadow colour was ADDED here: uLiftCol's green channel alone left
+  //     ~0.004 under every pixel, and 0.004 through the sRGB curve is code 14.
+  //     So the darkest water in the game measured L12-15, 0.0% of any frame on
+  //     any seed reached L8, and 84% of the image lived in a 32-value band
+  //     sitting on that pedestal - murk and bloom with no midtone between.
+  //     Ablating this one term moved the shadow fraction from 0.0% to 29%.
+  //     A colourist subtracts here instead of adding. L*L/(L+k) is
+  //     asymptotically L-k but goes into zero quadratically, so the near-black
+  //     water rolls off rather than clipping to a flat plate; and doing it on
+  //     luminance and rescaling the chroma means the deep water keeps its own
+  //     colour all the way down instead of turning grey on the way to black. ---
+  L = dot(col, LUMA);
+  float Lb = (1.0 + uBlack) * L * L / (L + uBlack + 1e-6);
+  col *= Lb / max(L, 1e-5);
+
+  // What is left of the lift: chroma, not level. A few thousandths of the
+  // trench's own blue-green so the floor reads as deep water rather than as a
+  // dead sensor, weighted into blue where the luma coefficient is 0.07 instead
+  // of green where it is 0.72. That is the whole difference between a colour
+  // cast and a pedestal.
+  col += uLiftCol * uLift * (1.0 - smoothstep(0.0, 0.16, Lb));
 
   L = dot(col, LUMA);
   col = mix(vec3(L), col, uSat * (1.0 - uDesat));
@@ -349,7 +410,7 @@ void main(){
   float hm = uHush * (1.0 - smoothstep(0.0, 0.60, vUv.x));
   col = mix(col, vec3(dot(col, LUMA)), hm * 0.85);
   col *= 1.0 - hm * 0.48;
-  col += uHushTint * hm * hm * 0.04;
+  col += uHushTint * hm * hm * 0.028;
 
   // Glass loses contrast off-axis. Cheaper than modelling it, reads the same.
   col = mix(col, vec3(dot(col, LUMA)), 0.16 * uVignette * rn2 * rn);
@@ -358,12 +419,16 @@ void main(){
   col = linearToSrgb(max(col, 0.0));
 
   // --- grain, quantised to 24Hz so it does not crawl at 60, and pulled out of
-  //     the deep blacks so the abyss stays clean. ---
+  //     the deep blacks so the abyss stays clean. The lower knee matters more
+  //     than it used to: it sat above the old L14 floor and so never did
+  //     anything, but a fifth of the frame now lives below L8, and at those
+  //     levels the grain IS the dither that keeps a smooth gradient from
+  //     crawling under a moving camera. At L8 it is under half a code value. ---
   float gs = hash11(floor(uTime * 24.0) + 0.5) * 311.0;
   float gn = grain(fc, gs);
   float gc = hash12(fc + gs * 1.7 + 3.71) - 0.5;
   float gl = dot(col, LUMA);
-  float gw = smoothstep(0.014, 0.11, gl) * (1.0 - 0.62 * smoothstep(0.52, 1.0, gl));
+  float gw = smoothstep(0.014, 0.12, gl) * (1.0 - 0.62 * smoothstep(0.52, 1.0, gl));
   col += (vec3(gn) + vec3(gc, 0.0, -gc) * uGrainChroma) * uGrain * gw;
 
   // Two uniforms make a triangular PDF, which unlike a single one does not
@@ -387,7 +452,8 @@ export const GRADE = {
   knee: 0.58,
   veilFloor: 0.018,       // veiling glare - see BRIGHT_FS
   veil: 0.24,             // wide, low amplitude, long tail
-  veilWiden: 0.80,        // bright sources spread further, not just harder
+  veilWiden: 0.80,        // lifts the veil's faint TAIL, not its peak
+  veilCap: 0.30,          // the near-halo saturates here, so it cannot bury a core
   halo: 0.40,             // tight halation hugging sources
   halation: 0.55,         // red-shifted DoG ring
   haloStride: 1.05,       // tight gaussian, quarter-res texels
@@ -403,19 +469,31 @@ export const GRADE = {
   vignette: 0.68,
   vigFocal: 0.95,
   vigCorner: 0.28,
-  white: 11.0,            // linear value the shoulder is built around
+  // Dropped from 11.0. The toe gain is WHITE_REF/white, so a lower white point
+  // is the cheapest midtone lift available - unlike exposure it does not also
+  // feed the brightpass, so it buys midtone without buying veil. It is not
+  // free: a global lift raises a mid-grey surround faster than a core that is
+  // already on the shoulder, so every 1.0 off the white point costs about 0.2
+  // of the mote's measured contrast against its surround. 10.6 is where those
+  // two stop arguing.
+  white: 10.6,            // linear value the shoulder is built around
   hueKeep: 7.0,           // higher = hue survives further up the shoulder
   saturation: 1.06,
-  contrast: 0.190,
-  lift: 0.013,
+  contrast: 0.145,
+  // The blacks: subtract, do not add. uBlack is the soft black point in display
+  // space and it is what makes the abyss reach black at all; uLift is now only
+  // the colour of the floor, at a luminance too low to be a pedestal.
+  black: 0.0020,
+  lift: 0.0045,
   grain: 0.048,
   grainChroma: 0.32,
   absorb: [0.070, 0.026, 0.016],
-  scatter: 0.0016,
+  scatter: 0.0022,
+  scatterBase: 0.30,      // on-axis inscatter; the rest is path length
   scatterEdge: 2.40,
   shadowTint: [0.860, 1.000, 0.985],
   highTint: [1.000, 0.950, 0.868],
-  liftCol: [0.050, 0.420, 0.390],
+  liftCol: [0.030, 0.190, 0.520],
   scatterCol: [0.075, 0.420, 0.440],
   streakTint: [0.900, 0.970, 1.100],
   halationTint: [1.000, 0.320, 0.145],
@@ -500,6 +578,22 @@ export class Post {
   }
 
   /**
+   * Where the motion field is centred. The camera is locked to the mote, so
+   * the mote is the still point of that field and must not be smeared - see
+   * the composite. Falls back to the lens axis when there is no player, which
+   * is the title screen and the synthetic grade bench.
+   */
+  _smearOrigin(ctx) {
+    const cam = ctx.cam, p = ctx.player;
+    if (!cam || !p || typeof cam.worldToUv !== 'function') return [0.5, 0.5];
+    const u = cam.worldToUv(p.x, p.y);
+    if (!u || !Number.isFinite(u[0]) || !Number.isFinite(u[1])) return [0.5, 0.5];
+    // Slack outside the frame so an off-screen mote does not snap the pivot to
+    // an edge, which would put a hard discontinuity in the motion field.
+    return [clampR(u[0], -0.35, 1.35), clampR(u[1], -0.35, 1.35)];
+  }
+
+  /**
    * Map frame state -> post parameters. This is the dynamic half of the look:
    * how the lens behaves under speed, danger, impact and death. Restraint is
    * the point - each signal moves two or three things, never everything.
@@ -535,10 +629,18 @@ export class Post {
       veilFloor: G.veilFloor,
       bloomRadius: 1.0,
 
-      veil: G.veil * (1 + sk * 0.22 + lg * 0.55 + slow * 0.15),
+      // Speed and launch used to push every bloom layer at once - veil x1.5,
+      // halo x1.8, halation x2.1, streak x2.7 - which is how the frame ended
+      // up with a mote that measured 1.2:1 against its own surround. Speed
+      // lives in the streak and the smear, which are directional and read as
+      // motion; launch lives in the halo, which hugs the source. The wide veil
+      // is the one layer that fills the surround isotropically, so it barely
+      // moves.
+      veil: G.veil * (1 + sk * 0.10 + lg * 0.26 + slow * 0.15),
       veilWiden: G.veilWiden + lg * 0.70 + sk * 0.25,
+      veilCap: G.veilCap,
       halo: G.halo * (1 + lg * 0.85 + bg * 0.35 + att * 0.10),
-      halation: G.halation * (1 + lg * 1.10 + sk * 0.25),
+      halation: G.halation * (1 + lg * 0.70 + sk * 0.15),
       haloStride: G.haloStride,
       haloStride2: G.haloStride2,
       // The streak carries more of the speed read now that the smear is short
@@ -555,6 +657,7 @@ export class Post {
       // Capped so the widest excursion stays inside ~2px of tap spacing at
       // 1600 wide. Longer than that and six taps read as discrete ghosts.
       smear: sk * 0.0060 + lg * 0.0050 + slow * 0.0020,
+      smearOrg: this._smearOrigin(ctx),
       barrel: G.barrel + sk * 0.014,
 
       vignette: Math.min(0.86, G.vignette + hush * 0.16 + slow * 0.10 + deadK * 0.22 + sk * 0.05),
@@ -567,6 +670,9 @@ export class Post {
       hueKeep: G.hueKeep,
       saturation: G.saturation * (1 - slow * 0.20) * (1 - deadK * 0.35),
       contrast: G.contrast + sk * 0.05 + deadK * 0.06 + diff * 0.03,
+      // Deep water has less to bounce around in it, so the floor closes a
+      // little with depth. Death closes it further - the frame is going out.
+      black: G.black * (1 + depthK * 0.30 + deadK * 0.45),
       lift: G.lift,
       shadowTint: G.shadowTint,
       // Tethered, you are sitting in an anchor's light: highlights go warmer.
@@ -577,6 +683,7 @@ export class Post {
 
       absorb: scale3(G.absorb, (0.72 + depthK * 0.80) * (1 + diff * 0.15)),
       scatter: G.scatter * (1 + depthK * 0.35),
+      scatterBase: G.scatterBase,
       scatterEdge: G.scatterEdge,
       scatterCol: G.scatterCol,
 
@@ -664,17 +771,19 @@ export class Post {
     const v3 = (n, v) => { if (U[n]) gl.uniform3f(U[n], v[0], v[1], v[2]); };
     gl.uniform2f(U.uRes, this.w, this.h);
     f('uTime', g.time); f('uExposure', g.exposure);
-    f('uVeilAmt', g.veil); f('uVeilWiden', g.veilWiden);
+    f('uVeilAmt', g.veil); f('uVeilWiden', g.veilWiden); f('uVeilCap', g.veilCap);
     f('uHaloAmt', g.halo); f('uHalation', g.halation);
     f('uStreakAmt', g.streak); f('uDirtAmt', g.dirt);
     v3('uStreakTint', g.streakTint); v3('uHalationTint', g.halationTint);
     f('uChroma', g.chroma); f('uDefocus', g.defocus); f('uSmear', g.smear); f('uBarrel', g.barrel);
+    if (U.uSmearOrg) gl.uniform2f(U.uSmearOrg, g.smearOrg[0], g.smearOrg[1]);
     f('uVignette', g.vignette); f('uVigFocal', g.vigFocal); f('uVigCorner', g.vigCorner);
     f('uWhite', g.white); f('uHueKeep', g.hueKeep);
-    f('uSat', g.saturation); f('uContrast', g.contrast); f('uLift', g.lift);
+    f('uSat', g.saturation); f('uContrast', g.contrast);
+    f('uLift', g.lift); f('uBlack', g.black);
     v3('uShadowTint', g.shadowTint); v3('uHighTint', g.highTint); v3('uLiftCol', g.liftCol);
     v3('uAbsorb', g.absorb); v3('uScatterCol', g.scatterCol);
-    f('uScatter', g.scatter); f('uScatterEdge', g.scatterEdge);
+    f('uScatter', g.scatter); f('uScatterBase', g.scatterBase); f('uScatterEdge', g.scatterEdge);
     f('uGrain', g.grain); f('uGrainChroma', g.grainChroma);
     f('uFlash', g.flash); v3('uFlashCol', g.flashCol);
     f('uFade', g.fade); f('uDesat', g.desat); f('uHush', g.hush);

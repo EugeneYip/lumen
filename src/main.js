@@ -371,7 +371,10 @@ class Game {
     const tests = {
       tethered: () => this.player.attached && this.player.holdTime > 0.25,
       launch: () => this.player.launchGlow > 0.55,
-      fast: () => this.player.alive && this.player.speed > 1500,
+      // `fast` used to be satisfied by the same frame as `launch` (a launch is
+      // when you are fastest), so on some seeds two of the named moments were
+      // byte-identical and A/B coverage was quietly one frame short.
+      fast: () => this.player.alive && this.player.speed > 1500 && this.player.launchGlow < 0.15,
       hazardNear: () => this.player.alive && this._nearestHazard() < 260,
       hushNear: () => this.player.alive && (this.player.x - this.world.hushX) < 1100,
       deep: () => this.player.maxX * METRES > 600,
@@ -442,12 +445,23 @@ class Game {
     gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
     const buf = new Float32Array(rt.w * 4);
     const rows = [];
-    for (let i = 0; i < H; i++) {
-      const y = Math.floor((i + 0.5) * rt.h / H);
+    // Percentiles come from a coarse grid, which is plenty for distribution.
+    // `max` must NOT: a hot emitter core is a handful of pixels, so a grid with
+    // ~17px spacing misses it about 19 times in 20 and the >6 linear contract
+    // fails at random. Scan every pixel of every row for the peak instead.
+    let peak = 0;
+    for (let y = 0; y < rt.h; y++) {
       gl.readPixels(0, y, rt.w, 1, gl.RGBA, gl.FLOAT, buf);
-      for (let j = 0; j < W; j++) {
-        const x = Math.floor((j + 0.5) * rt.w / W) * 4;
-        rows.push(buf[x] * 0.2126 + buf[x + 1] * 0.7152 + buf[x + 2] * 0.0722);
+      for (let x = 0; x < rt.w * 4; x += 4) {
+        const l = buf[x] * 0.2126 + buf[x + 1] * 0.7152 + buf[x + 2] * 0.0722;
+        if (l > peak) peak = l;
+      }
+      // Keep the sparse sample for the distribution.
+      if (((y * H) % rt.h) < H) {
+        for (let j = 0; j < W; j++) {
+          const x = Math.floor((j + 0.5) * rt.w / W) * 4;
+          rows.push(buf[x] * 0.2126 + buf[x + 1] * 0.7152 + buf[x + 2] * 0.0722);
+        }
       }
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -456,8 +470,8 @@ class Game {
     const mean = rows.reduce((a, b) => a + b, 0) / rows.length;
     return {
       mean: +mean.toFixed(4), p10: +q(0.1).toFixed(4), p50: +q(0.5).toFixed(4),
-      p90: +q(0.9).toFixed(4), p99: +q(0.99).toFixed(4), max: +rows[rows.length - 1].toFixed(3),
-      note: 'linear HDR scene luminance, pre-tonemap',
+      p90: +q(0.9).toFixed(4), p99: +q(0.99).toFixed(4), max: +peak.toFixed(3),
+      note: 'linear HDR scene luminance, pre-tonemap; percentiles sampled, max exact',
     };
   }
 

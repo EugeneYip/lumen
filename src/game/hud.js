@@ -546,8 +546,8 @@ export class Hud {
       });
       this._vtext('M', mx + bw + 11 * k, my, 15 * k, { body: rgba(WARM, 0.55), shadow: 0.3, weight: 0.16 });
     }
-    this._plate(cx, my - 4 * k, 150 * k, 26 * k, 0.3);
-    this._label('M  MUTE   ·   P  PAUSE', cx, my, 9.5 * k, 500, 4.6 * k, FAINT, 0.9, 'center');
+    this._plate(cx, my - 4 * k, 168 * k, 30 * k, 0.5);
+    this._label('M  MUTE   ·   P  PAUSE', cx, my, 9.5 * k, 500, 4.6 * k, DIM, 0.72, 'center');
 
     // --- corner marks: this is an instrument ---
     const cm = 24 * k, ci = Math.round(30 * k);
@@ -644,9 +644,9 @@ export class Hud {
     const base = Math.round(100 * k);
     const txt = 'x' + (s.mult % 1 ? s.mult.toFixed(1) : String(s.mult));
     const acc = hot <= 0 ? MINT : [
-      Math.round(lerp(MINT[0], WARM_HI[0], hot * 0.6)),
-      Math.round(lerp(MINT[1], WARM_HI[1], hot * 0.3)),
-      Math.round(lerp(MINT[2], WARM_HI[2], hot * 0.1))];
+      Math.round(lerp(MINT[0], WARM_HI[0], hot * 0.42)),
+      Math.round(lerp(MINT[1], WARM_HI[1], hot * 0.20)),
+      Math.round(lerp(MINT[2], WARM_HI[2], hot * 0.06))];
 
     const numW = this._measure(txt, cap);
     this._plate(rx - numW * 0.45, base - cap * 0.40, numW * 0.8 + 92 * k, cap * 1.5, 0.34);
@@ -662,51 +662,50 @@ export class Hud {
     }
     this._label('CHAIN', rx, labY, 10 * k, 700, 5.8 * k, hot > 0.4 ? acc : DIM, 0.86, 'right');
 
-    this._vtext(txt, rx, base, cap, {
+    // At x1 the number says nothing; the meter alone teaches that three
+    // plankton make a step. The figure joins it once there is one to show.
+    if (s.mult > 1) this._vtext(txt, rx, base, cap, {
       align: 'right', weight: 0.15,
       body: this._grad(base, cap, rgba(MINT_HI, 0.99), rgba(acc, 0.98),
-        rgba([Math.round(acc[0] * 0.30), Math.round(acc[1] * 0.52), Math.round(acc[2] * 0.42)], 0.97)),
+        rgba([Math.round(acc[0] * 0.40), Math.round(acc[1] * 0.62), Math.round(acc[2] * 0.50)], 0.97)),
       core: this._core(base, cap, 0.30 + 0.22 * hot),
       shadow: 0.52, glow: 0.5 + pop * 1.3 + hot * 0.7, glowCol: acc,
     });
 
-    // frame brackets escalate with the tier
+    // Corner brackets escalate with the tier - doubled, not boxed: a full frame
+    // around a number reads as a debug selection marquee.
     if (s.mult >= 10) {
       const bw = numW + 26 * k, bh = cap * 1.26;
       const bx = rx - bw + 13 * k, by = base - cap * 1.06;
-      const seg = clamp(10 * k, 6, 24);
-      const a = 0.36 + 0.32 * clamp01((s.mult - 10) / 14) + pop * 0.3;
+      const a = 0.38 + 0.32 * clamp01((s.mult - 10) / 14) + pop * 0.3;
       ctx.save();
-      ctx.strokeStyle = rgba(acc, a);
-      ctx.lineWidth = Math.max(1, 1.6 * k);
-      for (const ix of [0, 1]) for (const iy of [0, 1]) {
-        const X = bx + (ix ? bw : 0), Y = by + (iy ? bh : 0);
-        ctx.beginPath();
-        ctx.moveTo(X + (ix ? -seg : seg), Y);
-        ctx.lineTo(X, Y);
-        ctx.lineTo(X, Y + (iy ? -seg : seg));
-        ctx.stroke();
-      }
-      if (s.mult >= 20) {
-        const o = 6 * k;
-        ctx.strokeStyle = rgba(acc, a * 0.38);
-        ctx.setLineDash([3 * k, 8 * k]);
-        ctx.beginPath();
-        ctx.rect(bx - o, by - o, bw + o * 2, bh + o * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
+      ctx.lineCap = 'butt';
+      const brackets = (inset, seg, al, lw) => {
+        ctx.strokeStyle = rgba(acc, al);
+        ctx.lineWidth = Math.max(1, lw);
+        for (const ix of [0, 1]) for (const iy of [0, 1]) {
+          const X = bx + (ix ? bw + inset : -inset), Y = by + (iy ? bh + inset : -inset);
+          ctx.beginPath();
+          ctx.moveTo(X + (ix ? -seg : seg), Y);
+          ctx.lineTo(X, Y);
+          ctx.lineTo(X, Y + (iy ? -seg : seg));
+          ctx.stroke();
+        }
+      };
+      brackets(0, clamp(11 * k, 6, 26), a, 1.7 * k);
+      if (s.mult >= 20) brackets(6 * k, clamp(20 * k, 10, 44), a * 0.42, 1.2 * k);
       ctx.restore();
     }
 
     // segments to the next multiplier step
     const frac = (chain % 3) / 3;
-    const n = 7, segW = 12 * k, gap = 4.5 * k, sy = Math.round(base + 17 * k), sh = Math.max(2, 5 * k);
+    const sy = Math.round(s.mult > 1 ? base + 17 * k : labY + 17 * k);
+    const n = 7, segW = 12 * k, gap = 4.5 * k, sh = Math.max(2, 5 * k);
     const litF = frac * n;
     for (let i = 0; i < n; i++) {
       const x = rx - (n - i) * (segW + gap) + gap;
       const lit = i < Math.floor(litF);
-      ctx.fillStyle = rgba(lit ? acc : FAINT, lit ? 0.94 : 0.20);
+      ctx.fillStyle = rgba(lit ? acc : FAINT, lit ? 0.94 : 0.14);
       ctx.fillRect(x, lit ? sy : sy + sh * 0.34, segW, lit ? sh : sh * 0.32);
       if (i === Math.floor(litF)) {
         const part = litF - Math.floor(litF);
@@ -714,7 +713,9 @@ export class Hud {
         ctx.fillRect(x, sy, segW * part, sh);
       }
     }
-    if (pop > 0.02) this._streak(rx - numW * 0.5, base - cap * 0.36, numW * 0.9 + 70 * k, cap * 0.34, acc, 0.32 * pop);
+    if (pop > 0.02 && s.mult > 1) {
+      this._streak(rx - numW * 0.5, base - cap * 0.36, numW * 0.9 + 70 * k, cap * 0.34, acc, 0.32 * pop);
+    }
     ctx.textAlign = 'left';
   }
 
@@ -754,9 +755,9 @@ export class Hud {
     g.addColorStop(1, rgba(WARM_HI, 0.99));
     ctx.fillStyle = g;
     ctx.fillRect(rx, ry, rw * f, h);
-    if (tf > 0.02) {
-      ctx.fillStyle = rgba(ICE, 0.5);
-      ctx.fillRect(Math.round(rx + rw * tf), ry - 5 * k, Math.max(1, 1.5 * k), h + 10 * k);
+    if (tf > 0.02) {   // this run's ceiling, marked above the rail only
+      ctx.fillStyle = rgba(ICE, 0.38);
+      ctx.fillRect(Math.round(rx + rw * tf), ry - 6 * k, Math.max(1, 1.4 * k), 6 * k);
     }
     const hx = Math.round(rx + rw * f);
     this._streak(hx, ry + h * 0.5, 26 * k, 9 * k, ICE, 0.34);

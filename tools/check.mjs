@@ -158,7 +158,12 @@ for (const seed of SEEDS) {
           try {
             const g = window.game;
             const uv = g.cam.worldToUv(g.player.x, g.player.y);
-            const cx = uv[0] * t.width, cy = uv[1] * t.height;
+            // worldToUv returns GL convention (v measured from the bottom);
+            // a 2D canvas indexes from the top. Without the flip this sampled
+            // the mote's vertical mirror image, which is why frames with the
+            // mote near mid-screen scored plausibly and frames with it high or
+            // low scored 1:1.
+            const cx = uv[0] * t.width, cy = (1 - uv[1]) * t.height;
             if (cx > 6 && cy > 6 && cx < t.width - 6 && cy < t.height - 6) {
               let core = 0, ring = 0, ringN = 0;
               for (let y = -7; y <= 7; y++) for (let x = -7; x <= 7; x++) {
