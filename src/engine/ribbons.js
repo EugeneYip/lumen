@@ -29,6 +29,8 @@ void main(){
 
 const FS = `
 ${GLSL_COMMON}
+uniform float uMinHalfPx;
+
 in float vV;
 in vec4 vColor;
 in float vFalloff;
@@ -40,7 +42,21 @@ void main(){
   float core = exp(-x * x * vFalloff);
   float halo = pow(max(0.0, 1.0 - x), 2.5) * 0.30;
   float m = min(1.0, core + halo);
-  float a = m * vColor.a;
+
+  // Analytic coverage. fwidth(vV) is how much of the cross-section one pixel
+  // spans, so 1/fwidth is the ribbon's half-width in pixels. A ribbon thinner
+  // than a pixel gets proportionally less coverage, which is energy-conserving
+  // and stops thin glowing lines shimmering under a moving camera.
+  //
+  // This used to be done on the CPU from a pixel scale cached by the *previous*
+  // flush, which meant it was unknown on the first flush of the first frame and
+  // frame 1 rendered differently from every later frame, forever. Doing it here
+  // has no frame-order dependence at all. Derivatives are safe: this is uniform
+  // control flow.
+  float halfPx = 1.0 / max(fwidth(vV), 1e-6);
+  float cov = clamp(halfPx / uMinHalfPx, 0.0, 1.0);
+
+  float a = m * vColor.a * cov;
   outColor = vec4(vColor.rgb * a, a);
 }`;
 
@@ -67,21 +83,19 @@ export class Ribbons {
     this._ny = new Float32Array(512);
     this._mi = new Float32Array(512);
 
-    // Sub-pixel-wide ribbons alias and shimmer badly under a moving camera.
-    // We widen anything thinner than `minPx` and scale its alpha down by the
-    // same factor, which conserves energy: the line keeps its apparent
-    // brightness but stops flickering. `ppu` is refreshed from each flush, so
-    // callers never have to know about any of this.
+    // Sub-pixel coverage is handled analytically in the fragment shader (see
+    // uMinHalfPx there). `minPx` is kept as the knob; `ppu` is retained only
+    // because callers may read it, and is no longer used for anything.
     this.minPx = 1.3;
-    this.ppu = 0;            // pixels per world unit, 0 = unknown
+    this.ppu = 0;
   }
 
-  /** Width floor and matching alpha compensation for a requested world width. */
-  _fit(w) {
-    if (!this.ppu) return 1;
-    const px = w * this.ppu;
-    return px < this.minPx ? this.minPx / Math.max(px, 1e-4) : 1;
-  }
+  /**
+   * Retained for compatibility. Always 1: the width floor moved into the
+   * shader, because doing it here depended on a pixel scale that did not exist
+   * until the first flush had already happened.
+   */
+  _fit() { return 1; }
 
   reset() { this.n = 0; return this; }
 
@@ -197,6 +211,7 @@ export class Ribbons {
     gl.uniform2f(this.prog.u.uCamPos, cam.x, cam.y);
     gl.uniform2f(this.prog.u.uCamScale, cam.sx, cam.sy);
     gl.uniform1f(this.prog.u.uCamRot, cam.rot || 0);
+    gl.uniform1f(this.prog.u.uMinHalfPx, this.minPx);
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, this.n);
     gl.bindVertexArray(null);
