@@ -15,6 +15,7 @@
  */
 import { createServer } from 'node:http';
 import { readFile, readdir, mkdir, writeFile, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { extname, join, normalize, resolve, basename, relative, isAbsolute } from 'node:path';
 import { existsSync } from 'node:fs';
 import puppeteer from 'puppeteer';
@@ -132,15 +133,68 @@ if (MODE === 'pair') {
   await mkdir(OUT, { recursive: true });
 
   const fa = await pngs(A), fb = await pngs(B);
-  // Pair by scene name, not by index: a mismatched scene list would otherwise
-  // silently compare a launch frame against a title frame.
-  const tag = (f) => basename(f, '.png').replace(/^frame-\d*-?/, '') || f;
+  // Pair by moment, not by index: a mismatched list would otherwise compare a
+  // launch frame against a title frame.
+  //
+  // The tag must survive BOTH naming schemes this harness emits:
+  //   frame-03-fast.png   (named scene)   -> "fast"
+  //   frame-00002s.png    (sim seconds)   -> "00002s"
+  //   frame-00450m.png    (metres)        -> "00450m"
+  // A previous version stripped /^frame-\d*-?/, which turned every one of the
+  // second form into the single tag "s". All five frames of a run collapsed to
+  // one key, so one build contributed one frame pasted into every pair, and an
+  // entire critic round was spent reviewing the same image four times.
+  const tag = (f) => {
+    const b = basename(f, '.png');
+    const named = b.match(/^frame-\d+-(.+)$/);
+    if (named) return named[1];
+    const plain = b.match(/^frame-(.+)$/);
+    return plain ? plain[1] : b;
+  };
+
+  const dupes = (files, label) => {
+    const seen = new Map();
+    for (const f of files) {
+      const t = tag(f);
+      if (seen.has(t)) {
+        console.error(`${label}: "${f}" and "${seen.get(t)}" both reduce to the tag "${t}".`);
+        console.error('Pairing by tag would silently drop one of them. Fix the tag rule.');
+        process.exit(4);
+      }
+      seen.set(t, f);
+    }
+  };
+  dupes(fa, arg('a'));
+  dupes(fb, arg('b'));
+
   const mapB = new Map(fb.map(f => [tag(f), f]));
   const pairs = fa.map(f => [f, mapB.get(tag(f))]).filter(([, b]) => b);
   const n = pairs.length;
   if (!n) {
     console.error(`no comparable frames (A: ${fa.map(tag).join(',')} | B: ${fb.map(tag).join(',')})`);
     process.exit(1);
+  }
+  if (n < Math.min(fa.length, fb.length)) {
+    console.error(`only ${n} of ${Math.min(fa.length, fb.length)} frames paired -- the two runs do not cover the same moments.`);
+    console.error(`  A: ${fa.map(tag).join(', ')}`);
+    console.error(`  B: ${fb.map(tag).join(', ')}`);
+    process.exit(4);
+  }
+
+  // A build contributing the same image to several pairs is the failure mode
+  // that cost a whole review round, so check the bytes rather than the names.
+  const sums = new Map();
+  for (const [dir, files] of [[A, fa], [B, fb]]) {
+    for (const f of files) {
+      const h = createHash('sha1').update(await readFile(join(dir, f))).digest('hex');
+      const key = dir + '|' + h;
+      if (sums.has(key)) {
+        console.error(`${join(dir, f)} is byte-identical to ${join(dir, sums.get(key))}.`);
+        console.error('Two pairs would show the same image. Re-capture before reviewing.');
+        process.exit(4);
+      }
+      sums.set(key, f);
+    }
   }
 
   const key = [];
