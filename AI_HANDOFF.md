@@ -330,6 +330,29 @@ and `absorb` and every decor item carrying a `depth` field.
 
 Longer-standing items:
 
+- **Named scenes are seeked in sequence, so a later scene can land on the frame
+  after an earlier one.** `check.mjs` and `shoot.mjs` walk the scene list
+  without restarting between entries, so a predicate that is *already true*
+  when the previous scene resolved is satisfied one step later and the two
+  "different" moments are the same frame: A/B coverage is quietly one pair
+  short, and every warning from that frame is reported twice, which overstates
+  how broadly the defect was sampled. `launch`/`fast` had this and it is fixed
+  (12ac90a) — the two are now mutually exclusive on `launchGlow`, `> 0.55`
+  against `< 0.15` decaying at 5.5/s, so at least 0.24s of sim must pass
+  between them; measured 24-113m apart on 20 seeds, so that pair cannot
+  collide again. **`deep` still collides**, and is the worse case because it
+  tests `maxX` — a run maximum that only resets in `newRun()` — so it is a
+  latch, not a moment. Whether it duplicates depends on where the *previous*
+  seeks left the run, which is exactly why it hides. Seek the canonical
+  `shoot.mjs` list (`node tools/_collide.mjs 2,3,4,5,6,7,8,9,10,11,42
+  title,tethered,launch,fast,hazardNear,hushNear,deep`) and `deep` lands one
+  step after `hushNear` at identical depth on 7 of 11 seeds (3, 4, 5, 8, 9, 10,
+  11), distinct only where the run was still shy of 600m (2, 6, 7, 42). Seek
+  `hushNear,deep` alone and seeds 3 and 5 stop colliding, because `hazardNear`
+  is no longer ahead of them to carry the run past the threshold first. Fix is
+  either a restart before each seek — the HDR block in `check.mjs` already does
+  this and says why — or a predicate describing a moment rather than a
+  threshold already crossed. Both live in lead-owned files.
 - **Two `tethered` frames cannot reach black.** `check.mjs` warns; postfx has
   established this is scene-side, not grade-side (a 0.020 black point, 10x what
   shipped, only reached 8% while costing 27% of the mean).
@@ -354,7 +377,9 @@ Longer-standing items:
   level around a death), `_grade.html`/`_grade.mjs` (synthetic HDR bench),
   `_atlas.*` (sprite atlas viewer), `_audio.mjs` (offline audio + spectrogram),
   `_det3.mjs` (frozen-state render stability), `_shaft.mjs`/`_slot.mjs` (god-ray
-  fields), `_sortcheck.mjs` (x-ordering, now also in `check.mjs`). Note
+  fields), `_collide.mjs` (per-scene time/depth/frame-hash table, for catching
+  two named scenes that resolve to one frame), `_sortcheck.mjs` (x-ordering,
+  now also in `check.mjs`). Note
   `_atlas.mjs` and `_grade.mjs` hardcode an absolute repo path.
 - **`shots/` is gitignored**, so "compare against the previous build" has no
   baseline on a fresh clone. Capture one first. To compare against an *older

@@ -86,6 +86,7 @@ class Game {
     this.deadT = 0;
     this.startGrace = 1.4;
     this._apPeak = 0;
+    this._seekEntryDepth = 0;
     if (!initial) this.hud.deathT = 0;
   }
 
@@ -377,11 +378,18 @@ class Game {
       fast: () => this.player.alive && this.player.speed > 1500 && this.player.launchGlow < 0.15,
       hazardNear: () => this.player.alive && this._nearestHazard() < 260,
       hushNear: () => this.player.alive && (this.player.x - this.world.hushX) < 1100,
-      deep: () => this.player.maxX * METRES > 600,
+      // `deep` must describe a moment, not a threshold already crossed. maxX is
+      // a run maximum that only resets in newRun(), so testing it alone made
+      // this a latch: seeked after another scene had already carried the run
+      // past 600m, it resolved on the very next step and produced a duplicate
+      // of the previous frame on 7 of 11 seeds. Requiring progress *during this
+      // seek* makes it a moment regardless of what ran before it.
+      deep: () => this.player.maxX * METRES > Math.max(600, this._seekEntryDepth + 150),
       dead: () => this.mode === 'dead' && this.deadT > 0.9,
     };
     const test = tests[cond] || (() => true);
     if (this.mode === 'title') this.startPlay();
+    this._seekEntryDepth = this.player.maxX * METRES;
     const limit = this.t + maxT;
     let guard = 0;
     while (this.t < limit && guard++ < 400000) {
