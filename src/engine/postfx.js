@@ -6,7 +6,7 @@
 //     -> halation     3 cascaded gaussians of mip1  (tight, hugs sources)
 //     -> veil         progressive upsample 5..2     (wide, low amplitude)
 //     -> streak       2 widening horizontal passes  (anamorphic)
-//     -> composite    spectral CA / astigmatic edge / zoom smear, water medium,
+//     -> composite    spectral CA / astigmatic edge / speed smear, water medium,
 //                     cos^4 vignette, hue-preserving filmic, split tone,
 //                     clumped film grain, TPDF dither
 //
@@ -14,6 +14,16 @@
 // blur radius for everything reads as a filter, not as light in a room. And the
 // tonemap runs on the peak channel, not per-channel, so a hot cyan core lands
 // on cyan-white and a hot amber core on amber-white instead of both on grey.
+//
+// Two things in here were wrong for a long time and are worth naming so they do
+// not come back:
+//   1. Dispersion and the speed smear shared one radial excursion, so the
+//      spectral weights rode the smear. A 2px fringe is a lens; a 20px one is
+//      confetti. They are now separate displacements - see the composite.
+//   2. The peak curve was normalised by hable(white), which makes the white
+//      point a hard CLIP. Everything above it landed on the same pixel, so hot
+//      cores read as featureless white discs. It is normalised by the curve's
+//      asymptote now - see tonemapHue.
 import { compile, RenderTarget, drawFullscreen, FS_VS, GLSL_COMMON, Blend, texture2D } from './gl.js';
 
 const clampN = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -172,11 +182,25 @@ float grain(vec2 p, float s){
   return (clump * 0.70 + fine * 0.30) - 0.5;
 }
 
-// Hable filmic. Applied to a scalar only - see tonemapHue.
+// Hable filmic. Applied to a scalar only - see tonemapHue. The coefficients are
+// named because the shoulder's asymptote is a function of them and tonemapHue
+// needs it: as x grows the ratio tends to 1, so hable tends to 1 - E/F.
+const float HB_A = 0.22, HB_B = 0.30, HB_C = 0.10, HB_D = 0.20, HB_E = 0.01, HB_F = 0.30;
+const float HB_INF = 1.0 - HB_E / HB_F;
 float hable(float x){
-  const float A=0.22, B=0.30, C=0.10, D=0.20, E=0.01, F=0.30;
-  return ((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F)) - E/F;
+  return ((x*(HB_A*x + HB_C*HB_B) + HB_D*HB_E) / (x*(HB_A*x + HB_B) + HB_D*HB_F)) - HB_E/HB_F;
 }
+
+// hable approaches HB_INF like 1/x, so dividing by hable(white) - the textbook
+// normalisation - reaches 1.0 exactly AT white and is clamped flat above it.
+// That made the white point a clip: linear 11 and linear 30 came out as the
+// same pixel, which is why every hot core was a solid white disc with no shape
+// inside it. Dividing by the asymptote instead means the curve approaches
+// display white and never arrives, so the ladder above the knee survives, and
+// uWhite goes back to meaning where the shoulder sits rather than where the
+// image dies. WHITE_REF is picked so that at the default white of 11 the toe
+// and the mid-tones land within a level of the old curve: only highlights move.
+const float WHITE_REF = 12.3;
 
 // Curve the peak channel, then re-attach the chroma direction and let it walk
 // toward white only as the shoulder runs out. Per-channel curves send every
@@ -185,7 +209,7 @@ float hable(float x){
 vec3 tonemapHue(vec3 c, float white, float keep){
   float pk = max(max(c.r, c.g), max(c.b, 1e-5));
   vec3 ratio = c / pk;
-  float y = clamp(hable(pk) / hable(white), 0.0, 1.0);
+  float y = min(hable(pk * (WHITE_REF / max(white, 1.0))) / HB_INF, 1.0);
   return mix(ratio, vec3(1.0), pow(y, keep)) * y;
 }
 
@@ -219,30 +243,54 @@ void main(){
   uv = shockwave(uv, uWave0);
   uv = shockwave(uv, uWave1);
 
-  // --- one radial loop does three jobs: spectral chromatic aberration, the
-  //     tangential edge softness of a fast lens, and the zoom smear of speed.
-  //     Sample position is jittered so the smear grains out instead of ghosting.
-  float caK  = uChroma * (0.18 + rn2 * 2.1);
+  // --- the glass. Three jobs, and they used to share one radial excursion:
+  //     the spectrum was looked up on the same parameter that drove the smear,
+  //     so at speed a 20px motion blur was painting the dispersion that a 2px
+  //     fringe is supposed to. Every small highlight became a rainbow dash.
+  //     Now dispersion only ever spans caK, and the smear displacement is
+  //     achromatic - all three spectral bins ride it the same distance - so a
+  //     mote fringes instead of splitting into separated colour copies. ---
+  float caK  = uChroma * (0.14 + rn2 * 1.25);
   float defK = uDefocus * rn2 * rn;
   float smK  = uSmear * min(rlen, 0.62);
   float jit  = ign(fc + 13.0) - 0.5;
-  vec3 acc = vec3(0.0), wsum = vec3(0.0);
-  for(int i=0;i<7;i++){
-    float t = clamp((float(i) + jit) / 6.0, 0.0, 1.0);
-    float d = t * 2.0 - 1.0;
-    vec3 sw = texture(uSpectrum, vec2(t, 0.5)).rgb + 0.03;
-    vec2 off = dirR * (d * (caK + smK)) + perp * (d * defK);
-    acc  += texture(uHalf, uv + off).rgb * sw;
-    wsum += sw;
+
+  // Three spectral bins, normalised so the trio sums to unity in every channel.
+  // The LUT ends are not pure R and B, which is what makes the fringe read as
+  // glass rather than as a comic-book red/blue split. Orientation matches the
+  // veil below: the red end is sampled outward, so red lands inward.
+  vec3 swI = texture(uSpectrum, vec2(0.05, 0.5)).rgb + 0.02;
+  vec3 swM = texture(uSpectrum, vec2(0.52, 0.5)).rgb + 0.02;
+  vec3 swO = texture(uSpectrum, vec2(0.95, 0.5)).rgb + 0.02;
+  vec3 swN = 1.0 / max(swI + swM + swO, vec3(1e-4));
+  swI *= swN; swM *= swN; swO *= swN;
+
+  // Gaussian-weighted along the smear, so the outermost taps sit at a tenth of
+  // the centre's weight and stop reading as discrete ghosts. Position is
+  // jittered per pixel so what is left grains out instead of banding.
+  vec3 acc = vec3(0.0);
+  float wsum = 0.0;
+  for(int i=0;i<6;i++){
+    float d = ((float(i) + 0.5 + jit) / 3.0) - 1.0;      // -1 .. 1
+    float w = exp(-d * d * 2.4);
+    vec2 base = uv + dirR * (d * smK) + perp * (d * defK);
+    acc += (texture(uHalf, base + dirR * caK).rgb * swO
+          + texture(uHalf, base).rgb              * swM
+          + texture(uHalf, base - dirR * caK).rgb * swI) * w;
+    wsum += w;
   }
+  acc /= max(wsum, 1e-4);
+
   // On axis nothing is displaced, so keep the full-res tap; the dispersed
   // version fades in exactly where the lens stops being sharp. That is also
   // where the edge softness comes from - it is one effect, not two.
   float soft = clamp((caK + smK + defK) * uRes.x / 2.2 - 0.35, 0.0, 1.0);
-  vec3 col = mix(texture(uScene, uv).rgb, acc / max(wsum, vec3(1e-4)), soft) * uExposure;
+  vec3 col = mix(texture(uScene, uv).rgb, acc, soft) * uExposure;
 
   // --- bloom, two characters. Wide veil first: low amplitude, long tail. ---
-  float ca2 = caK * 2.6;
+  // The veil is broad and smooth, so it can carry a much wider per-channel
+  // offset than the sharp layer without any risk of reading as a colour copy.
+  float ca2 = caK * 4.5;
   vec3 veil = vec3(texture(uVeil, uv + dirR * ca2).r,
                    texture(uVeil, uv).g,
                    texture(uVeil, uv - dirR * ca2).b);
@@ -347,14 +395,16 @@ export const GRADE = {
   streak: 0.15,
   streakStride: [2.6, 11.0],
   dirt: 0.55,
+  // Dispersion is a property of glass, not of how fast you are going. At 1600
+  // wide this is sub-pixel on axis and ~3px in the extreme corner: a fringe.
   chroma: 0.0013,
   defocus: 0.0034,
   barrel: 0.030,
   vignette: 0.68,
   vigFocal: 0.95,
   vigCorner: 0.28,
-  white: 11.0,            // linear value that lands on display white
-  hueKeep: 6.0,           // higher = hue survives further up the shoulder
+  white: 11.0,            // linear value the shoulder is built around
+  hueKeep: 7.0,           // higher = hue survives further up the shoulder
   saturation: 1.06,
   contrast: 0.190,
   lift: 0.013,
@@ -491,13 +541,20 @@ export class Post {
       halation: G.halation * (1 + lg * 1.10 + sk * 0.25),
       haloStride: G.haloStride,
       haloStride2: G.haloStride2,
-      streak: G.streak * (1 + sk * 1.15 + lg * 1.80 + slow * 0.30),
+      // The streak carries more of the speed read now that the smear is short
+      // enough to stay smooth - it is the cue that survives at 1:1.
+      streak: G.streak * (1 + sk * 1.55 + lg * 1.80 + slow * 0.30),
       streakStride: G.streakStride,
       dirt: G.dirt,
 
-      chroma: G.chroma + sk * 0.0018 + hush * 0.0022 + slow * 0.0026 + lg * 0.0014,
+      // These three used to be pushed hard by speed, which is what turned the
+      // dispersion into confetti. Speed belongs in the smear and the streak;
+      // chroma stays at lens scale so a mote keeps a fringe, not a rainbow.
+      chroma: G.chroma + sk * 0.0006 + hush * 0.0007 + slow * 0.0009 + lg * 0.0005,
       defocus: G.defocus + sk * 0.0026 + slow * 0.0018,
-      smear: sk * 0.020 + lg * 0.016 + slow * 0.006,
+      // Capped so the widest excursion stays inside ~2px of tap spacing at
+      // 1600 wide. Longer than that and six taps read as discrete ghosts.
+      smear: sk * 0.0060 + lg * 0.0050 + slow * 0.0020,
       barrel: G.barrel + sk * 0.014,
 
       vignette: Math.min(0.86, G.vignette + hush * 0.16 + slow * 0.10 + deadK * 0.22 + sk * 0.05),
