@@ -46,6 +46,13 @@ const BUDGET = {
   // that axis is judged on.
   shadowFracMin: 0.08,   // fraction below L8; a real abyss wants 0.15-0.25
   moteContrastMin: 4.0,  // focal core vs its local surround, at any speed
+  // Focal contrast is local: it only asks whether the mote beats its own
+  // immediate surround. An art director measured the mote as the 10th and then
+  // the 43rd most salient bright cluster in its own frame -- locally fine,
+  // globally lost. This ranks the hero's block against every other block in the
+  // frame by highlight energy, which is the question a player scanning a still
+  // actually asks.
+  moteRankMax: 3,
 };
 
 /**
@@ -178,6 +185,33 @@ for (const seed of SEEDS) {
             }
           } catch { /* mote off-screen */ }
 
+          // Global salience: rank the mote's block among all blocks by highlight
+          // energy (luminance squared, so bright things dominate over broad dim
+          // ones, which is what the eye does).
+          let moteRank = null, blockCount = 0;
+          try {
+            const g = window.game;
+            const BX = 24, BY = 14;
+            const energy = new Float64Array(BX * BY);
+            for (let yy = 0; yy < t.height; yy++) {
+              const by = Math.min(BY - 1, Math.floor(yy * BY / t.height));
+              for (let xx = 0; xx < t.width; xx++) {
+                const bx = Math.min(BX - 1, Math.floor(xx * BX / t.width));
+                const l = vals2[yy * t.width + xx];
+                energy[by * BX + bx] += l * l;
+              }
+            }
+            const uv = g.cam.worldToUv(g.player.x, g.player.y);
+            const mx = Math.floor(uv[0] * BX), my = Math.floor((1 - uv[1]) * BY);
+            if (mx >= 0 && my >= 0 && mx < BX && my < BY) {
+              const mine = energy[my * BX + mx];
+              let better = 0;
+              for (let i = 0; i < energy.length; i++) if (energy[i] > mine) better++;
+              moteRank = better + 1;
+              blockCount = energy.length;
+            }
+          } catch { /* mote off-screen */ }
+
           let shadow = 0;
           for (let i = 0; i < n; i++) if (vals[i] < 8 / 255) shadow++;
           const shadowFrac = shadow / n;
@@ -185,7 +219,7 @@ for (const seed of SEEDS) {
           vals.sort();
           const q = (p) => vals[Math.min(n - 1, Math.floor(p * n))];
           return { mean: sum / n, max, clipped: clipped / n, black: black / n,
-            shadowFrac, contrast,
+            shadowFrac, contrast, moteRank, blockCount,
             p20: q(0.2), p50: q(0.5), p90: q(0.9), p95: q(0.95), p99: q(0.99) };
         });
 
@@ -197,6 +231,7 @@ for (const seed of SEEDS) {
         if (lum.clipped > BUDGET.clippedMax) fails.push(`${tag}: ${(lum.clipped * 100).toFixed(1)}% of pixels clipped to white (max ${(BUDGET.clippedMax * 100)}%)`);
         if (lum.black > BUDGET.blackMax) warns.push(`${tag}: ${(lum.black * 100).toFixed(1)}% of pixels are near-black`);
         if (lum.shadowFrac < BUDGET.shadowFracMin) warns.push(`${tag}: no real blacks — only ${(lum.shadowFrac * 100).toFixed(1)}% of pixels below L8 (want > ${BUDGET.shadowFracMin * 100}%); the abyss never reaches black`);
+        if (lum.moteRank != null && lum.moteRank > BUDGET.moteRankMax) warns.push(`${tag}: hero is not salient — the mote's block ranks ${lum.moteRank} of ${lum.blockCount} by highlight energy (want top ${BUDGET.moteRankMax}); a player scanning the still cannot find their character`);
         if (lum.contrast != null && lum.contrast < BUDGET.moteContrastMin) warns.push(`${tag}: weak focal point — mote core only ${lum.contrast.toFixed(1)}:1 over its surround (want > ${BUDGET.moteContrastMin}:1)`);
         const spread = lum.p95 - lum.p20;
         if (spread < BUDGET.minSpread) fails.push(`${tag}: flat image — p95-p20 luminance spread only ${spread.toFixed(3)} (want > ${BUDGET.minSpread})`);
@@ -372,6 +407,7 @@ if (JSON_OUT) {
       if (v.hdr) console.log(`  ${(sc + ' hdr').padEnd(11)} p50 ${v.hdr.p50}  p90 ${v.hdr.p90}  p99 ${v.hdr.p99}  max ${v.hdr.max}   (linear, pre-tonemap)`);
       console.log(`  ${sc.padEnd(11)} mean ${v.mean.toFixed(4)}  p50 ${v.p50.toFixed(3)}  spread ${(v.p95 - v.p20).toFixed(3)}` +
         `  shadow ${((v.shadowFrac || 0) * 100).toFixed(1)}%  focal ${v.contrast ? v.contrast.toFixed(1) + ':1' : '--'}` +
+        `  rank ${v.moteRank != null ? v.moteRank + '/' + v.blockCount : '--'}` +
         `  clipped ${(v.clipped * 100).toFixed(2)}%  black ${(v.black * 100).toFixed(1)}%  (${v.depth}m)`);
     }
   }
