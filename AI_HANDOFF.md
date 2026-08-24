@@ -277,58 +277,91 @@ Two lessons, both cheap: **isolate by elimination rather than by reasoning**, an
 "debug ellipse" around the player, and a rainbow-confetti bug, for multiple
 review passes each.
 
+The kill-switches exist for this: `?noSprites=1`, `?noRibbons=1` and
+`?debugLayers=1` (false-colour every sprite by its atlas layer, so an artefact's
+colour names its source). Between them, four separate ring artefacts on the
+player were each attributed to the right file, twice overturning a confident
+wrong guess — including one of mine.
+
+**Distrust your own harness before you distrust the art.** A blind reviewer once
+diffed the panels it had been handed and found that four of five "comparisons"
+showed the same frame twice, because a filename-tagging regex collapsed five
+distinct frames to one key. It cost an entire review round, and the symptom was
+visible in the output filenames the whole time. `montage.mjs` now hard-fails on
+duplicate tags, partial coverage, and byte-identical frames within one build.
+
 ## 8. Known weaknesses and active investigation
 
-Verify each against the current code before acting; some may be fixed.
+Verify each against the current code before acting; some may be fixed. The
+authoritative snapshot of quality is whatever `node tools/check.mjs --seeds 7,3`
+says today, plus a blind review per `tools/CRITIC.md`.
 
-- **UI is the least developed axis.** `src/game/hud.js` may still be close to
-  the original placeholder: thin type that disappears over a bright scene, an
-  invisible speed bar, a forgettable death card, and a title wordmark with no
-  identity. The wordmark should be drawn as vector paths, not set in a system
-  font, so it is identical everywhere.
-- **The mote can read as a featureless white disc** if the tonemap shoulder
-  flattens everything above the knee. Measured symptom: linear 11x and 18x
-  mapping to the same output level. Both halves matter — the grade must not
-  flatten, and the scene must not hand it a broad uniform plateau.
-- **Small highlights can turn into rainbow dashes.** Root cause found: the
-  spectral weighting shared a loop index with the speed-smear displacement, so a
-  ~20px motion blur was painting the dispersion instead of the ~1px aberration.
-  Keep spectral offsets at CA scale regardless of speed.
+**Most recent blind review** (five pairs, simulation byte-identical between the
+two builds so every difference was purely rendering): the current build won all
+five pairs, scored **6.1 mean** across nine axes, and the verdict was **No** to
+shipping. Highest axis was light behaviour (7); lowest was motion legibility (5).
+Its three ranked problems, all open at the time of writing:
+
+1. **The hero is the weakest-crafted object in its own frame.** The anchor bell
+   membranes, the barbed kelp and the seabed anemones all carry more internal
+   structure than the player does. The prescription: give the mote a body — a
+   translucent sac with a visible nucleus and trailing cilia that lag behind the
+   velocity vector — and make its halo an anisotropic ellipse stretched along
+   travel rather than a circle, so its shape alone reads direction. Constraint:
+   focal contrast must stay above 4:1, so new structure has to sit inside the
+   core radius or be genuinely dark.
+2. **The anamorphic streaks read as a filter, not light.** Every bright object
+   throws a level bar across the full frame that passes *in front of*
+   silhouettes it should be behind. There is no depth buffer to test against, so
+   either approximate occlusion or replace the streak with a short
+   emitter-oriented anisotropic bloom.
+3. **Speed is invisible in a still.** In a distance game the HUD is doing work
+   the image should do. Cues belong on the world (plankton streaked along
+   travel, near-ground directional smear, a wake whose length is the speedometer)
+   and explicitly **not** on the hero — smearing the player is what made an
+   earlier build's tether read as a flat desaturated ribbon.
+
+Runners-up from the same review: geometry floats (kelp and reeds terminate on a
+flat horizontal baseline instead of intersecting the seabed — `world.bandBot(x)`
+is cheap and pure, so strands can be planted at the real floor); the lower ~40%
+of some frames is dead space; and there is no depth-absorption gradient, so far
+and near read at the same contrast despite `palette.js` providing `depthFade`
+and `absorb` and every decor item carrying a `depth` field.
+
+Longer-standing items:
+
+- **Two `tethered` frames cannot reach black.** `check.mjs` warns; postfx has
+  established this is scene-side, not grade-side (a 0.020 black point, 10x what
+  shipped, only reached 8% while costing 27% of the mean).
 - **Difficulty tuning drifts as movement improves.** Every time the swing gets
   better the curve gets easier. Re-run `tools/_probe.mjs` and `tools/_reach.mjs`
-  after any physics change.
-- **`tools/_*` are scratch instruments** left deliberately, because they are how
-  most real bugs here were found. They are not tests, they have no pass/fail
-  contract, and they may rot — re-run them rather than trusting prose.
-  `_probe.mjs` (level coverage, phrase mix), `_reach.mjs` (fairness against the
-  real `Player`; currently reports ~1 dead-end anchor per seed, which has never
-  been triaged as tolerance-or-defect), `_feel.mjs` (movement measurement, many
-  modes), `_spot.mjs` (dumps the level around a death), `_grade.html`/`_grade.mjs`
-  (synthetic HDR bench), `_atlas.html`/`_atlas.mjs` (sprite atlas viewer),
-  `_audio.mjs` (offline audio render + spectrogram), `_sortcheck.mjs` (x-ordering,
-  now also enforced by `check.mjs`). Note `_atlas.mjs` and `_grade.mjs` hardcode
-  an absolute repo path and will need editing if the repo moves.
+  after any physics change. `_reach.mjs` reports roughly one dead-end anchor per
+  seed, which has never been triaged as tolerance-or-defect.
 - **Audio has never been verified by ear** — only structurally, via offline
   render and spectrogram inspection. `tools/playtest.mjs` does confirm the
   autoplay path works: audio initialises from a real gesture in a real loop.
 - **Frame pacing cannot be measured authoritatively without a display.**
-  `tools/playtest.mjs` drives the real `requestAnimationFrame` loop with real
-  mouse events and reports a roughly 60/40 split between 16.7ms and 33.3ms
-  frames, but headless Chrome has no display and its compositor halves the rate
-  on its own. The underlying budgets are comfortable and measured: CPU work is
-  ~5.6ms median per frame (of which the 2D HUD is only ~0.5ms) and the GL chain
-  is ~2.6-3.4ms at 1280x720 with `gl.finish()`. Someone should confirm real
-  pacing on a machine with a screen; nothing in the repo can.
-- **`shots/` is gitignored**, so any "compare against the previous build"
-  instruction has no baseline on a fresh clone. Capture a baseline first.
-- **Nothing mechanically enforces the check before a commit** — no CI, no hooks.
-  It is convention. `npm test` runs it if you prefer that entry point.
-- **`hazardNear` and `deep` can land on nearly the same frame** on some seeds,
-  which quietly weakens A/B coverage. Prefer explicit `--at` times or more seeds
-  when that matters.
-- **The "~23x between best and worst release" figure** in section 6 came from a
-  `_feel.mjs` measurement that is not committed; only `loadTime` is visible in
-  the code. Re-derive it before relying on it.
+  `playtest.mjs` drives the real rAF loop with real mouse events and reports a
+  roughly 60/40 split between 16.7ms and 33.3ms frames, but headless Chrome has
+  no display and its compositor halves the rate on its own. The budgets
+  underneath are comfortable and measured: CPU ~5.6ms per frame of which the 2D
+  HUD is ~0.5ms, and the GL chain ~2-3.4ms at 1280x720 with `gl.finish()`.
+  Someone should confirm real pacing on a machine with a screen; nothing here can.
+- **`tools/_*` are scratch instruments**, deliberately kept because they are how
+  most real bugs here were found. Not tests, no pass/fail contract, may rot:
+  `_probe.mjs` (level coverage, phrase mix), `_reach.mjs` (fairness against the
+  real `Player`), `_feel.mjs` (movement, many modes), `_spot.mjs` (dumps the
+  level around a death), `_grade.html`/`_grade.mjs` (synthetic HDR bench),
+  `_atlas.*` (sprite atlas viewer), `_audio.mjs` (offline audio + spectrogram),
+  `_det3.mjs` (frozen-state render stability), `_shaft.mjs`/`_slot.mjs` (god-ray
+  fields), `_sortcheck.mjs` (x-ordering, now also in `check.mjs`). Note
+  `_atlas.mjs` and `_grade.mjs` hardcode an absolute repo path.
+- **`shots/` is gitignored**, so "compare against the previous build" has no
+  baseline on a fresh clone. Capture one first. To compare against an *older
+  commit*, add a detached worktree at that commit, symlink `node_modules` into
+  it, and capture from there — the primary tree is never disturbed.
+- **Nothing mechanically enforces the gate before a commit** — no CI, no hooks.
+  `npm test` runs it.
 
 ## 8b. Work preserved on branches (as of the last edit to this file)
 
