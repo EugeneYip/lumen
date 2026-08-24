@@ -452,34 +452,47 @@ class Game {
     // cheap enough to call from a tuning loop.
     gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
     const buf = new Float32Array(rt.w * 4);
-    const rows = [];
-    // Percentiles come from a coarse grid, which is plenty for distribution.
-    // `max` must NOT: a hot emitter core is a handful of pixels, so a grid with
-    // ~17px spacing misses it about 19 times in 20 and the >6 linear contract
-    // fails at random. Scan every pixel of every row for the peak instead.
-    let peak = 0;
+
+    // Every statistic here is computed over EVERY pixel, via a log-spaced
+    // histogram built in the same pass that finds the peak.
+    //
+    // This used to sample a 96x54 grid. Two separate failures came from that:
+    // `max` missed a few-pixel emitter core about 19 times in 20, so the
+    // ">6 linear" contract failed at random; and p99 was literally "the 52nd
+    // brightest of 5184 samples", a population count rather than a level, which
+    // made it swing by more than its own margin between a quiet machine and a
+    // busy one and had an agent chasing a regression that did not exist.
+    const NB = 2048, LO = -14, HI = 8;          // log2 luminance range
+    const hist = new Int32Array(NB + 2);
+    let peak = 0, sum = 0, n = 0;
     for (let y = 0; y < rt.h; y++) {
       gl.readPixels(0, y, rt.w, 1, gl.RGBA, gl.FLOAT, buf);
       for (let x = 0; x < rt.w * 4; x += 4) {
         const l = buf[x] * 0.2126 + buf[x + 1] * 0.7152 + buf[x + 2] * 0.0722;
         if (l > peak) peak = l;
-      }
-      // Keep the sparse sample for the distribution.
-      if (((y * H) % rt.h) < H) {
-        for (let j = 0; j < W; j++) {
-          const x = Math.floor((j + 0.5) * rt.w / W) * 4;
-          rows.push(buf[x] * 0.2126 + buf[x + 1] * 0.7152 + buf[x + 2] * 0.0722);
-        }
+        sum += l; n++;
+        const lg = l > 0 ? Math.log2(l) : LO;
+        let b = Math.floor(((lg - LO) / (HI - LO)) * NB);
+        if (b < 0) b = 0; else if (b > NB) b = NB;
+        hist[b]++;
       }
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    rows.sort((a, b) => a - b);
-    const q = (t) => rows[Math.min(rows.length - 1, Math.floor(t * rows.length))];
-    const mean = rows.reduce((a, b) => a + b, 0) / rows.length;
+
+    const q = (t) => {
+      const want = t * n;
+      let acc = 0;
+      for (let b = 0; b <= NB; b++) {
+        acc += hist[b];
+        if (acc >= want) return Math.pow(2, LO + ((b + 0.5) / NB) * (HI - LO));
+      }
+      return peak;
+    };
+    const mean = sum / n;
     return {
       mean: +mean.toFixed(4), p10: +q(0.1).toFixed(4), p50: +q(0.5).toFixed(4),
       p90: +q(0.9).toFixed(4), p99: +q(0.99).toFixed(4), max: +peak.toFixed(3),
-      note: 'linear HDR scene luminance, pre-tonemap; percentiles sampled, max exact',
+      note: 'linear HDR scene luminance, pre-tonemap; every pixel, histogram percentiles',
     };
   }
 
