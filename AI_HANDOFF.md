@@ -13,8 +13,14 @@ delegate to sub-agents).
 ```bash
 node tools/state.mjs                    # repo state: HEAD, dirty files, branches, worktrees
 node tools/check.mjs --seeds 7,3        # authoritative quality gate
+node tools/playtest.mjs                 # the REAL rAF loop, real input events, real audio
 node tools/serve.js                     # play it at http://localhost:5173/
 ```
+
+`check.mjs` drives the simulation directly, which is what makes captures
+reproducible but also means it never exercises the production path.
+`playtest.mjs` covers that gap: no `?headless=1`, so the real loop, the
+accumulator under variable frame time, real mouse events and audio all run.
 
 Never transcribe repository state into prose; it goes stale immediately. Derive
 it with `tools/state.mjs`.
@@ -303,7 +309,16 @@ Verify each against the current code before acting; some may be fixed.
   now also enforced by `check.mjs`). Note `_atlas.mjs` and `_grade.mjs` hardcode
   an absolute repo path and will need editing if the repo moves.
 - **Audio has never been verified by ear** — only structurally, via offline
-  render and spectrogram inspection.
+  render and spectrogram inspection. `tools/playtest.mjs` does confirm the
+  autoplay path works: audio initialises from a real gesture in a real loop.
+- **Frame pacing cannot be measured authoritatively without a display.**
+  `tools/playtest.mjs` drives the real `requestAnimationFrame` loop with real
+  mouse events and reports a roughly 60/40 split between 16.7ms and 33.3ms
+  frames, but headless Chrome has no display and its compositor halves the rate
+  on its own. The underlying budgets are comfortable and measured: CPU work is
+  ~5.6ms median per frame (of which the 2D HUD is only ~0.5ms) and the GL chain
+  is ~2.6-3.4ms at 1280x720 with `gl.finish()`. Someone should confirm real
+  pacing on a machine with a screen; nothing in the repo can.
 - **`shots/` is gitignored**, so any "compare against the previous build"
   instruction has no baseline on a fresh clone. Capture a baseline first.
 - **Nothing mechanically enforces the check before a commit** — no CI, no hooks.

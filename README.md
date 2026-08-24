@@ -38,6 +38,7 @@ ahead of the anchor — so holding longer is not automatically better.
 
 ```bash
 node tools/check.mjs --seeds 7,3        # AUTHORITATIVE. Must pass before any commit.
+node tools/playtest.mjs                 # the real rAF loop, real input, real audio
 ```
 
 `check.mjs` is the source of truth for quality, not prose. It asserts zero
