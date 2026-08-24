@@ -155,7 +155,16 @@ for (const seed of SEEDS) {
     // ---- HDR scene structure ----
     try {
       for (const sc of ['tethered', 'fast']) {
-        await page.evaluate((c) => window.LUMEN.seekUntil(c, 60), sc);
+        // Restart before each measurement. Without this the probe runs on from
+        // wherever the previous scene loop left the world, so it reports a
+        // different position than the tonemapped checks above and the two sets
+        // of numbers cannot be compared.
+        await page.evaluate((c) => {
+          const g = window.game;
+          g.input.setSynthetic(false); g.input.endFrame();
+          g.startPlay();
+          return window.LUMEN.seekUntil(c, 60);
+        }, sc);
         const h = await page.evaluate(() => window.LUMEN.hdrStats());
         S.scenes[sc] = { ...(S.scenes[sc] || {}), hdr: h };
         const tag = `seed ${seed} / ${sc} HDR`;

@@ -51,7 +51,7 @@ const CORE_MIN = 4.2;    // world units: below this a ribbon core aliases to dot
 // core sitting at 1.2 leaves the entire response curve unexercised and light
 // stops looking like light. Hot regions are kept a few pixels wide so the bulk
 // of the frame stays deep shadow (p50 < 0.03).
-const HOT = 13;          // the mote nucleus: the hottest thing in the world
+const HOT = 30;          // peak gain of the mote nucleus - the one knob
 
 /** Ribbon width that renders a visible core `core` units wide at `falloff`. */
 const wCore = (core, falloff) => Math.max(core, CORE_MIN) * Math.sqrt(falloff / 0.693);
@@ -364,7 +364,7 @@ export class Scene {
     }
 
     // Ember down in the shell, glimpsed between spines. Deliberately small.
-    this.glow.puts(h.x, h.y, r * 3.0, scaled(PAL.hazard, (0.022 + 0.014 * p) * hot, c0), 1, S.GLOW);
+    this.glow.puts(h.x, h.y, r * 3.2, scaled(PAL.hazard, (0.018 + 0.012 * p) * hot, c0), 1, S.VEIL);
     this.glow.puts(h.x, h.y, r * 0.66, scaled(PAL.hazard, (0.20 + 0.20 * p) * hot, c0), 1, S.GLOW);
     this.glow.puts(h.x, h.y, r * 0.60, scaled(PAL.hazardRim, (3.2 + 2.8 * p) * hot, c0), 1, S.CORE);
 
@@ -408,10 +408,10 @@ export class Scene {
 
     // --- interior volume. Nested squashed glows fill the dome so the bell is a
     // body of light bounded by a membrane, not an outline around nothing. ---
-    this.glow.push(cx, cy - hh * 0.46, w * 2.7, hh * 2.4, 0,
-      PAL.hazard[0] * 0.13 * bell, PAL.hazard[1] * 0.13 * bell, PAL.hazard[2] * 0.13 * bell, 1, S.GLOW);
-    this.glow.push(cx, cy - hh * 0.40, w * 1.85, hh * 1.62, 0,
-      PAL.hazard[0] * 0.22 * bell, PAL.hazard[1] * 0.22 * bell, PAL.hazard[2] * 0.22 * bell, 1, S.GLOW);
+    this.glow.push(cx, cy - hh * 0.46, w * 2.9, hh * 2.6, 0,
+      PAL.hazard[0] * 0.11 * bell, PAL.hazard[1] * 0.11 * bell, PAL.hazard[2] * 0.11 * bell, 1, S.VEIL);
+    this.glow.push(cx, cy - hh * 0.34, w * 2.05, hh * 1.80, 0,
+      PAL.hazard[0] * 0.20 * bell, PAL.hazard[1] * 0.20 * bell, PAL.hazard[2] * 0.20 * bell, 1, S.VOLUME);
     this.glow.push(cx, cy - hh * 0.30, w * 1.05, hh * 0.92, 0,
       PAL.hazard[0] * 0.30 * bell, PAL.hazard[1] * 0.30 * bell, PAL.hazard[2] * 0.30 * bell, 1, S.GLOW);
 
@@ -522,8 +522,8 @@ export class Scene {
     }
 
     // Danger telegraph: very low, very wide. Reads at distance without glowing.
-    this.glow.push(cx, cy, w * 8.5, hh * 7.0, 0,
-      PAL.hazard[0] * 0.028, PAL.hazard[1] * 0.028, PAL.hazard[2] * 0.028, 1, S.GLOW);
+    this.glow.push(cx, cy, w * 6.8, hh * 5.6, 0,
+      PAL.hazard[0] * 0.024, PAL.hazard[1] * 0.024, PAL.hazard[2] * 0.024, 1, S.VEIL);
   }
 
   // ---------------------------------------------------------------- anchors ---
@@ -624,7 +624,7 @@ export class Scene {
     // and orange carry the volume; near-white is rationed to the core alone, or
     // the anchor competes with the mote for hue as well as value.
     this.glow.push(bx, by - r * 0.10, r * 12 * (isHeld ? 1.35 : 1), r * 11 * (isHeld ? 1.35 : 1), 0,
-      PAL.anchorRim[0] * k * 0.13, PAL.anchorRim[1] * k * 0.13, PAL.anchorRim[2] * k * 0.13, 1, S.GLOW);
+      PAL.anchorRim[0] * k * 0.11, PAL.anchorRim[1] * k * 0.11, PAL.anchorRim[2] * k * 0.11, 1, S.VEIL);
     // Sampled along the teardrop's own axis so the light fills the body's shape
     // rather than sitting behind it as a disc.
     for (let q = 0; q < 4; q++) {
@@ -930,10 +930,11 @@ export class Scene {
       }
     }
 
-    // 2. corona: a wide veil broken out of a perfect disc by drifting lobes.
-    this.glow.push(p.x, p.y, R * 21 * (1 + sk * 0.55), R * 18 * th, ang,
-      PAL.moteOuter[0] * 0.10 * boost, PAL.moteOuter[1] * 0.10 * boost, PAL.moteOuter[2] * 0.10 * boost,
-      1, S.GLOW);
+    // 2. scatter: the light sitting *in* the water, broken out of a perfect
+    // disc by drifting lobes.
+    this.glow.push(p.x, p.y, R * 20 * (1 + sk * 0.55), R * 17 * th, ang,
+      PAL.moteOuter[0] * 0.12 * boost, PAL.moteOuter[1] * 0.12 * boost, PAL.moteOuter[2] * 0.12 * boost,
+      1, S.VEIL);
     for (let q = 0; q < 5; q++) {
       const a2 = q * 1.2566 + t * 0.32 + noise1(t * 0.6 + q * 7.3) * 2.6;
       const d2 = R * (2.2 + noise1(t * 0.45 + q * 3.1) * 3.2);
@@ -944,25 +945,34 @@ export class Scene {
     this.glow.push(p.x, p.y, R * 8.2 * Math.pow(el, 0.6), R * 7.4 * th, ang,
       PAL.moteOuter[0] * 0.40 * boost, PAL.moteOuter[1] * 0.40 * boost, PAL.moteOuter[2] * 0.40 * boost,
       1, S.GLOW);
-    this.glow.push(p.x, p.y, R * 3.5 * Math.pow(el, 0.5), R * 2.9 * th, ang,
-      PAL.moteInner[0] * 1.05 * boost, PAL.moteInner[1] * 1.05 * boost, PAL.moteInner[2] * 1.05 * boost,
-      1, S.GLOW);
 
     // 3. no caustic ring. Three attempts at one - full arc, dispersed triple
     // arc, broken fragments - all read as a bracket drawn over the game, because
     // a curve concentric with the player is a selection ring no matter how it is
     // tinted or broken up. The corona's own anisotropy carries the refraction.
 
-    // 4. core: an anisotropic body with the dense point pushed forward, which is
-    // what makes the direction of travel readable at a glance.
-    this.glow.push(p.x, p.y, R * 6.0 * Math.pow(el, 0.35), R * 5.0 * th, ang,
-      PAL.moteInner[0] * 4.0 * boost, PAL.moteInner[1] * 4.0 * boost, PAL.moteInner[2] * 4.0 * boost,
-      1, S.CORE);
+    // 4. core. This must be a *gradient*, not a hot disc: what survives the
+    // tonemap shoulder is relative variation, so a broad region of uniform high
+    // value comes back as flat white however good the shoulder is. CORE's raw
+    // profile exceeds 1 near the middle and clamps, so one big CORE quad *is* a
+    // plateau - which is exactly how this read as a featureless ball. Instead:
+    // nested CORE quads, each small enough that its own clamped top is a couple
+    // of pixels, with gains stepped so the sum falls ~40:1 across the core.
+    // VOLUME under them supplies mass and a defined edge.
     const nx = p.x + dx * R * 0.34 * el, ny = p.y + dy * R * 0.34 * el;
-    this.glow.push(nx, ny, R * 22 * Math.pow(el, 0.30), R * 18.5 * th, ang,
-      PAL.moteCore[0] * HOT * boost, PAL.moteCore[1] * HOT * boost, PAL.moteCore[2] * HOT * boost,
-      1, S.CORE);
-    this.glow.push(p.x - dx * R * 0.7 * el, p.y - dy * R * 0.7 * el, R * 0.9, R * 0.55, ang,
+    this.glow.push(p.x, p.y, R * 4.6 * Math.pow(el, 0.45), R * 3.9 * th, ang,
+      PAL.moteInner[0] * 3.0 * boost, PAL.moteInner[1] * 3.0 * boost, PAL.moteInner[2] * 3.0 * boost,
+      1, S.VOLUME);
+    const CS = [24, 16, 9.0, 4.0, 1.6];
+    const CG = [HOT * 0.10, HOT * 0.18, HOT * 0.30, HOT * 0.50, HOT];
+    for (let q = 0; q < 5; q++) {
+      const g2 = CG[q] * boost, s2 = CS[q];
+      this.glow.push(nx, ny, R * s2 * Math.pow(el, 0.28), R * s2 * 0.84 * th, ang,
+        PAL.moteCore[0] * g2, PAL.moteCore[1] * g2, PAL.moteCore[2] * g2, 1, S.CORE);
+    }
+    // Trailing lobe: the core is denser at its leading edge, which is what makes
+    // a direction of travel readable without any added geometry.
+    this.glow.push(p.x - dx * R * 0.9 * el, p.y - dy * R * 0.9 * el, R * 2.6, R * 1.5, ang,
       PAL.moteInner[0] * 2.2 * boost, PAL.moteInner[1] * 2.2 * boost, PAL.moteInner[2] * 2.2 * boost,
       1, S.CORE);
 
@@ -971,8 +981,8 @@ export class Scene {
     // tall enough that their bright band is not a one-pixel scanline.
     const fl = 0.16 + lg * 1.05 + sk * 0.26;
     const rot = -(cam.rot || 0);
-    this.glow.push(p.x, p.y, R * (8 + lg * 50 + sk * 12), R * 3.6, rot,
-      PAL.moteOuter[0] * fl * 0.26, PAL.moteOuter[1] * fl * 0.30, PAL.moteOuter[2] * fl * 0.40, 1, S.STREAK);
+    this.glow.push(p.x, p.y, R * (10 + lg * 54 + sk * 14), R * 5.0, rot,
+      PAL.moteOuter[0] * fl * 0.30, PAL.moteOuter[1] * fl * 0.34, PAL.moteOuter[2] * fl * 0.46, 1, S.ANAMORPH);
     this.glow.push(p.x, p.y, R * (8 + lg * 22), R * 2.6, rot,
       PAL.moteCore[0] * fl * 0.42, PAL.moteCore[1] * fl * 0.42, PAL.moteCore[2] * fl * 0.42, 1, S.STREAK);
 

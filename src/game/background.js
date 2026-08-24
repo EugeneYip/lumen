@@ -21,6 +21,12 @@
 // world space through 'toLayer', which divides the screen offset by the layer's
 // apparent scale, so distant walls converge toward the view centre and shrink
 // the way a canyon actually recedes.
+//
+// Debug kill switches, matching render.js's noSprites/noRibbons: append
+// bgNoSnow / bgNoRays / bgNoVents / bgNoHush to the query string to drop one
+// feature group and attribute an artefact to it. Four uniform multiplies. They
+// are how the axis-aligned-rectangle bug was finally pinned on the marine snow
+// after two sessions of blaming other people's passes; keep them.
 import { compile, drawFullscreen, FS_VS, GLSL_COMMON, Blend, texture2D } from '../engine/gl.js';
 import { PAL } from '../art/palette.js';
 
@@ -45,6 +51,7 @@ uniform float uHushProx;
 uniform float uSpeedK;
 uniform float uDraft;
 uniform float uDiff;
+uniform vec4  uKill;         // debug: x snow, y rays, z vents, w hush (1 = on)
 uniform vec4  uLights[${MAXL}];   // xy world pos, z strength, w warmth
 
 // Chromaticities: peak channel is 1.0, brightness comes from the V_ constants.
@@ -79,7 +86,7 @@ const float V_FARRIM = 0.105;
 const float V_SHAFT = 0.780;   // core of a god ray
 const float V_SILT  = 0.050;   // suspended sediment under full light
 const float V_SNOW  = 0.450;   // one lit fleck of marine snow
-const float V_BIO   = 1.950;   // a living mote - carries its own light
+const float V_BIO   = 2.350;   // a living mote - carries its own light
 const float V_VENT  = 2.500;   // vent throat - superwhite on purpose
 const float V_HUSH  = 6.000;   // the fracture edge - superwhite on purpose
 
@@ -90,6 +97,7 @@ const vec3 ROCK_WARM = vec3(1.00, 0.62, 0.30);
 const vec3 BIO_MINT  = vec3(0.40, 1.00, 0.70);
 const vec3 BIO_ICE   = vec3(0.34, 0.82, 1.00);
 const float SUN_SLANT = 0.215;   // world x the light drifts per unit of descent
+const float BEDY = 135.135;      // world units per sedimentary bed (1 / 0.0074)
 
 vec4  N (vec2 p){ return texture(uNoise, p); }
 float N1(vec2 p){ return texture(uNoise, p).r; }
@@ -102,6 +110,41 @@ float N1(vec2 p){ return texture(uNoise, p).r; }
 // explicit gain instead. GAIN is measured, not guessed: it restores sd ~0.21.
 const float GAIN = 2.6;
 float dev(float v){ return v - 0.5; }
+
+// A smooth pseudo-random driver with a KNOWN range, -1..1. The noise tile's
+// per-channel variance is small and written down nowhere, so anything needing a
+// calibrated swing - per-shaft variance, the fracture shear - cannot be built
+// from it without measuring the tile first, and the tile is someone else's file.
+// Two incommensurate sinusoids cost less than a fetch and cannot drift out of
+// range when textures.js changes underneath.
+float wave(float x, float f, float ph){
+  return sin(x * f + ph) * 0.62 + sin(x * f * 2.317 + ph * 2.7) * 0.38;
+}
+
+// ------------------------------------------------------- cell point sprites --
+// A hash cell draws one sprite and never looks at its neighbours, so the sprite
+// MUST fall to zero before the cell boundary. When it does not, the boundary
+// becomes the silhouette, and the frame fills with hard-edged axis-aligned
+// rectangles that have a soft bright core in them. That is exactly what shipped
+// here: a bio mote's halo was authored as 3-5x the fleck radius with a x7 skirt
+// on top, an effective radius of 0.93 cells, truncated at 0.5 - so every mote
+// was a grey square with a glow inside it, and the speed smear widened the
+// footprint another 4.7x on top. Three guards, because one was not enough:
+// inset the centre, cap every radius against that inset, and window to exactly
+// zero at the edge so a future radius tweak degrades into a soft fade instead
+// of a square.
+const float CELL_INSET = 0.26;    // centres live in [0.26, 0.74]
+const float CELL_RMAX  = 0.062;   // base tail radius; x CELL_GROW still dies by 0.26
+const float CELL_GROW  = 1.85;    // most any sprite may stretch on one axis
+
+vec2 cellCentre(vec2 h){ return 0.5 + (h - 0.5) * (1.0 - 2.0 * CELL_INSET); }
+
+// Zero at the boundary, 1.0 anywhere a correctly-sized sprite has any energy,
+// so on a correct sprite this costs four ops and changes nothing.
+float cellWindow(vec2 f){
+  vec2 e = min(f, 1.0 - f);
+  return smoothstep(0.0, CELL_INSET * 0.60, min(e.x, e.y));
+}
 
 vec2 unrot(vec2 p){ float c = cos(-uCamRot), s = sin(-uCamRot); return vec2(p.x*c - p.y*s, p.x*s + p.y*c); }
 
@@ -130,6 +173,12 @@ float depthOf(float wy){ return sat((wy - uSurfaceY) / max(1.0, uFloorY - uSurfa
 vec3 absorb(vec3 c, float dist){
   return c * exp(-dist * vec3(0.00110, 0.00030, 0.00016));
 }
+
+// The sedimentary bedding grid, tilted. Shared by the near rock and by every
+// far wall, so a bed is the same bed at every distance: that is what makes four
+// parallax layers read as one formation the trench was cut through, instead of
+// four unrelated noise fields that happen to be stacked.
+float bedTilt(float wx){ return (N1(vec2(wx * 0.0000745, 0.41)) - 0.5) * 1750.0; }
 
 // ---------------------------------------------------------------- lighting --
 // How open the trench roof is above x. Two incommensurate scales so the pattern
@@ -183,13 +232,16 @@ vec3 medium(float wy, float sky){
 // ------------------------------------------------------------------- rock ---
 // Sedimentary bedding, shared by roof and floor so the geology reads as one
 // formation the trench was cut through. Built additively so the mean stays at
-// 1.0 and V_ROCK really is the albedo.
-float strata(vec2 w, out float fine){
-  float tilt = (N1(vec2(w.x * 0.0000745, 0.41)) - 0.5) * 1750.0;
-  float sy = (w.y + tilt) * 0.0074;              // ~135 world units per bed
+// 1.0 and V_ROCK really is the albedo. 'contact' is the bedding plane itself:
+// a thin seam at each bed boundary, which is the feature the eye actually reads
+// strata from, and the only one still legible in a near-black mass.
+float strata(vec2 w, out float fine, out float contact){
+  float tilt = bedTilt(w.x);
+  float sy = (w.y + tilt) / BEDY;                 // ~135 world units per bed
   float bi = floor(sy), bf = fract(sy);
   float bh = hash11(bi * 1.37 + 0.5);
   float bed = smoothstep(0.0, 0.13, bf) * (1.0 - smoothstep(0.74, 1.0, bf));
+  contact = 1.0 - smoothstep(0.0, 0.075, min(bf, 1.0 - bf));
   vec4 g = N(w * 0.00135);                       // 185 / 93 / 46 / 23 units
   fine = sat(0.5 + (dev(g.b) * 0.85 + dev(g.a) * 0.50) * 1.9);
   float lam = sin(sy * 9.7 + tilt * 0.0042);
@@ -224,12 +276,18 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus){
   bool roof = cTop > cBot;
   float into = roof ? dTop : dBot;
 
-  float fine;
-  float alb = strata(w, fine);
+  float fine, contact;
+  float alb = strata(w, fine, contact);
   vec3 body = mix(ROCK_COOL, ROCK_WARM, sat(0.34 + 0.62 * (alb - 1.0)));
   // Diffuse rock falls off linearly with irradiance, faster than the water's
   // in-scatter, which is exactly what keeps it reading as silhouette.
-  vec3 c = body * V_ROCK * alb * (0.045 + 0.955 * exp(-into / 240.0))
+  // Deep inside the roof mass that falloff collapses onto its ambient floor,
+  // and at 0.045 the floor multiplied the bedding down to nothing: a ceiling
+  // filling the frame read as a flat hole punched in the image. A higher floor
+  // for the roof only - the floor rock is lit directly and does not need it -
+  // buys back the strata in a mass that is still, absolutely, near-black.
+  float amb = roof ? 0.115 : 0.045;
+  vec3 c = body * V_ROCK * alb * (amb + (1.0 - amb) * exp(-into / 240.0))
          * (0.018 + 0.982 * sky);
 
   float h = 26.0;
@@ -241,6 +299,12 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus){
   // already fetched it. A constant-width, constant-brightness edge glow is the
   // clearest tell of a shader filter rather than light landing on rock.
   float rim = (exp(-into / 20.0) + 0.20 * exp(-into / 52.0)) * (0.40 + 1.20 * fine);
+
+  // Bedding planes catch the little light there is, far into the mass. This is
+  // the term that makes a roof-dominated frame read as layered rock: the body
+  // gradient alone is monotone, and monotone dark is indistinguishable from
+  // empty. Reaches ten times deeper than the rim, at a tenth of its value.
+  c += body * V_ROCK * 0.70 * contact * (0.14 + 0.86 * sky) * exp(-into / 1000.0);
 
   if(roof){
     // Backlit underside. What light it has is bounced up off the water plus the
@@ -274,11 +338,22 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   float nB = sat(0.5 + (dev(na.b) * 0.95 + dev(nb.g) * 0.38 + dev(nb.a) * 0.14) * GAIN);
   // Terrace it. Sedimentary rock erodes into benches with steep risers between
   // them; a smooth noise profile reads as a procedural mountain range, which is
-  // the wrong landform entirely for the inside of a canyon.
-  nT = mix(nT, floor(nT * 6.0) / 6.0 + smoothstep(0.58, 1.0, fract(nT * 6.0)) / 6.0, 0.70);
-  nB = mix(nB, floor(nB * 5.0) / 5.0 + smoothstep(0.58, 1.0, fract(nB * 5.0)) / 5.0, 0.70);
+  // the wrong landform entirely for the inside of a canyon. Most of the
+  // terracing is done below by snapping to the bedding grid, so this only has
+  // to add sub-bed steps.
+  nT = mix(nT, floor(nT * 6.0) / 6.0 + smoothstep(0.58, 1.0, fract(nT * 6.0)) / 6.0, 0.34);
+  nB = mix(nB, floor(nB * 5.0) / 5.0 + smoothstep(0.58, 1.0, fract(nB * 5.0)) / 5.0, 0.34);
   float top = -openT - nT * amp;
   float bot =  openB + nB * amp * 0.92;
+  // A bench does not form at an arbitrary height: it forms where a resistant
+  // bed outcrops. Snap the profile to the SAME tilted bedding grid the near
+  // rock uses - same world spacing, so perspective shrinks it correctly - and a
+  // riser on a far wall lines up with a bed on the near wall. That shared
+  // horizon is the whole difference between four parallax layers and one
+  // geological formation seen at four distances.
+  float tiltF = bedTilt(w.x);
+  top = mix(top, (floor((top + tiltF) / BEDY) + 0.5) * BEDY - tiltF, 0.62);
+  bot = mix(bot, (floor((bot + tiltF) / BEDY) + 0.5) * BEDY - tiltF, 0.62);
   float soft = (uViewSize.y * 0.0055) / s;
   float dT = top - w.y, dB = w.y - bot;
   float cov = max(sat(dT / soft), sat(dB / soft));
@@ -295,8 +370,10 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   float belowS = max(0.0, w.y - top) * s;
   // Cheap sky: a distant wall needs value and contrast, not beam accuracy.
   float sky = (0.09 + 0.30 * nT) * exp(-belowS / 1400.0);
-  float bi = floor((w.y + na.r * 900.0) * 0.0062);
-  float alb = 0.55 + 1.00 * hash11(bi * 1.37 + seed);
+  // Same bed index and the same hash as strata(), so bed N is the same shade of
+  // rock at every distance.
+  float bi = floor((w.y + tiltF) / BEDY);
+  float alb = 0.55 + 1.00 * hash11(bi * 1.37 + 0.5);
   vec3 c = mix(ROCK_COOL, ROCK_WARM, 0.30) * V_ROCK * alb
          * (0.06 + 0.94 * exp(-intoS / 420.0)) * (0.030 + 0.970 * sky);
   // Aerial perspective is the fog toward the local haze, full stop. Stacking an
@@ -367,30 +444,50 @@ void main(){
   // The roof is opaque, so light only arrives through the fissures. Ramped off
   // at the roofline so a beam never appears inside the rock.
   float ramp = smoothstep(0.0, 240.0, below);
+  // Per-shaft variance. Every shaft used to come off one threshold pair on one
+  // field, so they all shared a width, a peak, an edge and a lean - a repeated
+  // element, which reads as wallpaper rather than as light. Four decorrelated
+  // drivers at roughly a third of the slot frequency: adjacent shafts differ,
+  // and because the modulation is continuous there is no seam inside a shaft.
+  float vLean = wave(traceX, 0.00026, 0.7);
+  float vWide = wave(traceX, 0.00023, 2.9);
+  float vPeak = wave(traceX, 0.00031, 5.1);
+  float vLive = wave(traceX, 0.00019, 1.3);
   // Within an open hall the roof is broken into separate slots. Without this
   // high-frequency lateral term the 'beam' is one 400-pixel smudge: the hall
   // field's correlation length is ~800 world units, so thresholding it can only
   // ever produce a soft blob. The hall decides WHERE light gets in; the slots
   // carve it into individual shafts. 333 / 167 / 83 world units - shaft scale.
-  vec4 sl = N(vec2(traceX * 0.00075, 0.31));
+  // Each fissure is its own shape, so the beam it casts gets its own slant on
+  // top of the mean one. Shafts that are not parallel is most of the cue.
+  float slotX = traceX - below * SUN_SLANT * vLean * 0.55;
+  vec4 sl = N(vec2(slotX * 0.00075, 0.31));
   // A sparse MASK, not a smooth field, and it needs its own much lower gain:
   // at this sampling frequency GAIN saturates the field, so the mask measured
   // 'on' 50% of the time and every bit of core brightness also lifted the whole
   // hall - the bulk went 0.02 -> 0.19 on one edit. Measured at gain 1.3 with
   // this threshold: mean 0.089, on 6% of x, shafts ~150 world units wide.
   float slotRaw = sat(0.5 + (dev(sl.r) * 1.20 + dev(sl.g) * 0.75 + dev(sl.b) * 0.40) * 1.30);
-  float slot = smoothstep(0.69, 0.99, slotRaw); slot = slot * slot * slot;
-  float shim = 0.72 + 0.34 * sin(traceX * 0.0079 + uTime * 0.42)
+  // Width and edge softness come off the EXPONENT, not off the threshold pair.
+  // Moving the threshold would change how much of x is lit at all, and the
+  // entire bulk budget is tuned against that coverage; the exponent only
+  // reshapes a shaft that is already there, so the mean barely moves.
+  float slot = smoothstep(0.69, 0.99, slotRaw);
+  slot = pow(slot, 2.55 + vWide * 0.85) * (1.0 + vPeak * 0.55) * 0.90;
+  float shim = 0.72 + 0.34 * sin(traceX * 0.0079 + uTime * 0.42 + vPeak * 2.6)
                           * sin(traceX * 0.0215 - uTime * 0.27 + below * 0.0026);
   float dust = 0.45 + 0.85 * sat(0.5 + dev(N1(vec2(w.x * 0.00092 + flow.x * 0.05,
                                      w.y * 0.00165 - uTime * 0.028))) * 2.1);
   vec3 beamHue = absorb(uCSurf, below * 0.55 + 300.0);
+  // Extinction varies per shaft too: some reach the floor, some are spent
+  // halfway down. Uniform reach is what makes a beam field look printed on.
   vec3 rays = beamHue * V_SHAFT * openShp * slot * ramp * shim * dust
-            * exp(-below / 1500.0);
+            * exp(-below / (1500.0 * (1.0 + vLive * 0.42)));
   // The wide in-scatter halo either side of each beam.
   rays += uCHigh * V_SHAFT * 0.005 * openSft * ramp * exp(-below / 2400.0);
   // Caustic banding inside the beam - the shimmer that says 'moving water'.
   rays += beamHue * V_SHAFT * 0.26 * openShp * slot * ramp * caus * exp(-below / 1900.0);
+  rays *= uKill.y;
   col += rays;
 
   // ---------- hydrothermal vents ----------
@@ -403,18 +500,25 @@ void main(){
     if(h1 > 0.34){
       float vx = (ci + 0.5 + (h1 - 0.5) * 0.52) * CELL;
       float hgt = bandAt(vx).y - w.y;          // height above the floor
-      if(hgt > -90.0 && hgt < 2000.0){
+      if(hgt > -90.0 && hgt < 2600.0){
         float hh = max(hgt, 0.0);
         float rad = 26.0 + hh * 0.20;
         float wob = (N1(vec2(w.y * 0.0011 + ci, uTime * 0.045)) - 0.5) * (30.0 + hh * 0.40);
         float dx = w.x - vx - wob;
         float rip = 0.40 + 1.05 * sat(0.5 + dev(N1(vec2(w.x * 0.0046 + ci,
                                        w.y * 0.0019 - uTime * 0.30))) * 2.2);
-        vent = exp(-(dx * dx) / (rad * rad)) * exp(-hh / (430.0 + h1 * 640.0)) * rip;
+        // Forced to zero inside its own cell, on both axes. A single-cell lookup
+        // cannot borrow the neighbouring plume, so a plume still bright at the
+        // boundary leaves a vertical seam the full height of the frame, and one
+        // still bright at its height cut leaves a horizontal one.
+        vent = exp(-(dx * dx) / (rad * rad)) * exp(-hh / (430.0 + h1 * 640.0)) * rip
+             * (1.0 - smoothstep(CELL * 0.30, CELL * 0.48, abs(dx)))
+             * (1.0 - smoothstep(1500.0, 2500.0, hh));
         ventHot = exp(-(dx * dx) / 1500.0 - (hh * hh) / 11000.0);
       }
     }
   }
+  vent *= uKill.z; ventHot *= uKill.z;
   col += absorb(uCSurf, 1400.0) * V_SILT * 1.7 * vent
        * (0.45 + 1.5 * uDraft) * (0.20 + 0.80 * sat(sky * 3.0));
   col += uCSilt * V_SILT * 0.9 * vent;
@@ -442,34 +546,52 @@ void main(){
   // ---------- marine snow, four depths ----------
   float snowKill = 1.0 - r0.a * 0.94;
   float snowLit = V_SNOW * (0.30 + 0.70 * sat(sky * 2.6)) * snowKill;
+  float px = uViewSize.x / max(uRes.x, 1.0);       // world units per pixel
   for(int L = 0; L < 4; L++){
     float fp = float(L);
     float par = 0.30 + fp * 0.24;
-    vec2 g = toDrift(uv, par) * (0.0058 + fp * 0.0030);
+    float sc = 0.0058 + fp * 0.0030;               // cells per world unit
+    vec2 g = toDrift(uv, par) * sc;
     g.y -= uTime * (0.018 + fp * 0.016);
     g.x += flow.x * 0.26 + sin(uTime * 0.055 + fp * 2.1) * 0.08;
     vec2 cell = floor(g), f = fract(g);
     float hs = hash12(cell + fp * 31.7);
     if(hs > 0.74){
-      vec2 c = hash22(cell + fp * 7.3);
-      float sz = 0.018 + 0.052 * pow(hash12(cell + 3.7), 2.2);
-      vec2 dv = f - c;
-      dv.x /= 1.0 + uSpeedK * 2.6 * (0.30 + fp * 0.28);
+      vec2 c = cellCentre(hash22(cell + fp * 7.3));
+      // Speed smear plus a per-fleck aspect, so the field is not a grid of
+      // identical circles. Both capped against CELL_GROW: the smear is the term
+      // that used to widen the footprint 4.7x and clip every fleck the instant
+      // the player got moving.
+      vec2 warp = min(vec2(1.0 + uSpeedK * (0.45 + fp * 0.22),
+                           0.88 + 0.26 * hash12(cell + 4.1)), vec2(CELL_GROW));
+      vec2 dv = (f - c) / warp;
+      float q = dot(dv, dv);
+      float win = cellWindow(f);
       float tw = 0.55 + 0.45 * sin(uTime * (0.6 + hs * 2.4) + hs * 41.0);
-      float fall = exp(-dot(dv, dv) / (sz * sz)) * (0.55 - fp * 0.10) * tw;
+      // A fleck smaller than a pixel does not get fainter, it flickers. Clamp
+      // the radius in SCREEN terms - which is also why the far layers are not
+      // just scaled copies of the near one.
+      float szMin = 1.25 * px * sc;
+      float sz = max(0.014 + 0.040 * pow(hash12(cell + 3.7), 2.2), szMin);
+      // Smearing conserves light rather than creating it.
+      float fall = exp(-q / (sz * sz)) * (0.55 - fp * 0.10) * tw * win
+                 * inversesqrt(warp.x);
       // Most flecks are dead matter, only as bright as the light that reaches
       // them. A few are alive and carry their own - which is both what
       // 'bioluminescent trench' means and the only honest way a frame under a
       // sealed stretch of roof gets to have any highlights at all.
-      float alive = step(0.895, hash12(cell + fp * 13.9 + 5.1));
+      float alive = step(0.888, hash12(cell + fp * 13.9 + 5.1));
       vec3 hue = mix(absorb(uCHigh, 200.0 / max(par, 0.2)),
                      mix(BIO_MINT, BIO_ICE, hash12(cell + 2.3)), alive);
-      float bz = sz * (3.0 + 2.0 * hash12(cell + 8.9));
-      // Tight core, small skirt: the skirt is 2.6x the radius, so 7x the area
-      // for light the eye reads off the core anyway.
-      float bfall = (exp(-dot(dv, dv) / (bz * bz)) + 0.16 * exp(-dot(dv, dv) / (bz * bz * 7.0)))
+      // A hot pinpoint plus a scattering halo, both sized from the cell budget
+      // rather than from the fleck radius. A mote is a mote: the reach comes
+      // from being genuinely hot - V_BIO is well above 1.0 - and from the bloom
+      // in postfx, not from painting a 100-pixel disc into the background.
+      float br = max(0.011 + 0.017 * hash12(cell + 8.9), szMin * 0.85);
+      float bfall = (exp(-q / (br * br))
+                   + 0.30 * exp(-q / (CELL_RMAX * CELL_RMAX))) * win
                   * (0.60 - fp * 0.10) * tw;
-      col += hue * mix(snowLit * fall, V_BIO * (0.45 + 0.95 * tw) * bfall, alive);
+      col += uKill.x * hue * mix(snowLit * fall, V_BIO * (0.45 + 0.95 * tw) * bfall, alive);
     }
   }
 
@@ -486,7 +608,7 @@ void main(){
   // maxLag keeps the wall 1750-2900 units behind the player, so it is usually
   // just off the left edge. Its reach, not the wall, is what has to be legible.
   float dxh = w.x - uHushX;
-  if(dxh < 3000.0){
+  if(dxh < 3000.0 && uKill.w > 0.5){
     // A torn frontier, not a gradient: three scales of writhe along y, plus
     // tongues of nothing licking forward.
     vec4 fr = N(vec2(w.y * 0.00072, uTime * 0.019));
@@ -516,16 +638,38 @@ void main(){
     col += uCHushGlow * V_HUSH * 0.055 * rimVar / (1.0 + far * far);
 
     // Fracture: hairline cracks reaching ahead of the front, the water coming
-    // apart before it goes. Row spacing warped so it never reads as a grid.
-    if(e > 0.0 && e < 1000.0){
-      float row = floor(w.y * 0.0206 + N1(vec2(w.y * 0.0012, 3.7)) * 3.4);
-      float rh = hash11(row * 1.731 + 5.3);
-      float reach = 190.0 + rh * 760.0;
+    // apart before it goes.
+    //
+    // A crack is a level set of a SHEARED coordinate, not a grid row with the
+    // feature displaced off it. Displacing the feature is why this used to be a
+    // stack of dead-level scanlines: the moment a crack drifted more than half
+    // a row it landed in a cell that computes a different row index, so the
+    // pixels on it stopped agreeing which crack they were on and the drift had
+    // to be dialled back to zero to keep the crack visible at all. Warping the
+    // coordinate instead lets every crack lean, curve and taper while every
+    // pixel on it still resolves to the same row.
+    //
+    // The shear multiplies dxh, not e: e carries the front's raggedness, whose
+    // dy-gradient is large enough that shearing by it folds the mapping, and a
+    // fold shows up as a bright pinch where two cracks merge.
+    if(e > 0.0 && e < 1100.0){
+      float shear = wave(w.y, 0.00021, 4.3) * 0.20;
+      float sy = (w.y + max(dxh, 0.0) * shear
+                      + sin(e * 0.0043) * 14.0 + sin(e * 0.0121 + 1.7) * 5.0) / 48.54
+               + dev(N1(vec2(w.y * 0.0012, 3.7))) * 2.2;
+      float row = floor(sy);
+      float rh  = hash11(row * 1.731 + 5.3);
+      float reach = 150.0 + rh * 900.0;
       if(rh > 0.40 && e < reach){
-        float yc = (row + 0.5 + (rh - 0.5) * 0.7) / 0.0206;
-        float dy = w.y - yc;
-        col += uCHush * V_HUSH * 0.30 * exp(-dy * dy / (4.0 + rh * 9.0))
-             * (1.0 - e / reach) * (0.5 + 0.5 * sin(uTime * (1.4 + rh * 3.0) + rh * 30.0));
+        float p = e / reach;
+        float dy = fract(sy) - 0.5 + (rh - 0.5) * 0.36;
+        // Thin toward the tip, and broken along its length: a fracture is a
+        // chain of segments, not a stroke of the same width end to end.
+        float thick = (0.045 + rh * 0.055) * (1.0 - 0.55 * p);
+        float seg = sat(0.30 + dev(N1(vec2(e * 0.0039 + row * 0.37, 0.29))) * 3.4);
+        col += uCHush * V_HUSH * 0.34 * exp(-(dy * dy) / (thick * thick))
+             * (1.0 - p) * seg
+             * (0.5 + 0.5 * sin(uTime * (1.4 + rh * 3.0) + rh * 30.0));
       }
     }
 
@@ -534,9 +678,10 @@ void main(){
       vec2 g = vec2(w.x * 0.0125 + uTime * 1.15, w.y * 0.0125);
       vec2 cl = floor(g), fc = fract(g);
       if(hash12(cl + 51.7) > 0.52){
-        vec2 dv = (fc - hash22(cl + 13.1)) * vec2(2.6, 1.0);
+        vec2 dv = (fc - cellCentre(hash22(cl + 13.1))) / vec2(0.34, 1.55);
         col += mix(uCHush, vec3(1.0), 0.24) * V_HUSH * 0.20
-             * exp(-dot(dv, dv) / 0.030) * (1.0 - sat(e / 700.0));
+             * exp(-dot(dv, dv) / (CELL_RMAX * CELL_RMAX * 2.0)) * cellWindow(fc)
+             * (1.0 - sat(e / 700.0));
       }
     }
   }
@@ -566,6 +711,17 @@ function chroma(c) {
   return new Float32Array([c[0] / m, c[1] / m, c[2] / m]);
 }
 
+/** Debug kill switches, mirroring render.js's noSprites/noRibbons. */
+function killMask() {
+  let q = '';
+  try { q = globalThis.location ? globalThis.location.search : ''; } catch { q = ''; }
+  const p = new URLSearchParams(q);
+  return new Float32Array([
+    p.has('bgNoSnow') ? 0 : 1, p.has('bgNoRays') ? 0 : 1,
+    p.has('bgNoVents') ? 0 : 1, p.has('bgNoHush') ? 0 : 1,
+  ]);
+}
+
 export class Background {
   constructor(gl, tex) {
     this.gl = gl; this.tex = tex;
@@ -577,6 +733,7 @@ export class Background {
     });
     this.bandMap = new Float32Array(2);
     this.lights = new Float32Array(MAXL * 4);
+    this.kill = killMask();
     this.c = {
       vd: chroma(PAL.voidDeep), dp: chroma(PAL.waterDeep), md: chroma(PAL.waterMid),
       hi: chroma(PAL.waterHigh), sf: chroma(PAL.surface), st: chroma(PAL.silt),
@@ -655,6 +812,7 @@ export class Background {
     gl.uniform1f(u.uSpeedK, ctx.speedK || 0);
     gl.uniform1f(u.uDraft, ctx.inDraft || 0);
     gl.uniform1f(u.uDiff, ctx.difficulty || 0);
+    gl.uniform4fv(u.uKill, this.kill);
     gl.uniform4fv(u.uLights, this.lights);
 
     gl.uniform3fv(u.uCVoid, c.vd);
