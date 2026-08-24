@@ -11,7 +11,7 @@
 // splay. Debris and plankton obey the same field, so the whole screen agrees
 // about which way the water is going.
 //
-// Two authoring rules learned the hard way, both by looking at frames:
+// Three authoring rules learned the hard way, all three by looking at frames:
 //
 //  - Water is a SHAPE, light is a POINT. A wake, a silt front and a pressure
 //    swell are wide, soft and very dim; a fragment, a stimulated plankton and a
@@ -22,6 +22,18 @@
 //  - Only emitters get the second, wider scatter halo. Clouds SCATTER light,
 //    they do not emit it - stacking a 2x veil under fifteen overlapping smoke
 //    puffs is what raised the frame's bulk past the exposure contract.
+//  - NO CLOSED CURVE, EVER, NEAR THE MOTE. This is the rule that took longest
+//    to learn and cost the most review passes. A smooth complete circle or
+//    ellipse on a black field reads as a debug primitive no matter what profile
+//    is under it, what colour it is, or how briefly it lives - it has been
+//    called out as one by three independent reviewers, on three different
+//    layers (a VOLUME rim, a HALO bubble, a RING front). An arc has a
+//    silhouette; a circle does not. So pressure waves near the player are
+//    authored as broken arcs of torn puffs (see _swell), bubbles as a lens with
+//    an off-centre glint, and the only complete fronts left in the file fire
+//    when the mote no longer exists.
+//    The same rule has a measured half: soft light inside the mote's own
+//    surround is what caps its readability. See _clear().
 import { makeRng } from '../engine/rng.js';
 import { clamp, clamp01, lerp, TAU, smoothstep } from '../engine/math.js';
 import { S } from '../engine/textures.js';
@@ -32,6 +44,8 @@ const RING_CAP = 96;
 // Ambient disturbance (wake, silt) stops emitting here so a death or a pickup
 // always has room in the pool no matter how long the run has been.
 const SOFT_CAP = (CAP * 0.66) | 0;
+
+const HALF_PI = Math.PI * 0.5;
 
 // ------------------------------------------------------------------ the water ---
 // A divergence-free curl field, tabulated once at module load.
@@ -225,6 +239,10 @@ export class Particles {
     this._pkI = 0;
     this._pkT = -9;        // so the first pickup of a run reads as isolated
     this._cw = 0; this._ch = 0; this._cx = 0; this._cy = 0;
+    // --- the focal keep-out. See _clear(). Sized in world units from the
+    //     camera's own vertical extent so it tracks the zoom.
+    this._gk = 0;                       // 0 = off (no living mote to protect)
+    this._kFull = 108; this._kInv = 1 / 156;
   }
 
   clear() {
@@ -325,7 +343,7 @@ export class Particles {
         const wide = r() < 0.3;
         const a = wide ? r() * TAU : away + (r() - 0.5) * 3.3;
         const sp = lerp(140, 600, Math.pow(r(), 1.7));
-        const s0 = lerp(3.2, 10, Math.pow(r(), 1.5));
+        const s0 = lerp(4.4, 11, Math.pow(r(), 1.5));
         const j = this._spawn(
           x + Math.cos(a) * lerp(2, 16, r()), y + Math.sin(a) * lerp(2, 16, r()),
           Math.cos(a) * sp, Math.sin(a) * sp, lerp(0.34, 1.05, r()),
@@ -355,9 +373,15 @@ export class Particles {
       // The water they were sitting in, disturbed.
       this._puff(x, y, 1 + ((solo * 2) | 0), this.pvx * 0.06, this.pvy * 0.06, 0.55, N_PLNK, 0.30);
       if (r() < 0.3 + 0.5 * solo) this.bubbles(x, y, 1, this.pvx * 0.2, this.pvy * 0.2);
-      // Deliberately no shockwave: a pickup happens several times a second and
-      // a ring on each one is noise. A hair of front, and that is all.
-      this._ring(x, y, S.RING, 8, 44, 0.15, 4.0, 1.1, N_PLNKC, r() * TAU, 0.2, 0.76);
+      // Deliberately no front. A pickup happens several times a second, in the
+      // exact place the eye is trying to hold, and the 37px closed curve that
+      // used to fire here was both the most-repeated geometric primitive in the
+      // frame and soft light dropped straight into the mote's own surround. An
+      // isolated pickup gets a breath of water shoved outward instead.
+      if (solo > 0.35) {
+        this._swell(x, y, away + Math.PI, 3.6, lerp(66, 108, r()), 3,
+                    lerp(180, 300, r()), 0.55 * solo, N_PLNK);
+      }
       return;
     }
 
@@ -380,10 +404,13 @@ export class Particles {
     const ang = ps > 40 ? Math.atan2(this.pvy, this.pvx) : r() * TAU;
 
     // 1. the hard flash. Gone inside a tenth of a second - the violence is in
-    //    how fast it leaves, not in how big it is.
+    //    how fast it leaves, not in how big it is. The mid falloff is GLOW and
+    //    not VOLUME: at 240 units across, VOLUME's defined rim drew a 200-pixel
+    //    contour line around the death, which is the one shape this frame must
+    //    not contain.
     let j = this._spawn(x, y, 0, 0, 0.09, 120, 14, N_MOTEC, 13, S.CORE, 1, 0, 0);
     this.flow[j] = 0;
-    j = this._spawn(x, y, 0, 0, 0.17, 240, 70, N_MOTE, 5.0, S.VOLUME, 1.2, 0, 0);
+    j = this._spawn(x, y, 0, 0, 0.17, 230, 70, N_MOTE, 4.4, S.GLOW, 1.2, 0, 0);
     this.flow[j] = 0.2;
     j = this._spawn(x, y, 0, 0, 0.40, 560, 980, N_MOTEO, 1.5, S.VEIL, 0.8, -10, 0);
     this.flow[j] = 0.4; this.cool[j] = 0.85;
@@ -391,20 +418,27 @@ export class Particles {
     j = this._spawn(x, y, 0, 0, 0.20, 58, 18, N_MOTE, 2.6, S.ANAMORPH, 1.4, 0, 0);
     this.flow[j] = 0; this.asp[j] = 8; this.rot[j] = ang;
 
-    // 2. the pressure wave: a fast leading front, a slower trailing one, and a
-    //    structureless swell where the water itself is compressing. All three
-    //    decelerate hard - water takes the energy back almost at once.
+    // 2. the pressure wave. One front, small and violent and *gone*, and then
+    //    the wave's actual reach carried by silt.
     //
-    //    Kept small and brief on purpose. At r1=600/dur=0.46 (which is what it
-    //    was) the front is 1200 units across for half a second, and a smooth
-    //    closed curve that big stops reading as a pressure wave and starts
-    //    reading as a cell membrane. A shockwave is an event, not a shape you
-    //    get time to study.
-    const lead = this._ring(x, y, S.SHOCK, 26, 300, 0.30, 3.6, 2.6, N_MOTE, ang, 0.14, 0.72);
+    //    Measured, not guessed: at r1=300/dur=0.30 - which is what it was, and
+    //    which the previous comment already believed was the safe size - the
+    //    quad is 833 world units across, and at that magnification SHOCK's
+    //    angular front table runs out of resolution. What is drawn is a
+    //    700-pixel faceted closed contour with a filled interior, sitting in
+    //    frame for a third of a second, and it is the exact "cell membrane" the
+    //    profile family is warned about. A second concentric RING inside it
+    //    made it a diagram. Both are what a false-colour capture of the death
+    //    frame found.
+    //
+    //    So the front is now 132 units for 0.16s - an event, not a shape you
+    //    get time to study - and the expansion is told by two torn silt shells
+    //    with a gap in each. A pressure front in sediment has never been a
+    //    clean curve, and a broken one cannot read as a primitive.
+    const lead = this._ring(x, y, S.SHOCK, 20, 132, 0.16, 3.6, 2.4, N_MOTE, ang, 0.20, 0.72);
     if (lead) { lead.vx = this.pvx * 0.07; lead.vy = this.pvy * 0.07; }
-    const trail = this._ring(x, y, S.RING, 10, 200, 0.44, 2.6, 0.9, N_MOTEO, ang, 0.20, 0.76);
-    if (trail) { trail.vx = this.pvx * 0.04; trail.vy = this.pvy * 0.04; }
-    this._ring(x, y, S.VEIL, 44, 230, 0.42, 2.2, 0.34, N_MOTEO, ang, 0.10, 1.0);
+    this._swell(x, y, ang + Math.PI, 5.7, 260, 9, 700, 1.5);
+    this._swell(x, y, ang + 2.1, 5.4, 430, 7, 1000, 0.9);
 
     // 3. silt shocked off the bottom. Mostly lateral - the wave sweeps outward
     //    along the floor, it does not throw a ball of dust upward - and dim
@@ -424,6 +458,7 @@ export class Particles {
       this.flow[j] = lerp(1.3, 2.0, r());
       this.cool[j] = lerp(0.4, 0.9, r());
       this.delay[j] = 0.02 + r() * 0.10;
+      this.asp[j] = lerp(1.15, 1.8, r());
     }
 
     // 3b. the water where the light was, still faintly remembering it. This is
@@ -482,34 +517,46 @@ export class Particles {
   }
 
   /**
-   * Backwards-compatible ring entry point. `scale` under ~1.15 is a swing -
-   * several a second - so those get a compact pressure snap instead of a
-   * shockwave. Only real events get a visible front.
+   * Backwards-compatible ring entry point. Every caller in the game passes
+   * `scale` between 0.55 and 1.10 - a swing, several a second - so that path is
+   * the one that matters and it no longer draws a front at all. See the comment
+   * inside. The `scale >= 1.15` path is kept for anything that ever wants a
+   * genuine event-scale wave.
    */
   ring(x, y, scale = 1, col = PAL.moteInner, bright = 2) {
     const r = this.rng;
     const c = col === PAL.moteInner ? N_MOTE : col;
     const ps = Math.hypot(this.pvx, this.pvy);
     // Squashed along travel: the medium is already moving that way, so the wave
-    // cannot expand into it as easily. Asymmetry is what kills the debug-donut
-    // read more than anything else.
+    // cannot expand into it as easily.
     const ang = ps > 40 ? Math.atan2(this.pvy, this.pvx) : r() * TAU;
 
     if (scale < 1.15) {
-      const g = this._ring(x, y, S.RING, 9 * scale, lerp(56, 88, r()) * scale,
-        lerp(0.16, 0.24, r()), 4.0, bright * 0.5, c, ang,
-        lerp(0.12, 0.28, r()), 0.76);
-      if (g) { g.vx = this.pvx * 0.1; g.vy = this.pvy * 0.1; }
+      // No front. This fires on every catch and every release, so the thin
+      // closed curve that used to live here sat 26-81px from the mote several
+      // times a second - a perfect circle on a black field, which is the exact
+      // read three reviews independently called a debug primitive, and it
+      // landed inside the annulus focal contrast is measured against. What is
+      // left is the part that was ever real: water shoved outward, as a broken
+      // arc, thrown hard enough to clear the mote's own surround.
+      this._swell(x, y, ang + Math.PI, 4.6, lerp(64, 104, r()) * scale, 3,
+                  lerp(300, 520, r()), 0.5 + 0.35 * bright, c);
       if (r() < 0.4) this.bubbles(x, y, 1 + ((r() * 2) | 0), this.pvx, this.pvy);
-      return g;
+      return null;
     }
 
-    const lead = this._ring(x, y, S.SHOCK, 20 * scale, 250 * scale,
-      lerp(0.28, 0.38, r()), 4.0, bright, c, ang, lerp(0.07, 0.16, r()), 0.72);
-    const trail = this._ring(x, y, S.RING, 8 * scale, 170 * scale,
-      lerp(0.46, 0.64, r()), 2.6, bright * 0.4, c, ang, lerp(0.14, 0.26, r()), 0.76);
+    // Capped at 150 units however large `scale` gets. SHOCK's front is an
+    // angular table, and past roughly 200 units of radius the magnification
+    // outruns its resolution and the front becomes a visibly faceted closed
+    // contour - which is how the death wave got a 700-pixel membrane. Reach
+    // beyond that belongs to the silt, not to the front.
+    const rad = Math.min(150, 250 * scale);
+    const lead = this._ring(x, y, S.SHOCK, 20 * scale, rad,
+      lerp(0.18, 0.26, r()), 4.0, bright, c, ang, lerp(0.10, 0.20, r()), 0.72);
     if (lead) { lead.vx = this.pvx * 0.06; lead.vy = this.pvy * 0.06; }
-    return lead || trail;
+    this._swell(x, y, ang + Math.PI, 5.4, 220 * scale, 7,
+                lerp(480, 780, r()), 0.6 + 0.3 * bright, c);
+    return lead;
   }
 
   /**
@@ -532,20 +579,73 @@ export class Particles {
   }
 
   /**
-   * Rising bubbles. Fewer and bigger than they were: a bubble reads by its rim,
-   * and a rim under about 8px is a grey dot once the grade has had it. Buoyancy
-   * beats drag, so the fat ones win the race up and the field fans out on its
-   * own; `spin` is the helix rate, which is what `wobA` is modulated by.
+   * A pressure swell, drawn as a broken arc of torn puffs instead of a closed
+   * curve. This is the replacement for every front that used to fire near the
+   * living mote, and it exists because the shape was the defect: a smooth
+   * complete ellipse on a black field reads as a debug primitive whatever
+   * profile is underneath it. An arc has a silhouette.
+   *
+   * The physics of the thing survives. Each puff is thrown radially and left to
+   * decelerate under drag, so the front still expands and still gives its
+   * energy straight back to the water; SMOKE's silhouette is eroded by a coarse
+   * noise field, so no two are the same shape; and each is stretched
+   * tangentially so the arc reads as an arc rather than as a row of beads.
+   *
+   * `span` is the arc's angular width in radians about `ang`. Angles are
+   * stratified and then jittered inside their own slice - even spacing is the
+   * clearest procgen tell there is, but pure noise clumps.
+   */
+  _swell(x, y, ang, span, rad, count, spd, gain = 1, col = null) {
+    const r = this.rng;
+    for (let i = 0; i < count; i++) {
+      const a = ang + ((i + 0.2 + r() * 0.6) / count - 0.5) * span;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const r0 = rad * lerp(0.20, 0.44, r());
+      const v = spd * lerp(0.7, 1.3, r());
+      const sh = spd * (r() - 0.5) * 0.45;                  // tangential shear
+      const s0 = rad * lerp(0.20, 0.38, r()) + 9;
+      const j = this._spawn(
+        x + ca * r0, y + sa * r0,
+        ca * v - sa * sh, sa * v + ca * sh,
+        lerp(0.34, 0.70, r()), s0, s0 * lerp(1.4, 2.2, r()),
+        col || (r() < 0.45 ? N_SILT : N_WATER),
+        lerp(0.06, 0.16, r()) * gain, S.SMOKE,
+        dragFor(5.6, s0), lerp(-8, 18, r()), (r() - 0.5) * 0.9
+      );
+      this.kind[j] = K.CLOUD;
+      this.flow[j] = lerp(1.2, 1.9, r());
+      this.cool[j] = lerp(0.4, 0.9, r());
+      this.delay[j] = r() * 0.05;
+      this.asp[j] = lerp(1.3, 2.1, r());
+      this.rot[j] = a + HALF_PI + (r() - 0.5) * 0.5;
+    }
+  }
+
+  /**
+   * Rising bubbles.
+   *
+   * These used to be drawn on HALO - a thin optical rim - which is optically
+   * the right answer and compositionally the worst one available: a complete
+   * thin circle at any size on a black field is a debug circle, and a field of
+   * them beside the mote was one of the two artefacts this pass exists to
+   * remove. The read is rebuilt in draw() instead, from a dim lens body and one
+   * off-centre glint on the limb. That is what a bubble in dark water actually
+   * looks like - almost nothing, plus a moving highlight - and it has no closed
+   * contour anywhere in it.
+   *
+   * Fewer and bigger than they were, because the glint needs a limb to sit on.
+   * Buoyancy beats drag, so the fat ones win the race up and the field fans out
+   * on its own; `spin` is the helix rate, and the glint orbits with it.
    */
   bubbles(x, y, count, vx = 0, vy = 0, spread = 0.12) {
     const r = this.rng;
     for (let i = 0; i < count; i++) {
-      const s = lerp(6, 24, Math.pow(r(), 2.0));
+      const s = lerp(9, 30, Math.pow(r(), 1.7));
       const j = this._spawn(
         x + (r() - 0.5) * 30, y + (r() - 0.5) * 26,
         vx * 0.14 + (r() - 0.5) * 70, vy * 0.09 - lerp(20, 80, r()),
         lerp(1.1, 3.2, r()), s, s * lerp(1.10, 1.45, r()),
-        r() < 0.34 ? N_SURF : N_WATER, lerp(0.45, 1.25, r()), S.HALO,
+        r() < 0.34 ? N_SURF : N_WATER, lerp(0.55, 1.5, r()), S.VEIL,
         dragFor(2.6, s), -lerp(260, 420, r()),
         lerp(3.2, 7.5, r()) * (r() < 0.5 ? -1 : 1)
       );
@@ -573,6 +673,7 @@ export class Particles {
       this.flow[j] = lerp(1.3, 2.0, r());
       this.cool[j] = lerp(0.4, 0.9, r());
       this.delay[j] = r() * 0.09;
+      this.asp[j] = lerp(1.1, 1.7, r());
     }
   }
 
@@ -599,6 +700,8 @@ export class Particles {
       this.flow[j] = lerp(1.4, 2.1, r());
       this.cool[j] = lerp(0.5, 1.0, r());
       this.delay[j] = r() * 0.08;
+      this.asp[j] = lerp(1.2, 1.9, r());
+      this.rot[j] = Math.atan2(ty, tx) + (r() - 0.5) * 0.6;
     }
   }
 
@@ -639,6 +742,43 @@ export class Particles {
     return null;
   }
 
+  /**
+   * How much of a diffuse sprite survives at (px,py): the mote's focal keep-out.
+   *
+   * This is the measured half of the no-closed-curves rule, and it is the
+   * reason this file exists in its current form. check.mjs scores the mote's
+   * core against a ring of its own surround, and that ring - 42 to 83 pixels
+   * out - was where nearly everything soft in this file happened to land: wake
+   * quads shed 18-87px behind the head, a launch swell centred 24 units off it,
+   * a second scatter veil under every release spark at 3.2x its size. Two other
+   * measurements bounded it from the outside: with the mote not drawn at all
+   * the ring still read 0.213 linear, and on one seed the surround was
+   * brighter than the core. No amount of making the mote hotter fixes that -
+   * the surround has to go dark.
+   *
+   * So it is solved geometrically rather than by tuning gains down globally,
+   * which would only have made the wake invisible everywhere. Diffuse emission
+   * fades to nothing inside the keep-out and is untouched outside it, and the
+   * radius is derived from the camera's vertical extent so it still covers the
+   * same *pixels* when the lens zooms out on a launch. Small hot classes are
+   * deliberately exempt: a hot point beside the mote reads as part of it, while
+   * a soft wash reads as fog over it.
+   *
+   * `_gk` releases the keep-out over ~0.2s on death, because snapping it off
+   * would pop every wake and silt cloud already on screen to full brightness in
+   * one frame. Once the mote is gone there is nothing left to protect.
+   */
+  _clear(px, py, reach) {
+    const gk = this._gk;
+    if (gk <= 0.002) return 1;
+    const dx = px - this.px, dy = py - this.py;
+    const d = Math.sqrt(dx * dx + dy * dy) - reach - this._kFull;
+    if (d <= 0) return 1 - gk;
+    const q = d * this._kInv;
+    if (q >= 1) return 1;
+    return 1 - gk * (1 - q * q * (3 - 2 * q));
+  }
+
   // ----------------------------------------------------------------- update ---
   update(dt) {
     this._t += dt;
@@ -651,9 +791,18 @@ export class Particles {
       const cam = g.cam;
       if (cam) {
         this._cx = cam.x; this._cy = cam.y;
-        this._cw = (cam.viewW || 1920) * 0.5 + 260;
-        this._ch = (cam.viewH || 1080) * 0.5 + 260;
+        const vw = cam.viewW || 1920, vh = cam.viewH || 1080;
+        this._cw = vw * 0.5 + 260;
+        this._ch = vh * 0.5 + 260;
+        // The measured annulus is 42-83 *pixels* of a 900px-tall frame, i.e.
+        // 0.046-0.092 of the vertical view however the lens is set. Sizing the
+        // keep-out off viewH keeps it covering that band when a launch zooms
+        // out; a constant in world units silently stopped covering it.
+        this._kFull = vh * 0.100;
+        this._kInv = 1 / (vh * 0.145);
       }
+      const live = (g.mode === 'play' && p.alive) ? 1 : 0;
+      this._gk = live + (this._gk - live) / (1 + 5 * dt);
       if (this._impSeq < 0) { this._impSeq = p.impactSeq | 0; this._lchSeq = p.launchSeq | 0; }
       if (dt > 0 && g.mode === 'play' && p.alive) {
         this._events(p);
@@ -731,15 +880,23 @@ export class Particles {
         this.events++;
         const nx = p.impactNx, ny = p.impactNy;
         // A wave cannot expand into rock, so it is a lobe flattened against the
-        // wall: the major axis is the tangent, not the normal.
+        // wall: the major axis is the tangent, not the normal. Pushed *into*
+        // the rock and flattened harder than it was, so the rock occludes its
+        // inner half and what survives is a rim skidding along the wall rather
+        // than a closed ellipse standing around the mote.
         const tan = Math.atan2(nx, -ny);
-        const g1 = this._ring(p.x + nx * 12, p.y + ny * 12, S.SHOCK,
-          14, lerp(95, 165, pw), lerp(0.15, 0.20, r()), 3.6,
-          lerp(0.9, 1.9, pw), N_SURF, tan, 0.34, 0.72);
+        const g1 = this._ring(p.x - nx * 16, p.y - ny * 16, S.SHOCK,
+          12, lerp(62, 104, pw), lerp(0.12, 0.17, r()), 3.6,
+          lerp(0.9, 1.9, pw), N_SURF, tan, 0.52, 0.72);
         if (g1) { g1.vx = nx * 90 * pw; g1.vy = ny * 90 * pw; }
+        // the silt the wave sweeps off the wall, as a broken arc through the
+        // half-space it can actually expand into
+        this._swell(p.x + nx * 14, p.y + ny * 14, Math.atan2(ny, nx), 2.8,
+                    lerp(105, 200, pw), 4 + ((r() * 3) | 0),
+                    lerp(210, 420, pw), 1.15);
         // gas driven out of solution by the slam, thrown along the wall
         this.bubbles(p.x + nx * 10, p.y + ny * 10,
-          2 + ((r() * 4 * pw) | 0), -ny * 300, nx * 300, 0.14);
+          2 + ((r() * 3 * pw) | 0), -ny * 300, nx * 300, 0.14);
         this._plume(p.x + nx * 6, p.y + ny * 6, 2 + ((r() * 3) | 0),
           nx, ny, lerp(90, 280, pw), 0.9);
       }
@@ -751,21 +908,23 @@ export class Particles {
       if (pw > 0.78) {
         this.events++;
         const dx = p.launchDirX, dy = p.launchDirY;
-        // Deliberately NOT a front. A ring this size beside the mote is a
-        // perfect smooth closed curve on a black field, and that reads as a
-        // debug primitive no matter how it is coloured - it did. VEIL has no
-        // core and no edge at all, so what is left is the only part that was
-        // ever wanted: water compressing behind something that just left.
-        // Behind the mote, and stretched *across* travel, because the swell
-        // cannot outrun the thing that made it.
-        const g1 = this._ring(p.x - dx * 24, p.y - dy * 24, S.VEIL,
-          30, lerp(170, 240, pw), 0.26, 3.0, lerp(0.42, 0.72, pw),
-          N_MOTEO, Math.atan2(dx, -dy), 0.28, 1.0);
-        if (g1) { g1.vx = p.vx * 0.10; g1.vy = p.vy * 0.10; }
+        // Deliberately NOT a front - and no longer a filled soft disc either.
+        // What was here was a VEIL up to 240 units in radius centred 24 units
+        // behind the mote, which is to say a smooth wash of light laid over the
+        // whole of the mote's own surround at the one moment the frame most
+        // needs the mote to read. It is the single largest reason `launch`
+        // measured 2.1-2.5:1 focal contrast against a target of 4:1.
+        //
+        // Same idea, correct geometry: an arc of rolls closing in a body-length
+        // BEHIND the mote, spanning the half-space it left, none of it over the
+        // mote itself. The swell cannot outrun the thing that made it.
+        this._swell(p.x - dx * 96, p.y - dy * 96, Math.atan2(-dy, -dx), 2.5,
+                    lerp(160, 250, pw), 5 + ((r() * 3) | 0),
+                    lerp(200, 360, pw), lerp(0.9, 1.6, pw), N_MOTEO);
         // cavitation: the low-pressure pocket behind something that just
         // accelerated hard, collapsing into gas
         this.bubbles(p.x - dx * 30, p.y - dy * 30,
-          3 + ((r() * 5) | 0), -dx * 220, -dy * 220, 0.16);
+          3 + ((r() * 4) | 0), -dx * 220, -dy * 220, 0.16);
       }
     }
   }
@@ -783,57 +942,75 @@ export class Particles {
     const tx = p.vx * inv, ty = p.vy * inv;
     const nx = -ty, ny = tx;
     const room = this.n < SOFT_CAP;
+    const travel = Math.atan2(ty, tx);
 
     if (room) {
       // --- shed vortices. Alternating sides is the whole trick: a wake is a
-      //     zig-zag of counter-rotating rolls, not a straight smear. Wide, soft
-      //     and very dim, because a wake is a shape *in* the water. Authored as
-      //     4px sparks at high gain (which is what these were) it reads as
-      //     sensor noise beside the mote and vanishes into the grain.
-      this._aWake += dt * (2.2 + 13 * spK);
+      //     zig-zag of counter-rotating rolls, not a straight smear.
+      //
+      //     VOLUME was the wrong profile for it twice over. Its documented
+      //     "defined rim" drew a contour line around every single roll, and two
+      //     of those overlapping the mote is the artefact this whole pass
+      //     started from - reviewers called them hollow ellipsoids, and that is
+      //     exactly what they were. And a filled soft ball 18-87px behind the
+      //     head sits precisely in the annulus focal contrast is measured
+      //     against. SMOKE has a torn, noise-eroded silhouette and no rim at
+      //     all, each one is stretched along the shear so it is never a circle,
+      //     and the roll now forms a body-length back, which is where a real
+      //     one forms anyway - a wake needs a body length to roll up.
+      this._aWake += dt * (0.8 + 14 * spK);
       if (this._aWake > 4) this._aWake = 4;
       while (this._aWake >= 1) {
         this._aWake -= 1;
         this._side = -this._side;
-        const back = lerp(22, 74, spK) + r() * 30;
-        const lat = (7 + r() * 16) * this._side;
+        const back = lerp(125, 330, spK) + r() * 95;
+        const lat = (10 + r() * 26) * this._side;
         const kick = lerp(26, 120, spK) * lerp(0.5, 1.3, r()) * this._side;
-        const s0 = lerp(13, 34, Math.pow(r(), 1.25));
+        const s0 = lerp(16, 42, Math.pow(r(), 1.25));
         const j = this._spawn(
           p.x - tx * back + nx * lat, p.y - ty * back + ny * lat,
           -tx * sp * 0.10 + nx * kick, -ty * sp * 0.10 + ny * kick,
-          lerp(0.55, 1.5, r()), s0, s0 * lerp(1.5, 2.4, r()),
+          lerp(0.7, 1.9, r()), s0, s0 * lerp(1.6, 2.6, r()),
           r() < 0.34 ? N_TRAIL : N_WATER,
-          lerp(0.055, 0.17, r()) * (0.35 + 0.65 * spK), S.VOLUME,
-          dragFor(3.0, s0), lerp(-20, 16, r()), (r() - 0.5) * 2.4 * this._side
+          lerp(0.055, 0.17, r()) * (0.35 + 0.65 * spK), S.SMOKE,
+          dragFor(3.0, s0), lerp(-20, 16, r()), (r() - 0.5) * 1.6 * this._side
         );
         this.kind[j] = K.VORTEX;
         this.flow[j] = lerp(1.2, 2.0, r());
         this.cool[j] = lerp(0.5, 1.0, r());
+        this.asp[j] = lerp(1.3, 2.2, r());
+        this.rot[j] = travel + (r() - 0.5) * 0.9;
       }
 
       // --- stimulated bioluminescence. A body moving fast through plankton-rich
       //     water leaves a line of light behind it - the single most recognisable
       //     "at sea, at night" image there is. Tiny, hot, brief, and mint rather
       //     than white so it sits behind the mote in the hierarchy instead of
-      //     competing with it.
-      this._aGlow += dt * spK * spK * 24;
+      //     competing with it. Exempt from the keep-out on purpose: these are
+      //     points, not washes, and they are what carries the near trail now
+      //     that nothing soft is allowed there.
+      this._aGlow += dt * spK * spK * 26;
       if (this._aGlow > 4) this._aGlow = 4;
       while (this._aGlow >= 1) {
         this._aGlow -= 1;
         // Tight and close. Spread wide it stops reading as a trail and just
         // adds to the field of mint dots the world's own plankton already puts
         // on screen - same colour, same size, no hierarchy.
-        const back = lerp(8, 105, Math.pow(r(), 0.7));
-        const lat = (r() - 0.5) * lerp(10, 40, back / 105);   // the wake widens
-        const s0 = lerp(2.0, 4.4, r());
+        const back = lerp(8, 115, Math.pow(r(), 0.7));
+        const lat = (r() - 0.5) * lerp(10, 40, back / 115);   // the wake widens
+        // Floored well above a pixel. At 2-4 world units these were 2px quads,
+        // which is a hard little square with a stair-stepped edge, and a field
+        // of them beside the mote is the "shimmering pixels" note verbatim.
+        // Bigger and correspondingly dimmer: the same energy, spread over
+        // enough texels for the profile to actually be a profile.
+        const s0 = lerp(4.4, 8.2, r());
         const j = this._spawn(
           p.x - tx * back + nx * lat, p.y - ty * back + ny * lat,
           -tx * sp * 0.05 + nx * (r() - 0.5) * 90,
           -ty * sp * 0.05 + ny * (r() - 0.5) * 90,
           lerp(0.16, 0.5, r()), s0, s0 * 0.35,
           r() < 0.3 ? N_PLNKC : N_PLNK,
-          lerp(0.9, 2.6, r()) * (0.3 + 0.7 * spK), S.SPARK,
+          lerp(0.55, 1.6, r()) * (0.3 + 0.7 * spK), S.SPARK,
           dragFor(9, s0), lerp(-14, 10, r()), (r() - 0.5) * 4
         );
         this.kind[j] = K.DART;
@@ -842,11 +1019,11 @@ export class Particles {
       }
 
       // --- gas shed at speed: cavitation off something moving fast
-      this._aBub += dt * (spK * spK * 3.0 + (p.attached ? 0.30 : 0));
+      this._aBub += dt * (spK * spK * 2.2 + (p.attached ? 0.22 : 0));
       if (this._aBub > 3) this._aBub = 3;
       while (this._aBub >= 1) {
         this._aBub -= 1;
-        this.bubbles(p.x - tx * 26, p.y - ty * 26, 1, p.vx, p.vy, 0.05);
+        this.bubbles(p.x - tx * 34, p.y - ty * 34, 1, p.vx, p.vy, 0.05);
       }
 
       // --- silt lifted off the floor, or knocked off the ceiling. inDraft is
@@ -877,13 +1054,17 @@ export class Particles {
           this.kind[j] = K.CLOUD;
           this.flow[j] = lerp(1.4, 2.1, r());
           this.cool[j] = lerp(0.5, 1.0, r());
+          // silt sheared along the surface it left, never a puffball
+          this.asp[j] = lerp(1.4, 2.3, r());
+          this.rot[j] = (r() - 0.5) * 0.5;
         }
       }
 
       // --- anticipation. Loading a swing pulls the water in: faint motes spiral
       //     into the mote while it charges and stop dead the instant it lets go.
       //     `windUp` is the only signal in the game that leads the action, and
-      //     nothing in here was reading it.
+      //     nothing in here was reading it. Points, so the keep-out leaves them
+      //     alone - the inflow is allowed to reach the mote, a wash is not.
       const wu = p.attached ? (p.windUp || 0) : 0;
       if (wu > 0.18) {
         this._aPull += dt * wu * wu * 34;
@@ -897,12 +1078,12 @@ export class Particles {
           const ca = Math.cos(a), sa = Math.sin(a);
           const vr = -rad / life * lerp(0.85, 1.05, r());     // aimed to arrive
           const vt = lerp(160, 420, r()) * swirl;             // ...but spiralling
-          const s0 = lerp(2.4, 6, r());
+          const s0 = lerp(4.2, 7.6, r());
           const j = this._spawn(
             p.x + ca * rad, p.y + sa * rad,
             ca * vr - sa * vt, sa * vr + ca * vt,
             life, s0, s0 * 0.5, r() < 0.35 ? N_MOTEO : N_TRAIL,
-            lerp(0.45, 1.4, r()) * wu, S.SPARK,
+            lerp(0.30, 0.95, r()) * wu, S.SPARK,
             dragFor(1.2, s0), 0, (r() - 0.5) * 3
           );
           this.kind[j] = K.DART;
@@ -948,11 +1129,11 @@ export class Particles {
     for (let i = 0; i < n; i++) {
       const a = base + (r() - 0.5) * 2.3;
       const spd = lerp(80, 430, Math.pow(r(), 1.7)) * push;
-      const s0 = lerp(2.6, 8, r());
+      const s0 = lerp(4.2, 9.0, r());
       const j = this._spawn(
         x + (r() - 0.5) * 34, y + (r() - 0.5) * 34,
         Math.cos(a) * spd, Math.sin(a) * spd, lerp(0.34, 0.9, r()),
-        s0, s0 * 0.42, N_PLNK, lerp(0.9, 2.0, r()) * push, S.SPARK,
+        s0, s0 * 0.42, N_PLNK, lerp(0.6, 1.4, r()) * push, S.SPARK,
         dragFor(8, s0), lerp(-22, 10, r()), (r() - 0.5) * 5
       );
       this.kind[j] = K.DART;
@@ -960,12 +1141,16 @@ export class Particles {
       this.cool[j] = 0.7;
       this.str[j] = 0.5;
     }
-    const j = this._spawn(x, y, 0, 0, lerp(0.4, 0.8, r()),
-      lerp(24, 46, r()), lerp(70, 130, r()), N_PLNK, 0.16 * push, S.VEIL,
-      1.6, -12, 0);
+    // the water the swarm was hanging in. Torn rather than veiled, and smaller
+    // than it was: a scatter happens within 180 units of the mote by definition,
+    // so a 130-unit soft disc here is a soft disc in the mote's surround.
+    const j = this._spawn(x, y, 0, 0, lerp(0.4, 0.9, r()),
+      lerp(20, 38, r()), lerp(52, 92, r()), N_PLNK, 0.15 * push, S.SMOKE,
+      1.6, -12, (r() - 0.5) * 0.6);
     this.kind[j] = K.CLOUD;
     this.flow[j] = 1.7;
     this.cool[j] = 0.8;
+    this.asp[j] = lerp(1.2, 1.8, r());
   }
 
   _copy(a, b) {
@@ -1027,6 +1212,15 @@ export class Particles {
       if (cull && (px < cx - cw - reach || px > cx + cw + reach
                 || py < cy - ch - reach || py > cy + ch + reach)) continue;
 
+      // The mote owns a dark surround - see _clear(). Diffuse classes fade out
+      // inside it; small hot classes do not, because a hot point beside the
+      // mote reads as part of it and a soft wash reads as fog over it.
+      const soft = kd === K.CLOUD || kd === K.VORTEX || kd === K.COLD;
+      if (soft) {
+        bb *= this._clear(px, py, reach * 0.5);
+        if (bb <= 0.004) continue;
+      }
+
       let cr = this.r[i], cg = this.g[i], cb = this.b[i];
       const co = this.cool[i];
       if (co > 0) {
@@ -1037,6 +1231,29 @@ export class Particles {
         cg = lerp(cg, ABSORB[1], m);
         cb = lerp(cb, ABSORB[2], m);
         bb *= 1 - 0.62 * m;
+      }
+
+      if (kd === K.BUBBLE) {
+        // A bubble in dark water is not a ring. It is a dim lens you can barely
+        // see, plus one bright highlight where the light grazes its limb - and
+        // the highlight moves as the bubble helixes, which is the whole tell
+        // that it is a sphere. Built here from a body and a glint rather than
+        // from HALO's closed rim: a complete thin circle at any size on a black
+        // field is a debug circle, and there were a dozen of them beside the
+        // mote at any moment.
+        const ph = this.rot[i] * 0.4 + 2.1;
+        const ox = Math.cos(ph) * s * 0.30, oy = Math.sin(ph) * s * 0.30;
+        const body = bb * 0.26 * this._clear(px, py, s * 0.75);
+        if (body > 0.004) {
+          const sw = s * 1.45;
+          batch.push(px, py, sw, sw, 0, cr * body, cg * body, cb * body, 1, S.VEIL);
+        }
+        // the glint. Floored in size because a sub-pixel hot point shimmers
+        // under a moving camera, which is the same reason ribbons floor theirs.
+        const gs = s * 0.34 > 3.4 ? s * 0.34 : 3.4;
+        const ga = bb * 0.8;
+        batch.push(px + ox, py + oy, gs, gs, this.rot[i], cr * ga, cg * ga, cb * ga, 1, S.SPARK);
+        continue;
       }
 
       const st = this.str[i];
@@ -1056,17 +1273,15 @@ export class Particles {
       }
 
       // A second, much wider scatter halo: one blur radius for everything reads
-      // as a filter, two reads as light sitting *in* water. Emitters only.
-      // Clouds scatter light rather than emit it, and fifteen overlapping veils
-      // at 2x is precisely what turned the death frame into a grey wall.
-      if (bb > 0.05 && kd !== K.BUBBLE && kd !== K.CLOUD) {
-        if (kd === K.VORTEX) {
-          // kills VOLUME's defined rim, so a wake is a soft shear layer instead
-          // of a string of little balls
-          const va = bb * 0.22, sw = s * 2.3;
-          batch.push(px, py, sw, sw, 0, cr * va, cg * va, cb * va, 1, S.VEIL);
-        } else if (s > 9) {
-          const va = bb * 0.13, sw = s * 3.2;
+      // as a filter, two reads as light sitting *in* water. Emitters only, and
+      // never inside the mote's surround. Clouds and rolls scatter light rather
+      // than emit it, and this halo at 3.2x the sprite was the largest single
+      // contributor of soft light into the annulus - a release spark 20 units
+      // wide was laying an 80-unit wash straight over the mote.
+      if (bb > 0.05 && !soft && s > 9) {
+        const va = bb * 0.13 * this._clear(px, py, s * 1.6);
+        if (va > 0.004) {
+          const sw = s * 3.2;
           batch.push(px, py, sw, sw, 0, cr * va, cg * va, cb * va, 1, S.VEIL);
         }
       }
@@ -1105,6 +1320,13 @@ export class Particles {
 // the eye is supposed to follow. They are mint and plankton-coloured now, they
 // peak around 0.6, and the flash is much peakier in time - so at any instant
 // one or two are lit and the rest are barely there. Twinkling, not confetti.
+//
+// Two further variance axes, because "five species" was still legible as five:
+// every individual carries its own flash SHAPE (the exponent on its envelope)
+// as well as its own rate, and the rates now span slow breathers to fast
+// twitchers within one species instead of clustering. And nothing here is a
+// circle: FAT and LARVA are ellipses, ORG is BLOB, whose silhouette is wobbled
+// by three angular harmonics and whose falloff has no rim.
 // ============================================================================
 const AK = { SNOW: 0, SPARK: 1, FAT: 2, ORG: 3, LARVA: 4 };
 
@@ -1120,6 +1342,7 @@ export class Ambient {
     this.pp = f(n); this.pw = f(n);
     this.dx = f(n); this.dy = f(n); this.br = f(n); this.hue = f(n);
     this.el = f(n); this.rt = f(n); this.rs = f(n);
+    this.tk = f(n);      // exponent on the twinkle envelope: the flash's shape
     this.sp = new Uint8Array(n);
 
     for (let i = 0; i < n; i++) {
@@ -1134,6 +1357,7 @@ export class Ambient {
       this.rs[i] = 0;
       this.hue[i] = r();
       this.el[i] = 1;
+      this.tk[i] = 1;
       if (k === AK.SNOW) {
         // Wide size spread on purpose: equal-sized dots is the single clearest
         // procgen tell there is, and snow is the most numerous species.
@@ -1143,25 +1367,32 @@ export class Ambient {
         this.dy[i] = lerp(8, 24, r());             // sinking, always
         this.br[i] = lerp(0.24, 0.58, r());
       } else if (k === AK.SPARK) {
-        this.ps[i] = lerp(1.1, 2.9, r());
-        this.pw[i] = lerp(1.6, 5.2, r());          // hard, sparse flashes
+        this.ps[i] = lerp(1.1, 3.2, r());
+        // From slow breathers to fast twitchers within the one species, skewed
+        // slow: a screen of dots all blinking at the same rate reads as a
+        // string of fairy lights, whatever the phases are.
+        this.pw[i] = lerp(0.35, 6.2, Math.pow(r(), 1.7));
+        this.tk[i] = lerp(2.4, 8.0, r());          // some snap, some swell
         this.dx[i] = lerp(-18, 28, r());
         this.dy[i] = lerp(-10, 15, r());
         this.br[i] = lerp(0.45, 1.15, r());
       } else if (k === AK.FAT) {
         this.ps[i] = lerp(7, 18, r());
         this.pw[i] = lerp(0.14, 0.48, r());
-        this.dx[i] = lerp(-7, 9, r());
+        this.dx[i] = lerp(-16, 12, r());           // some drift against the flow
         this.dy[i] = lerp(2, 12, r());
         this.br[i] = lerp(0.10, 0.28, r());
         this.el[i] = lerp(1.08, 1.55, r());        // never a perfect circle
         this.rs[i] = (r() - 0.5) * 0.34;
       } else if (k === AK.ORG) {
         this.ps[i] = lerp(9, 23, r());
-        this.pw[i] = lerp(0.20, 0.60, r());        // slow breathing pulse
+        this.pw[i] = lerp(0.16, 0.70, r());        // slow breathing pulse
+        this.tk[i] = lerp(1.7, 3.6, r());
         this.dx[i] = lerp(-28, -6, r());           // swims across the drift
         this.dy[i] = lerp(-7, 7, r());
         this.br[i] = lerp(0.6, 1.5, r());
+        this.el[i] = lerp(1.10, 1.70, r());        // a body, not a ball
+        this.rs[i] = (r() - 0.5) * 0.26;
       } else {
         this.ps[i] = lerp(11, 28, r());
         this.pw[i] = lerp(0.12, 0.4, r());
@@ -1195,10 +1426,10 @@ export class Ambient {
       let tw;
       if (k === AK.SPARK) {
         const q = clamp01(0.5 + 0.5 * Math.sin(t * this.pw[i] * 2.4 + this.pp[i]));
-        tw = 0.03 + 0.97 * Math.pow(q, 5);         // mostly dark, brief flash
+        tw = 0.03 + 0.97 * Math.pow(q, this.tk[i]);   // mostly dark, brief flash
       } else if (k === AK.ORG) {
         const q = clamp01(0.5 + 0.5 * Math.sin(t * this.pw[i] + this.pp[i]));
-        tw = 0.16 + 0.84 * Math.pow(q, 2.4);
+        tw = 0.16 + 0.84 * Math.pow(q, this.tk[i]);
       } else {
         tw = 0.58 + 0.42 * Math.sin(t * this.pw[i] * 1.7 + this.pp[i]);
       }
@@ -1232,8 +1463,12 @@ export class Ambient {
         continue;
       }
       if (k === AK.ORG) {
+        const rot = this.rt[i] + t * this.rs[i];
         batch.push(x, y, s * 3.4, s * 3.4, 0, cr * 0.30, cg * 0.30, cb * 0.30, 1, S.VEIL);
-        batch.push(x, y, s, s, this.rt[i], cr, cg, cb, 1, S.VOLUME);
+        // BLOB, not VOLUME: same job - mass and an edge - but its radius is
+        // wobbled by three angular harmonics and its falloff has no rim, so a
+        // 20px organism is a small soft body instead of a small soft ring.
+        batch.push(x, y, s * this.el[i], s, rot, cr, cg, cb, 1, S.BLOB);
         if (tw > 0.5) {
           const q = (tw - 0.5) * 2;
           batch.push(x, y, s * 0.34, s * 0.34, 0, cr * q * 1.7, cg * q * 1.7, cb * q * 1.7, 1, S.CORE);
