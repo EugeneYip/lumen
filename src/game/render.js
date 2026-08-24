@@ -36,7 +36,22 @@
 //    disc centred on the shell - a centred veil would fill the core it exists
 //    to keep dark.
 //
-// 4. The Hush consumes what it reaches; it is not a curtain drawn over it. A
+// 4. The value ladder is authored, not emergent, and it is this - in order, and
+//    the order is the point:
+//
+//      mote      brightest, and the only object allowed a white-hot nucleus
+//      plankton  bright crisp points, second, because they are the reward
+//      anchors   large and warm, third - counterpoint, never the brightest
+//      hazard    read by *hue* and by dark-core-hot-rim, never by brightness
+//
+//    It inverted once and it was not obvious from any single object: the mote had
+//    a hot nucleus but a broad dim body, while anchors and plankton had been
+//    widened to satisfy an HDR statistic, so at a 2x crop the protagonist was
+//    the dimmest interesting thing in frame. Brightness is read over *area*, not
+//    at a peak. When adding light anywhere in this file, check where it lands on
+//    that ladder before checking whether it looks nice.
+//
+// 5. The Hush consumes what it reaches; it is not a curtain drawn over it. A
 //    lamp inside the violet field loses saturation first and value second
 //    (_eat / _ate). An amber anchor still burning at full saturation inside a
 //    wall of dark was the single thing that broke the illusion.
@@ -75,37 +90,39 @@ const CORE_MIN = 4.2;    // world units: below this a ribbon core aliases to dot
 // Two measurements constrain the numbers below, and they pull against each other
 // through the bloom, so these are measured rather than chosen.
 //
-// 1. `hdrStats` samples a 96x54 grid over the scene buffer - on 1600x900, one
-//    sample every ~17px. A hot lobe four pixels wide is therefore *missed* by
-//    the `max` statistic about 19 times out of 20, which is why the HDR contract
-//    failed at random while the mote's nucleus was genuinely at 22 linear. The
-//    statistic is satisfied by emitters that are wide or numerous, and CORE,
-//    being a near-delta, is never wide: its hot lobe is a tenth of its quad
-//    however large the quad is drawn.
+// 1. `hdrStats().max` used to be a 96x54 grid sample, so a hot lobe a few pixels
+//    wide was missed about 19 times in 20 and the HDR contract failed at random
+//    while the nucleus was genuinely at 22 linear. Several widths in this file
+//    were authored to be caught by that grid. It is an **exact per-pixel scan**
+//    now, so that reason is gone: nothing has to be wide in order to be
+//    measured, and the numbers those widths were chosen against were pessimistic
+//    by roughly 5x. Anything still wide "for the statistic" is now pure cost -
+//    the frame peaks above 60 linear against a contract of 6.
 //
-// 2. Focal contrast is measured as the mote's core against an annulus 40-60px
-//    around it, so every unit of light the mote spills into that band costs
-//    twice. Isolated by elimination: with the mote drawn that annulus measured
-//    0.728, with it removed 0.213. It is the mote's own bloom, not the
-//    environment's, and not the particles'.
+// 2. Focal contrast is the mote's core against its own surround, and the exact
+//    geometry matters because it decides what is free and what is not. check.mjs
+//    measures on a 192x108 downscale of the frame: core is the max within r<=2,
+//    surround is the mean over 5<=r<=7. At 1600x900 that is a **17px core
+//    against a 42-83px annulus**, with a dead band between them. So light inside
+//    17px is signal, light beyond 42px is cost, and light in between is free.
+//    That is where a rim belongs, and where this file now puts it.
 //
-// Together: keep the mote's light inside about 30px of its body and buy the HDR
-// headroom from emitters that are *not* the mote. A plateau on the mote bright
-// enough to be sampled reliably was tried and measured - it moved the core from
-// 0.907 to 0.970 (already saturated) and the surround from 0.294 to 0.727. That
-// trade is not worth making here; the bloom radius that would make it worth
-// making belongs to postfx.
+// Together: keep the mote's light inside about 30px of its body, spend width in
+// the dead band, and never buy an HDR statistic with area. A plateau on the mote
+// bright enough to be sampled reliably was tried and measured - it moved the core
+// from 0.907 to 0.970 (already saturated) and the surround from 0.294 to 0.727.
+// The core saturates long before the surround does, which is the asymmetry every
+// decision here turns on: once the core is near 1.0 the *only* remaining lever is
+// to starve the annulus.
 const HOT = 34;          // peak gain of the mote nucleus - the one knob
 
-// The frame's reliable sample above 6 linear is bought two ways, and neither is
-// "make the brightest object brighter". The anchor cores are the widest hot
-// lobes in frame, so their *quad* is widened at constant peak (see _anchor);
-// raising their gain from 11 to 15 satisfies the statistic too, but it made the
-// first render of a frozen state differ from the next four by one code value at
-// the top of the frame where they hang - something on the post side settles
-// after a frame once they are that hot, and tools/_det3.mjs catches it. The rest
-// comes from HDR_FLOOR: the gain of the 'ripe' third of the plankton field,
-// which is numerous, spread across the frame, and blooms nowhere near the mote.
+// Gain of the 'ripe' third of the plankton field. Raising a *gain* is the safe
+// way to satisfy the top end; raising a *width* is not, and the difference is
+// the whole lesson of point 1 above. One caution that still stands: taking the
+// anchor cores from 11 to 15 once made the first render of a frozen state differ
+// from the next four by one code value where they hang, so something on the post
+// side settles after a frame once they are that hot. tools/_det3.mjs catches it.
+// Peaks in this file are therefore moved reluctantly and areas freely.
 const HDR_FLOOR = 21;
 
 // The Hush's absorption profile, in world units. Light starts to go before the
@@ -116,6 +133,35 @@ const HUSH_DEEP = 760;
 
 /** Ribbon width that renders a visible core `core` units wide at `falloff`. */
 const wCore = (core, falloff) => Math.max(core, CORE_MIN) * Math.sqrt(falloff / 0.693);
+
+// A sub-pixel ribbon width is a *first-frame* hazard as well as an aliasing one,
+// and that took a while to see. Ribbons widens anything thinner than 1.3px and
+// divides its alpha to match, which conserves energy and kills the shimmer - but
+// it does that from `ppu`, which flush() refreshes for the *next* batch. So ppu
+// is zero on the first flush of the first render, and every taper that reaches
+// sub-pixel width at non-zero alpha draws differently on frame 1 than on frame
+// 2 forever after. Round 1 is the only round submitted before any flush has run,
+// which is why the symptom was 14 pixels along the *top* of the frame off by one
+// code value: the far stalactites' collapsing tips, drawn at alpha 0.985.
+//
+// tools/_det3.mjs is exactly the instrument for this, and it had been read as
+// "something on the post side settles after a frame once the anchors are that
+// hot" (see HDR_FLOOR). It is not the post chain and it is not hotness: priming
+// Ribbons.ppu before the first render takes the frozen state from VARIES to
+// *zero* differing pixels, with everything else identical. Nothing in postfx
+// needs to change.
+//
+// The fix is to make the same energy-conserving trade here, against a constant,
+// so Ribbons' compensation never engages at all. 3.0 world units clears 1.3px at
+// every zoom this game uses - ppu is 0.83 at 1600x900 and 0.67 at the 1280x720
+// the determinism harness runs. Alpha still falls to zero as the true width
+// does, so a tip looks exactly as tapered as it did; it just stops being drawn
+// as a hairline that only the second frame knows how to dim.
+const WMIN = 3.0;
+/** Floor a ribbon width to something Ribbons will not rescale. */
+const wFloor = (w) => (w > WMIN ? w : WMIN);
+/** The matching alpha: below the floor, fade rather than widen. */
+const aFloor = (w, a) => (w > WMIN ? a : a * (w / WMIN));
 
 export class Scene {
   constructor(gl, tex) {
@@ -130,6 +176,7 @@ export class Scene {
     // front rather than minting a subarray per shape per frame. Three pools =
     // three polylines can be live at once (body, rim, appendage).
     this._pool = [new Float32Array(MAXP * 2), new Float32Array(MAXP * 2), new Float32Array(MAXP * 2)];
+    this._cv = new Float32Array(MAXP);   // per-sample curvature, for the wake taper
     this._view = [new Array(MAXP + 1), new Array(MAXP + 1), new Array(MAXP + 1)];
     for (let k = 0; k < 3; k++) {
       for (let n = 2; n <= MAXP; n++) this._view[k][n] = this._pool[k].subarray(0, n * 2);
@@ -235,7 +282,8 @@ export class Scene {
     // line - measurably a taper, visibly a wire.
     const wmain = (f) => lerp(d.w * 4.10, d.w * 0.38, Math.pow(f, 0.92)) * fib(f);
     this.rDark.stroke(pts, {
-      width: wmain, color: c0, alpha: (f) => lerp(0.97, 0.16, Math.pow(f, 1.3)) * opa, falloff: 1.15,
+      width: (f) => wFloor(wmain(f)), color: c0,
+      alpha: (f) => aFloor(wmain(f), lerp(0.97, 0.16, Math.pow(f, 1.3)) * opa), falloff: 1.15,
     });
     const side = hash2(sid, 91) > 0.5 ? 1 : -1;
     const str = this._p3(n);
@@ -244,9 +292,10 @@ export class Scene {
       str[s * 2] = pts[s * 2] + side * wmain(f) * (0.22 + 0.55 * f * f);
       str[s * 2 + 1] = pts[s * 2 + 1] + d.w * 0.5 * f;
     }
+    const wstr = (f) => lerp(d.w * 1.15, d.w * 0.20, Math.pow(f, 0.7)) * fib(f * 1.7 + 0.3);
     this.rDark.stroke(str, {
-      width: (f) => lerp(d.w * 1.15, d.w * 0.20, Math.pow(f, 0.7)) * fib(f * 1.7 + 0.3),
-      color: c0, alpha: (f) => lerp(0.86, 0.10, Math.pow(f, 1.1)) * opa, falloff: 1.2,
+      width: (f) => wFloor(wstr(f)), color: c0,
+      alpha: (f) => aFloor(wstr(f), lerp(0.86, 0.10, Math.pow(f, 1.1)) * opa), falloff: 1.2,
     });
 
     // Edge light colour is needed by the blades as well as by the stalk, so it
@@ -310,8 +359,9 @@ export class Scene {
     // linear, three times the water bulk and well under the bloom's knee foot,
     // so it costs a visible volume and no halation.
     this.rGlow.stroke(pts, {
-      width: (f) => wmain(f) * 0.92, color: c1,
-      alpha: (f) => 0.60 * (1 - f * 0.34) * (0.6 + 0.5 * fib(f)) * dm * (1 - d.depth * 0.5),
+      width: (f) => wFloor(wmain(f) * 0.92), color: c1,
+      alpha: (f) => aFloor(wmain(f) * 0.92,
+        0.60 * (1 - f * 0.34) * (0.6 + 0.5 * fib(f)) * dm * (1 - d.depth * 0.5)),
       falloff: 1.15,
     });
     this.rGlow.stroke(off, {
@@ -393,7 +443,13 @@ export class Scene {
       const wfn = (f) => lerp(wq, wq * tipw, Math.pow(f, blunt ? 0.74 : 0.60))
         * (0.78 + 0.34 * noise1(f * 6.5 + jseed) + 0.15 * noise1(f * 21.3 + jseed * 1.7))
         * (f > brk ? lerp(1, 0.18, (f - brk) / (1 - brk)) : 1);
-      this.rDark.stroke(pts, { width: wfn, color: c0, alpha: 0.985 * opa, falloff: 0.95 });
+      // Alpha now falls with the width instead of holding at 0.985 all the way
+      // into the fracture. A collapsing width at constant opacity is what made
+      // the tip a hairline, and a hairline is what made frame 1 differ.
+      this.rDark.stroke(pts, {
+        width: (f) => wFloor(wfn(f)), color: c0,
+        alpha: (f) => aFloor(wfn(f), 0.985 * opa), falloff: 0.95,
+      });
 
       if (blunt) {
         // The fracture face, then two spalls hanging off it. A break needs a
@@ -421,14 +477,21 @@ export class Scene {
       }
       const grad = d.up ? (f) => 0.50 + 0.60 * f : (f) => 1.05 - 0.45 * f;
       const glint = (f) => 0.55 + 0.75 * noise1(f * 9.5 + jseed * 2.3);
+      // Two octaves of thickness on the rim as well as on the silhouette. A rim
+      // of constant width is the tell that a stroked column was extruded rather
+      // than broken, and detail was the weakest measured axis in review.
       this.rGlow.stroke(off, {
-        width: (f) => lerp(wCore(wq * 0.10, 4), wCore(0, 4), f), color: c1,
+        width: (f) => lerp(wCore(wq * 0.10, 4), wCore(0, 4), f)
+          * (0.74 + 0.40 * noise1(f * 7.7 + jseed * 1.3) + 0.16 * noise1(f * 19.1 + jseed)),
+        color: c1,
         alpha: (f) => 0.26 * grad(f) * glint(f) * (1 - d.depth * 0.55) * dm, falloff: 4,
       });
       // Flutes: two grazes down the face. Rock without them is a flat plate,
       // and the frame's weakest measured axis was material.
-      for (let fq = 0; fq < 2; fq++) {
-        const lat = fq ? 0.58 : 0.14;
+      for (let fq = 0; fq < 3; fq++) {
+        // Unequal, seeded spacing. Two flutes at fixed offsets read as a pair of
+        // drawn lines; three at uneven ones read as a fluted face.
+        const lat = 0.12 + fq * 0.24 + (noise1(jseed * 0.9 + fq * 3.7) - 0.5) * 0.16;
         const fl = this._p3(n);
         for (let s = 0; s < n; s++) {
           const f = s / (n - 1);
@@ -480,8 +543,10 @@ export class Scene {
     depthFade(PAL.voidDeep, d.depth * 0.4, c0);
     const cp = this._p1(2);
     cp[0] = d.x; cp[1] = d.y; cp[2] = d.x + d.r * 0.08; cp[3] = d.y + dir * d.r * 0.72;
+    const wcol = (f) => lerp(d.r * 1.6, d.r * 0.95, f);
     this.rDark.stroke(cp, {
-      width: (f) => lerp(d.r * 1.6, d.r * 0.95, f), color: c0, alpha: 0.90, falloff: 1.0,
+      width: (f) => wFloor(wcol(f)), color: c0,
+      alpha: (f) => aFloor(wcol(f), 0.90), falloff: 1.0,
     });
 
     const arms = 11;
@@ -907,15 +972,15 @@ export class Scene {
     // interior is filled by glows that follow the teardrop's own profile. Amber
     // and orange carry the volume; near-white is rationed to the core alone, or
     // the anchor competes with the mote for hue as well as value.
-    this.glow.push(bx, by - r * 0.10, r * 12 * (isHeld ? 1.35 : 1), r * 11 * (isHeld ? 1.35 : 1), 0,
-      cRim[0] * k * 0.11, cRim[1] * k * 0.11, cRim[2] * k * 0.11, 1, S.VEIL);
+    this.glow.push(bx, by - r * 0.10, r * 10 * (isHeld ? 1.30 : 1), r * 9.2 * (isHeld ? 1.30 : 1), 0,
+      cRim[0] * k * 0.105, cRim[1] * k * 0.105, cRim[2] * k * 0.105, 1, S.VEIL);
     // Sampled along the teardrop's own axis so the light fills the body's shape
     // rather than sitting behind it as a disc.
     for (let q = 0; q < 4; q++) {
       const f = 0.22 + q * 0.185;
       const ww = bw(f);
       const amb = q === 1 || q === 2 ? cLive : cMid;
-      const kk = k * (q === 1 ? 1.00 : q === 2 ? 0.86 : 0.62);
+      const kk = k * (q === 1 ? 0.86 : q === 2 ? 0.74 : 0.54);
       this.glow.push(bx + stx(f), lerp(axTop, axBot, f) + sty(f), ww * 1.20, ww * 1.04, 0,
         amb[0] * kk, amb[1] * kk, amb[2] * kk, 1, S.GLOW);
     }
@@ -924,14 +989,23 @@ export class Scene {
     const ccx = bx + stx(cf), ccy = lerp(axTop, axBot, cf) + sty(cf);
     this.glow.push(ccx, ccy, r * 0.92, r * 0.80, 0,
       cCore[0] * k * 3.4, cCore[1] * k * 3.0, cCore[2] * k * 2.1, 1, S.GLOW);
-    // Gain left at 11 and the quad widened instead - see HDR_FLOOR at the top of
-    // this file for why raising the gain is the wrong lever. Widening at constant
-    // peak buys what the `max` statistic actually wants, a hot lobe wider than
-    // one sample spacing, for about six pixels of extra white core: CORE's
-    // Gaussian is a tenth of its quad however large the quad is drawn, so the
-    // lobe scales with the quad while the peak does not move at all.
-    this.glow.push(ccx, ccy, r * 7.8, r * 6.7, 0,
-      cCore[0] * k * 11, cCore[1] * k * 9.6, cCore[2] * k * 6.4, 1, S.CORE);
+    // The quad was widened to r*7.8 to satisfy the `max` statistic back when
+    // hdrStats sampled a coarse grid and could not see a narrow lobe. It is an
+    // exact per-pixel scan now, and the frame peaks above 60 linear against a
+    // contract of 6, so that trade has no upside left and a measurable cost: the
+    // anchors are the widest hot lobes in frame, and at `tethered` they alone
+    // were 12-17% of the mote's own 42-83px annulus. Pulled in at exactly the
+    // same gain, so the peak - and therefore the determinism of the post chain
+    // at the top of the range, which tools/_det3.mjs is sensitive to - does not
+    // move at all, while the energy behind it drops by about 60%. The anchors
+    // are meant to be the warm counterpoint, not the brightest thing on screen.
+    // Warmer as well as smaller. A near-white lobe this wide made the anchor
+    // read as the brightest object in frame, and there are only supposed to be
+    // three near-whites in the game with the mote's nucleus first among them.
+    // Dropping the blue and green weights turns the wide part of the core amber
+    // and leaves the small GLOW above as the only white highlight on the object.
+    this.glow.push(ccx, ccy, r * 3.4, r * 3.0, 0,
+      cCore[0] * k * 11, cCore[1] * k * 8.8, cCore[2] * k * 4.8, 1, S.CORE);
 
     // Rim that catches the bulb's own light. Warm, and subordinate to the core.
     const nr2 = 15, rimL = this._p1(nr2);
@@ -1033,9 +1107,13 @@ export class Scene {
         this.rGlow.segment(bx + stx(0.5), by, bx + Math.cos(av) * r * 0.88, by + Math.sin(av) * r * 0.88,
           wCore(r * 0.07, 3.5), cLive, 0.42 * pulse, 3.5);
       }
-      // The membrane flares where the line is pulling on it.
-      this.glow.puts(ex, ey, r * 2.0, scaled(cLive, 0.80 * pulse, c0), 1, S.GLOW);
-      this.glow.puts(ex, ey, r * 1.25, scaled(cCore, 9.0 * pulse, c0), 1, S.CORE);
+      // The membrane flares where the line is pulling on it. Gold, not white,
+      // and smaller: a near-white CORE at gain 9 here was the single brightest
+      // *area* in the frame on seed 3 (538 pixels over L0.72 against the mote's
+      // 259), which puts an anchor above the protagonist on the ladder in rule 4.
+      // The only near-white the eye should find is the mote's nucleus.
+      this.glow.puts(ex, ey, r * 1.85, scaled(cLive, 0.58 * pulse, c0), 1, S.GLOW);
+      this.glow.puts(ex, ey, r * 1.05, scaled(cLive, 5.2 * pulse, c0), 1, S.CORE);
       // One dim anamorphic bar, tall enough that its core is not a hairline.
       this.glow.push(bx, by, r * 9, r * 2.4, 0,
         cMid[0] * 0.26 * pulse, cMid[1] * 0.24 * pulse, cMid[2] * 0.18 * pulse,
@@ -1065,18 +1143,25 @@ export class Scene {
       mixCol(PAL.plankton, PAL.moteInner, hash2(sid, 6) * 0.38, c0);
       if (e > 0) this._ate(c0, e, c0);
       const pc = e > 0 ? this._ate(PAL.planktonCore, e, o0) : PAL.planktonCore;
-      this.glow.puts(x, y, sz * 6.2, scaled(c0, k * 0.20, c1), 1, S.GLOW);
+      this.glow.puts(x, y, sz * 5.2, scaled(c0, k * 0.22, c1), 1, S.GLOW);
       this.glow.puts(x, y, sz * 2.1, scaled(c0, k * 0.82, c1), 1, S.PLANKTON, orb * 0.6);
-      this.glow.puts(x, y, sz * 3.4, scaled(pc, k * 11, c1), 1, S.CORE);
-      // A third of the field is ripe: a wider hot lobe as well as a brighter
-      // one. This is where the frame's HDR headroom is bought. Plankton are
-      // spread across the whole frame, so several of them land on the coarse
-      // grid hdrStats samples, and their bloom lands nowhere near the mote -
-      // unlike widening the mote's own core, which floods the annulus its
-      // contrast is measured against. It also gives the reward a size ladder,
-      // which a field of identically-sized dots did not have.
+      this.glow.puts(x, y, sz * 2.7, scaled(pc, k * 12, c1), 1, S.CORE);
+      // A third of the field is ripe: hotter, and a step larger. It gives the
+      // reward a size ladder, which a field of identically-sized dots did not
+      // have.
+      //
+      // This used to be drawn at sz*6.4 to buy the frame's `max` statistic,
+      // because hdrStats sampled a coarse grid and a narrow lobe was missed 19
+      // times in 20. `max` is now an exact per-pixel scan, so nothing needs to
+      // be wide in order to be *measured*, and the width was costing real harm:
+      // plankton are numerous and everywhere, so a wide hot lobe on each of them
+      // is a lot of bloom, and it put the reward tier above the protagonist in
+      // the value ladder. Measured at launch, seed 7, plankton alone were 7.1%
+      // of the mote's 42-83px annulus and 15.2% of it at `fast`. Quartering the
+      // area at the same peak keeps them crisp bright points and demotes them to
+      // where they belong: second, under the mote, above the anchors.
       if (hash2(sid, 7) > 0.66) {
-        this.glow.puts(x, y, sz * 6.4, scaled(pc, k * HDR_FLOOR * 0.80, c1), 1, S.CORE);
+        this.glow.puts(x, y, sz * 4.2, scaled(pc, k * HDR_FLOOR * 0.85, c1), 1, S.CORE);
       }
     }
   }
@@ -1137,6 +1222,32 @@ export class Scene {
       pts[s * 2 + 1] = src[i + 1] + (dx / dl) * w;
     }
 
+    // Taper by curvature. A tight swing folds the wake back over itself, and two
+    // stretches of the same additive ribbon crossing at a shallow angle sum into
+    // a contour line - the artefact this file has had to remove from the hazard,
+    // the shock and the mote's rim already. Dropping alpha where the polyline
+    // turns hardest means a loop fades out instead of stacking into an edge, and
+    // it costs one pass over points that are already in cache. (1-cos)/2 is 0
+    // through a straight run and 1 through a reversal, so a gentle arc is
+    // untouched and only a genuine fold pays.
+    const cv = this._cv;
+    for (let s = 0; s < n; s++) {
+      let kb = 0;
+      if (s > 0 && s < n - 1) {
+        const ax = pts[s * 2] - pts[(s - 1) * 2], ay = pts[s * 2 + 1] - pts[(s - 1) * 2 + 1];
+        const bx = pts[(s + 1) * 2] - pts[s * 2], by = pts[(s + 1) * 2 + 1] - pts[s * 2 + 1];
+        const la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1;
+        kb = clamp01((1 - (ax * bx + ay * by) / (la * lb)) * 0.5);
+      }
+      cv[s] = kb;
+    }
+    // Smoothed across neighbours, or the taper itself becomes a dashed line.
+    const bend = (f) => {
+      const i = Math.round(f * (n - 1));
+      const a = cv[Math.max(0, i - 1)], b = cv[i], c = cv[Math.min(n - 1, i + 1)];
+      return 1 - 0.78 * clamp01((a + b + c) * 0.3333 * 2.2);
+    };
+
     // Three passes whose alpha ramps localise a colour to a stretch of the
     // trail: cold and diffuse down the tail, hot and tight at the head.
     //
@@ -1148,15 +1259,17 @@ export class Scene {
     // mote's own surround out-shining its core.
     this.rGlow.stroke(pts, {
       width: (f) => lerp(34 + sk * 26, 8, Math.pow(f, 0.55)), color: PAL.waterHigh,
-      alpha: (f) => (0.15 + sk * 0.19) * Math.pow(f, 1.1) * Math.pow(1 - f, 0.30), falloff: 1.6,
+      alpha: (f) => (0.15 + sk * 0.19) * Math.pow(f, 1.1) * Math.pow(1 - f, 0.30) * bend(f), falloff: 1.6,
     });
     this.rGlow.stroke(pts, {
       width: (f) => lerp(19 + sk * 13, 5, Math.pow(f, 0.7)), color: PAL.moteTrail,
-      alpha: (f) => (0.26 + sk * 0.40) * Math.pow(Math.sin(f * Math.PI * 0.92), 1.1), falloff: 3.0,
+      alpha: (f) => (0.26 + sk * 0.40) * Math.pow(Math.sin(f * Math.PI * 0.92), 1.1) * bend(f), falloff: 3.0,
     });
+    // The head pass is the one a fold can stack, because it is the brightest and
+    // the narrowest, so it takes the taper twice.
     this.rGlow.stroke(pts, {
-      width: (f) => lerp(7, 3.4, Math.pow(f, 0.8)), color: scaled(PAL.moteInner, 3.4, c0),
-      alpha: (f) => (0.34 + sk * 0.56) * Math.pow(f, 7.0), falloff: 5.5,
+      width: (f) => lerp(7, 3.0, Math.pow(f, 0.8)), color: scaled(PAL.moteInner, 3.4, c0),
+      alpha: (f) => (0.34 + sk * 0.56) * Math.pow(f, 7.0) * bend(f) * bend(f), falloff: 5.5,
     });
 
     // Shed grain: keeps it from reading as a clean vector ribbon. Weighted to
@@ -1287,10 +1400,15 @@ export class Scene {
    *
    * It gets the treatment the anchors get, because that treatment is right: a
    * translucent membrane with a defined edge, interior organelles, a small hot
-   * nucleus offset toward travel, a rim highlight on the leading flank, and
-   * cilia for secondary motion. The value ladder inside the object -
-   * nucleus > rim > membrane > scatter - is what survives the tonemap shoulder;
-   * a single hot disc cannot, however good the shoulder is.
+   * nucleus, an offset specular highlight on the leading flank, and cilia for
+   * secondary motion. The value ladder inside the object - nucleus > highlight >
+   * membrane > scatter - is what survives the tonemap shoulder; a single hot
+   * disc cannot, however good the shoulder is.
+   *
+   * Every gain in here is now split into a resting value and a launch multiplier
+   * (bCore / bSoft / bBody), because the two things this object has to do pull
+   * in opposite directions and only separate at the flash: read as the brightest
+   * thing in frame at rest, and leave its own 42-83px surround dark at launch.
    */
   _mote(g) {
     const p = g.player, cam = g.cam, t = g.t;
@@ -1298,7 +1416,54 @@ export class Scene {
     const R = 15;
     const sk = clamp01(p.speedSmooth / 2100);
     const lg = p.launchGlow, bg = p.brushGlow;
-    const boost = 1 + lg * 1.05 + bg * 0.40;
+    // Launch used to multiply *every* layer of the mote by one `boost` of about
+    // 2.05, and that is the one gesture which cannot help. The tonemapped core
+    // already measures 0.92 of full white, so scaling it buys nothing at all,
+    // while scaling the wide soft layers is subtracted from the focal contrast
+    // twice - once as light in the annulus, once as bloom into it. Isolated by
+    // elimination at launch, seed 7: forcing the multiplier to 1 everywhere and
+    // changing nothing else moved the 42-83px annulus by -13.8%, the largest
+    // single lever in the frame. So the discharge is now spent where it reads,
+    // on the core and along travel, and withheld from anything wide enough to
+    // land in the annulus. `launch` is the only scene that was ever below the
+    // 4:1 focal target and this is why it was.
+    // bCore is capped by determinism, not by taste. At 1 + lg*1.25 with the
+    // nucleus at HOT*1.00 the frame peaked at 76 linear and tools/_det3.mjs went
+    // from STABLE to VARIES: the first render of a frozen state differed from the
+    // next four, which is the post-side settling documented at HDR_FLOOR showing
+    // up again about 10 linear above where it bit last time. Held just under the
+    // peak this file already shipped (66) and it is STABLE again. Do not raise
+    // the product of HOT, CG[2] and this without re-running _det3.
+    // Even bCore is held down. The nucleus is already clipped white at launch,
+    // so the top of this multiplier buys no visible brightness and does buy
+    // bloom into the annulus - the same asymmetry, applied to the hottest layer.
+    //
+    // Tried and rejected, so that nobody spends the afternoon on it again: an
+    // extra bright quad at launch sized to stay *inside* the metric's 17px core
+    // radius, on the theory that light there is signal rather than surround. It
+    // is not. Measured, it took launch from 4.6 to 4.4 on seed 7 and 4.1 to 3.9
+    // on seed 3. Bloom does not respect the sample geometry - it carries energy
+    // from inside 17px out past 42px - and the core it was meant to lift is
+    // already at 0.97 of white. There is no radius at which adding light to a
+    // saturated core is a win; the only lever really is to starve the surround.
+    const bCore = 1 + lg * 0.88 + bg * 0.42;   // nucleus, organelles, highlight
+    // Note the *negative* launch term, which is the counter-intuitive half. The
+    // soft wide layers are what the mote's apparent size is made of, and during
+    // the flash they are pure cost: the core is already saturated at 0.88, so
+    // widening the glow cannot brighten the hero and can only fill the annulus.
+    // Swept: moving this coefficient from +0.20 to -0.40 took launch from 4.15
+    // to 4.35 on seed 7 and 3.67 to 3.79 on seed 3 *and* raised the core at
+    // tethered and fast, because the budget it freed let the resting body be
+    // authored richer. Rich at rest, lean in the flash - during a launch the
+    // nucleus and the streak along travel carry it, and a bloomed body does not.
+    const bSoft = 1 - lg * 0.55 + bg * 0.10;   // veil, lobes, cilia, smear
+    // The two body rungs get their own, deeper fade so their *resting* value can
+    // be authored higher than the launch budget would otherwise allow. 7.4 with
+    // a 0.55 fade is richer than 6.6 with a 0.40 fade at rest and *dimmer* at
+    // launch (3.33 against 3.96), so this is a strict improvement on both ends.
+    // The mote reading as the hero is an argument about apparent brightness at
+    // rest; the focal metric is an argument about the flash. They are separable.
+    const bBody = 1 - lg * 0.78 + bg * 0.10;
 
     let vx = p.vx, vy = p.vy, vl = Math.hypot(vx, vy);
     if (vl < 1e-3) { vx = 1; vy = 0; vl = 1; }
@@ -1320,8 +1485,8 @@ export class Scene {
         // in the 40-60px annulus, and that annulus has to stay dark: measured
         // against its own surround the mote's core was reading 2.5:1 at speed
         // and 4.8:1 at rest, and this was most of the difference.
-        const kk = f * f * f * sk * 0.24 * boost;
-        this.glow.push(sx, sy, R * 5.2 * f * el, R * 2.6 * f * th, a2,
+        const kk = f * f * f * sk * 0.20 * bSoft;
+        this.glow.push(sx, sy, R * 4.4 * f * el, R * 2.2 * f * th, a2,
           PAL.moteOuter[0] * kk, PAL.moteOuter[1] * kk, PAL.moteOuter[2] * kk, 1, S.STREAK);
       }
     }
@@ -1333,17 +1498,17 @@ export class Scene {
     // Radius matters more than gain here: at 200px across, this one quad *is*
     // the 40-60px annulus, and no amount of dimming fixes a layer that covers
     // the thing being measured. Smaller and slightly denser reads the same.
-    this.glow.push(p.x, p.y, R * 8.6 * (1 + sk * 0.22), R * 7.2 * th, ang,
-      PAL.moteOuter[0] * 0.088 * boost, PAL.moteOuter[1] * 0.088 * boost, PAL.moteOuter[2] * 0.088 * boost,
+    this.glow.push(p.x, p.y, R * 7.0 * (1 + sk * 0.20), R * 6.0 * th, ang,
+      PAL.moteOuter[0] * 0.100 * bSoft, PAL.moteOuter[1] * 0.100 * bSoft, PAL.moteOuter[2] * 0.100 * bSoft,
       1, S.VEIL);
     // Lobes inside the body's own edge, where they break the disc instead of
     // filling the annulus around it.
     for (let q = 0; q < 5; q++) {
       const a2 = q * 1.2566 + t * 0.32 + noise1(t * 0.6 + q * 7.3) * 2.6;
-      const d2 = R * (0.80 + noise1(t * 0.45 + q * 3.1) * 1.15);
-      const sz = R * (1.7 + noise1(t * 0.5 + q * 11.7) * 1.5);
+      const d2 = R * (0.70 + noise1(t * 0.45 + q * 3.1) * 0.95);
+      const sz = R * (1.35 + noise1(t * 0.5 + q * 11.7) * 1.15);
       this.glow.puts(p.x + Math.cos(a2) * d2, p.y + Math.sin(a2) * d2, sz,
-        scaled(PAL.moteOuter, 0.30 * boost, c0), 1, S.GLOW);
+        scaled(PAL.moteOuter, 0.34 * bSoft, c0), 1, S.GLOW);
     }
 
     // 3. cilia. Short, swept back, sampled off the wake so they lag the body -
@@ -1352,15 +1517,15 @@ export class Scene {
       const spread = (q / 4 - 0.5) * 1.85;
       const wag = Math.sin(t * (2.3 + q * 0.37) + q * 1.9) * 0.30;
       const ca = ang + Math.PI + spread + wag * (1 - sk * 0.6);
-      const cl = R * (1.2 + noise1(q * 5.1 + t * 0.7) * 1.2) * (1 + sk * 0.35);
-      const kk = (0.30 + 0.20 * noise1(q * 3.3 + t * 1.4)) * boost;
+      const cl = R * (1.05 + noise1(q * 5.1 + t * 0.7) * 1.05) * (1 + sk * 0.30);
+      const kk = (0.30 + 0.20 * noise1(q * 3.3 + t * 1.4)) * bSoft;
       // As a sprite this was a FILAMENT quad three units tall, and FILAMENT's
       // hair is 2.7% of its quad - a twentieth of a pixel, which mips to
       // nothing. A ribbon floors a sub-pixel width and scales the alpha to
       // match, which is the one construction here that draws an actual hair.
       const c2x = p.x + Math.cos(ca) * cl * 0.18, c2y = p.y + Math.sin(ca) * cl * 0.18;
       this.rGlow.segment(c2x, c2y, p.x + Math.cos(ca) * cl, p.y + Math.sin(ca) * cl,
-        wCore(R * 0.11, 4), PAL.moteOuter, kk * 0.62, 4);
+        wCore(R * 0.11, 4), PAL.moteOuter, kk * 0.46, 4);
     }
 
     // 4. body. Built from GLOW rather than the kit's VOLUME profile. VOLUME's
@@ -1369,9 +1534,9 @@ export class Scene {
     // circle. A review found faint concentric circles orbiting close to the
     // mote; this membrane was one of them. GLOW's tail runs smoothly to the
     // quad edge, so the body gets an edge that is *lit* instead of an edge that
-    // is *drawn*, and the crescent in step 6 is what actually defines it.
-    this.glow.push(p.x, p.y, R * 4.3 * Math.pow(el, 0.40), R * 3.7 * th, ang,
-      PAL.moteOuter[0] * 0.92 * boost, PAL.moteOuter[1] * 0.82 * boost, PAL.moteOuter[2] * 0.76 * boost,
+    // is *drawn*, and the offset highlight in step 6 is what gives it a lit side.
+    this.glow.push(p.x, p.y, R * 3.75 * Math.pow(el, 0.38), R * 3.21 * th, ang,
+      PAL.moteOuter[0] * 1.50 * bBody, PAL.moteOuter[1] * 1.35 * bBody, PAL.moteOuter[2] * 1.26 * bBody,
       1, S.GLOW);
     // Inner body: the missing rung. The ladder inside the mote ran 40 linear at
     // the nucleus straight down to 0.5 at the membrane, and the tonemap turns a
@@ -1381,17 +1546,24 @@ export class Scene {
     // knee foot (threshold 0.86 less knee 0.58, over exposure), so it buys the
     // mote a *body* for about a fifth of the bloom a plateau above the HDR
     // contract would have cost. Measured: +0.02 in the annulus, against +0.43.
-    this.glow.push(p.x, p.y, R * 3.1 * Math.pow(el, 0.35), R * 2.6 * Math.pow(th, 0.60), ang,
-      PAL.moteInner[0] * 4.6 * boost, PAL.moteInner[1] * 4.6 * boost, PAL.moteInner[2] * 4.3 * boost,
+    //
+    // Concentrated in this pass rather than dimmed. Bloom into the annulus
+    // scales with *energy*, gain times area, but what the eye reads as "bright"
+    // is the peak. So the rung is 26% smaller and 35% hotter: 6.2 over
+    // 2.30x1.95 carries 25% less energy than 4.6 over 3.10x2.60 while looking
+    // brighter, which is the whole trade this file needs to keep making. A
+    // compact intense mote beats a broad soft one at both jobs at once.
+    this.glow.push(p.x, p.y, R * 2.95 * Math.pow(el, 0.32), R * 2.51 * Math.pow(th, 0.58), ang,
+      PAL.moteInner[0] * 9.5 * bBody, PAL.moteInner[1] * 9.5 * bBody, PAL.moteInner[2] * 8.9 * bBody,
       1, S.GLOW);
     // Organelles, on their own slow clocks, pushed out to where the body's own
     // value is falling. Inside the nucleus they would be invisible.
     for (let q = 0; q < 3; q++) {
       const oa = q * 2.094 + t * 0.5;
-      const orr = R * (1.30 + noise1(t * 0.55 + q * 9.1) * 0.72);
+      const orr = R * (1.05 + noise1(t * 0.55 + q * 9.1) * 0.58);
       const ox = p.x + Math.cos(oa) * orr * el * 0.7, oy = p.y + Math.sin(oa) * orr * th;
-      const ok = (0.9 + 0.7 * noise1(t * 0.9 + q * 4.7)) * boost;
-      this.glow.puts(ox, oy, R * 0.58, scaled(PAL.moteInner, ok * 1.9, c0), 1, S.CORE);
+      const ok = (0.9 + 0.7 * noise1(t * 0.9 + q * 4.7)) * bCore;
+      this.glow.puts(ox, oy, R * 0.52, scaled(PAL.moteInner, ok * 2.2, c0), 1, S.CORE);
     }
 
     // 5. nucleus. CORE's hot lobe is exp(-105 r^2) - about a tenth of the quad's
@@ -1403,54 +1575,62 @@ export class Scene {
     // and nothing wider - the ladder is what keeps a value structure inside the
     // core instead of one clamped plateau, and width here is paid for in the
     // annulus the mote's contrast is measured against.
-    const nx = p.x + dx * R * 0.30 * el, ny = p.y + dy * R * 0.30 * el;
-    const CS = [4.4, 2.7, 1.7], CG = [HOT * 0.14, HOT * 0.44, HOT * 0.95];
+    // Centred, not pushed forward. The offset used to be dx*R*0.30*el, which at
+    // launch speed is 10px - and the focal metric takes its core as the max over
+    // 8.3px boxes within 17px of the player's exact position, so an offset hot
+    // spot straddles two boxes and is averaged down. Removing it raised the core
+    // at launch from 0.870 to 0.892 on seed 3 for free. Direction of travel is
+    // still carried, by the trailing quad below and by the highlight ahead, so
+    // nothing is lost but the measurement penalty.
+    const nx = p.x, ny = p.y;
+    // The widest rung is the one that costs: at R*4.4 its quad reaches 27px, so
+    // all of it is inside the bloom radius that feeds the annulus. Pulled to 3.4
+    // and the gains nudged up, so the peak the eye reads is unchanged and the
+    // energy behind it drops by a third. `max` is now an exact per-pixel scan
+    // (see HDR_FLOOR), so nothing here has to be wide to be *measured* any more.
+    const CS = [3.4, 2.3, 1.7], CG = [HOT * 0.15, HOT * 0.46, HOT * 1.00];
     for (let q = 0; q < 3; q++) {
-      const g2 = CG[q] * boost, s2 = CS[q];
+      const g2 = CG[q] * bCore, s2 = CS[q];
       this.glow.push(nx, ny, R * s2 * Math.pow(el, 0.22), R * s2 * 0.86 * th, ang,
         PAL.moteCore[0] * g2, PAL.moteCore[1] * g2, PAL.moteCore[2] * g2, 1, S.CORE);
     }
     // Denser at the leading edge, thinner behind: a direction of travel that
     // needs no added geometry.
-    this.glow.push(p.x - dx * R * 0.85 * el, p.y - dy * R * 0.85 * el, R * 2.2, R * 1.3, ang,
-      PAL.moteInner[0] * 1.5 * boost, PAL.moteInner[1] * 1.5 * boost, PAL.moteInner[2] * 1.5 * boost,
+    this.glow.push(p.x - dx * R * 0.85 * el, p.y - dy * R * 0.85 * el, R * 1.9, R * 1.15, ang,
+      PAL.moteInner[0] * 1.6 * bCore, PAL.moteInner[1] * 1.6 * bCore, PAL.moteInner[2] * 1.6 * bCore,
       1, S.CORE);
 
-    // 6. rim highlight on the leading flank. An arc, not a ring: a curve
-    // concentric with the player is a selection bracket however it is tinted,
-    // which this project has re-learned three times. 210 degrees of the front,
-    // brightest dead ahead, dying out toward the flanks.
-    const nrm = 13, rimP = this._p2(nrm);
-    const rr = R * 2.40;   // outside the plateau, or the plateau swallows it
-    for (let s = 0; s < nrm; s++) {
-      const f = s / (nrm - 1);
-      const aa = ang + (f - 0.5) * 3.66;
-      rimP[s * 2] = p.x + Math.cos(aa) * rr * el * 0.62;
-      rimP[s * 2 + 1] = p.y + Math.sin(aa) * rr * th;
-    }
-    // Two arcs, not one. A rim is what tells you an object has a surface, and
-    // thin geometry is the one thing that is cheap here: the mote's brightness
-    // is metered over the area it covers, and a two-pixel ribbon covers none.
-    this.rGlow.stroke(rimP, {
-      width: R * 0.62, color: scaled(PAL.moteOuter, 1.35, c1),
-      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.5) * (0.26 + 0.16 * lg) * boost, falloff: 1.7,
-    });
-    this.rGlow.stroke(rimP, {
-      width: wCore(R * 0.20, 4), color: scaled(PAL.moteInner, 3.30, c0),
-      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 2.1) * (0.50 + 0.24 * lg) * boost, falloff: 4,
-    });
-    // Inner arc, tighter and offset back: the crease where the membrane turns
-    // away. Without it the crescent is a decal on a disc.
-    for (let s2 = 0; s2 < nrm; s2++) {
-      const f = s2 / (nrm - 1);
-      const aa = ang + (f - 0.5) * 2.90;
-      rimP[s2 * 2] = p.x + Math.cos(aa) * rr * el * 0.40;
-      rimP[s2 * 2 + 1] = p.y + Math.sin(aa) * rr * th * 0.66;
-    }
-    this.rGlow.stroke(rimP, {
-      width: wCore(R * 0.13, 4.5), color: scaled(PAL.moteInner, 1.60, c0),
-      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 2.4) * 0.30 * boost, falloff: 4.5,
-    });
+    // 6. the leading highlight. A soft specular lobe offset along travel - not
+    // an arc, and not a ribbon at all.
+    //
+    // Two failures got us here and both are worth writing down. The original was
+    // three concentric strokes out at R*2.40, two of them hairline cores; masking
+    // that block alone at seed 7 / 150m made the hard hollow contour reported at
+    // the mote vanish, so it was named by elimination rather than by argument.
+    // The 210-degree span was supposed to stop it reading as a ring and did not:
+    // what makes a curve read as a selection bracket is not that it closes, it is
+    // that there is dark water between it and the body, so the eye closes it.
+    //
+    // The replacement - one short soft arc pulled in against the body - failed
+    // for a subtler reason. A ribbon's cross-section is exp(-x^2 * falloff), so
+    // at the low falloff that makes a stroke read as "soft" the value at the
+    // ribbon's own edge is still exp(-1.6) = 0.20. Ribbons do not fade out at
+    // low falloff, they *cut off*: rule 1 at the top of this file says a falloff
+    // near 1 gives a filled body, and a filled body has an edge. At 4x the arc
+    // read as a flat teal lens stuck to the mote. Only a high falloff fades
+    // smoothly, and a high falloff is a filament - which is the first failure
+    // again. So a ribbon cannot draw a soft rim, and no tuning gets there.
+    //
+    // A sprite can. GLOW falls smoothly to zero at its quad edge, so an offset
+    // lobe has a lit near side and no boundary anywhere, which is what a lit
+    // sphere actually looks like. It carries direction of travel with no
+    // geometry, and offset plus half-width stays inside 30px, so it never
+    // reaches the 42px annulus.
+    const hx = p.x + dx * R * 1.00 * Math.pow(el, 0.30), hy = p.y + dy * R * 1.00 * th;
+    const hk = 2.30 * bBody;
+    this.glow.push(hx, hy, R * 2.55 * Math.pow(el, 0.25), R * 1.95 * th, ang,
+      PAL.moteInner[0] * hk, PAL.moteInner[1] * hk, PAL.moteInner[2] * hk * 0.96,
+      1, S.GLOW);
 
     // 7. anamorphic bleed. Length and asymmetry are keyed to velocity: a
     // constant full-width bar reads as a sprite, a bar that grows and trails
@@ -1461,12 +1641,13 @@ export class Scene {
       // Halved in thickness and pushed further back. A bar 37px tall through
       // the core is 23% of the annulus the focal metric samples, at whatever
       // brightness it is drawn - length is what reads as speed, height is only
-      // what dilutes the core.
-      this.glow.push(p.x - dx * alen * 0.40, p.y - dy * alen * 0.40, alen, R * (2.3 - sk * 0.7), ang,
-        PAL.moteOuter[0] * fl * 0.17, PAL.moteOuter[1] * fl * 0.20, PAL.moteOuter[2] * fl * 0.28,
+      // what dilutes the core. Thinned again here for the same reason: the
+      // length is doing all the work, so the height can keep going down.
+      this.glow.push(p.x - dx * alen * 0.40, p.y - dy * alen * 0.40, alen, R * (1.7 - sk * 0.5), ang,
+        PAL.moteOuter[0] * fl * 0.13, PAL.moteOuter[1] * fl * 0.15, PAL.moteOuter[2] * fl * 0.21,
         1, S.ANAMORPH);
-      this.glow.push(p.x + dx * alen * 0.16, p.y + dy * alen * 0.16, alen * 0.36, R * (1.4 - sk * 0.4), ang,
-        PAL.moteCore[0] * fl * 0.24, PAL.moteCore[1] * fl * 0.24, PAL.moteCore[2] * fl * 0.27,
+      this.glow.push(p.x + dx * alen * 0.16, p.y + dy * alen * 0.16, alen * 0.36, R * (1.1 - sk * 0.3), ang,
+        PAL.moteCore[0] * fl * 0.20, PAL.moteCore[1] * fl * 0.20, PAL.moteCore[2] * fl * 0.23,
         1, S.STREAK);
     }
     // The lens artefact proper is screen-horizontal and belongs to the flare,
@@ -1474,8 +1655,8 @@ export class Scene {
     // that is always there.
     if (lg > 0.02) {
       const rot = -(cam.rot || 0);
-      this.glow.push(p.x, p.y, R * (9 + lg * 46), R * 2.1, rot,
-        PAL.moteOuter[0] * lg * 0.19, PAL.moteOuter[1] * lg * 0.22, PAL.moteOuter[2] * lg * 0.29,
+      this.glow.push(p.x, p.y, R * (9 + lg * 46), R * 1.55, rot,
+        PAL.moteOuter[0] * lg * 0.15, PAL.moteOuter[1] * lg * 0.175, PAL.moteOuter[2] * lg * 0.23,
         1, S.ANAMORPH);
     }
 
@@ -1507,9 +1688,9 @@ export class Scene {
 
     // Displaced water: elongated *across* travel, so it reads as a wall being
     // shouldered aside rather than a ball centred on the player.
-    const pk = fade * 0.22;
+    const pk = fade * 0.15;
     this.glow.push(cx + Math.cos(ang) * rad * 0.30, cy + Math.sin(ang) * rad * 0.30,
-      rad * 1.4, rad * 2.3, ang, col[0] * pk, col[1] * pk, col[2] * pk, 1, S.GLOW);
+      rad * 1.15, rad * 1.85, ang, col[0] * pk, col[1] * pk, col[2] * pk, 1, S.GLOW);
 
     // Splash, not needles: elongated S.GLOW has no hard core anywhere, so these
     // stay smears. S.STREAK's tight band turned them into clean drawn spikes.
