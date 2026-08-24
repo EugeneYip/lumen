@@ -5,17 +5,17 @@
 //     -> 6-mip downsample
 //     -> halation     3 cascaded gaussians of mip1  (tight, hugs sources)
 //     -> veil         progressive upsample 5..2     (wide, low amplitude)
-//     -> streak       2 widening horizontal passes  (anamorphic)
+//     -> ridge+smear  2 passes along each source's OWN axis (short, oriented)
 //     -> composite    spectral CA / astigmatic edge / speed smear, water medium,
 //                     cos^4 vignette, hue-preserving filmic, split tone,
-//                     black point, clumped film grain, TPDF dither
+//                     black point, midtone shelf, clumped grain, TPDF dither
 //
 // Two bloom characters with independent weights is the whole point: a single
 // blur radius for everything reads as a filter, not as light in a room. And the
 // tonemap runs on the peak channel, not per-channel, so a hot cyan core lands
 // on cyan-white and a hot amber core on amber-white instead of both on grey.
 //
-// Four things in here were wrong for a long time and are worth naming so they
+// Six things in here were wrong for a long time and are worth naming so they
 // do not come back:
 //   1. Dispersion and the speed smear shared one radial excursion, so the
 //      spectral weights rode the smear. A 2px fringe is a lens; a 20px one is
@@ -38,6 +38,30 @@
 //      needs a focal point, and it saturated 'soft', which throws away the
 //      sharp full-res tap. Measured 1.3:1 core-over-surround at speed against
 //      5.6:1 while tethered. The smear has its own origin now.
+//   5. The third bloom layer was a pair of long HORIZONTAL blurs, so every
+//      bright object threw a level bar across the whole frame width - and
+//      those bars passed in FRONT of silhouettes that should have occluded
+//      them. Nothing in an abyss is a horizontal light source and nothing here
+//      is a lens with anamorphic glass, so the bar was the one moment the
+//      image admitted it was a filter rather than light. The layer is now
+//      oriented per pixel to the ridge axis of whatever cast it, and gated so
+//      an isotropic source contributes nothing at all - see ORIENT_FS. There
+//      is no depth buffer to test against, but occlusion stops being the
+//      question once the smear is a property of the source instead of a bar
+//      across the frame; and at speed the scene's own velocity-stretched
+//      sprites orient it, so the motion cue is one the world motivates
+//      instead of one the glass asserts.
+//   6. The black point gave the frame a floor and no ramp. Measured on the
+//      build before this one: 71% of a mid-run frame below L16 and 5.0%
+//      between L48 and L159, so the rock's strata, joints and sediment crust
+//      existed in the scene at linear 0.01-0.04 and arrived compressed into
+//      about 20 code values. The midtone shelf is a gain windowed on level -
+//      zero at black so the blacks survive, zero at white so the cores and
+//      the clipping fraction do not move, peaked on the low mids. It is still
+//      one monotone function of one variable, which is what a response curve
+//      is. A local operator would model the geology harder and would also be
+//      the same lie the streak was: an unsharp mask draws an edge the scene
+//      does not contain, and that is the complaint this round is answering.
 import { compile, RenderTarget, drawFullscreen, FS_VS, GLSL_COMMON, Blend, texture2D } from './gl.js';
 
 const clampN = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -132,8 +156,8 @@ void main(){
   outColor = vec4(c * (uWeight / 16.0), 1.0);
 }`;
 
-// One 13-tap directional gaussian, reused for the tight halation cascade
-// (H then V, twice) and for the anamorphic streak (H only, long stride).
+// One 13-tap directional gaussian, used for the tight halation cascade
+// (H then V, twice).
 const BLUR_FS = `
 ${GLSL_COMMON}
 uniform sampler2D uSrc;
@@ -153,6 +177,115 @@ void main(){
     wsum += 2.0*w;
   }
   outColor = vec4(c / wsum, 1.0);
+}`;
+
+// Per-pixel axis of the light that is there, so the directional bloom layer can
+// be a property of the SOURCE instead of a property of the glass. A horizontal
+// bar across the frame is the one thing a bioluminescent organism cannot cast.
+//
+// The operator is the Hessian of compressed luminance, not a structure tensor,
+// and that distinction is the whole design. A structure tensor measures edges,
+// and the flank of a perfectly round core is a perfect edge - so a tensor
+// would have found high coherence all around a mote and smeared it into an
+// arc, which is the exact artefact this file has been burned by before. Second
+// derivatives measure ridges instead: a thin bright line has one strongly
+// negative curvature across it and near zero along it, a round core has two
+// equal ones, and a silhouette boundary is a saddle. Only the first survives.
+const ORIENT_FS = `
+${GLSL_COMMON}
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+uniform float uSpan, uComp, uSig, uRidgePow;
+in vec2 vUv; out vec4 outColor;
+
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+// Log luminance. The Hessian of raw luminance scales with intensity, so every
+// threshold below would have to be written relative to the local level; in log
+// space a ridge has the same curvature whether it is a plankton speck or an
+// anchor core, and one constant covers both.
+float lm(vec2 uv){ return log2(1.0 + dot(texture(uSrc, uv).rgb, LUMA) * uComp); }
+
+void main(){
+  vec2 t = uTexel * uSpan;
+  float a00 = lm(vUv + t*vec2(-1,-1)), a10 = lm(vUv + t*vec2(0,-1)), a20 = lm(vUv + t*vec2(1,-1));
+  float a01 = lm(vUv + t*vec2(-1, 0)), a11 = lm(vUv),                a21 = lm(vUv + t*vec2(1, 0));
+  float a02 = lm(vUv + t*vec2(-1, 1)), a12 = lm(vUv + t*vec2(0, 1)), a22 = lm(vUv + t*vec2(1, 1));
+
+  // 1-2-1 across the stencil. A raw second difference on a field this small is
+  // mostly noise, and a direction field that flickers would shimmer the glow.
+  float Lxx = ((a00 - 2.0*a10 + a20) + 2.0*(a01 - 2.0*a11 + a21) + (a02 - 2.0*a12 + a22)) * 0.25;
+  float Lyy = ((a00 - 2.0*a01 + a02) + 2.0*(a10 - 2.0*a11 + a12) + (a20 - 2.0*a21 + a22)) * 0.25;
+  float Lxy = (a22 - a02 - a20 + a00) * 0.25;
+
+  float tr = Lxx + Lyy, d = Lxx - Lyy;
+  float m  = sqrt(d*d + 4.0*Lxy*Lxy);
+  float e1 = 0.5*(tr - m);          // most negative: across a bright ridge
+  float e2 = 0.5*(tr + m);          // along it, and near zero there
+
+  // 1 for a line, 0 for a round core, 0 for a saddle. The saddle case is what
+  // makes this layer unable to draw along a silhouette boundary.
+  float ridge = max(0.0, -e1 - abs(e2)) / (-e1 + abs(e2) + 1e-4);
+  float k = pow(ridge, uRidgePow) * smoothstep(0.0, uSig, -e1);
+
+  // Eigenvector of the near-zero curvature. Two algebraically equal forms;
+  // taking the better-conditioned one by the sign of d avoids the 0/0 that
+  // sits on the vertical axis, and vertical ridges here are kelp trunks and
+  // anchor stalks - the common case, not the corner case.
+  vec2 v = mix(vec2(2.0*Lxy, m - d), vec2(m + d, 2.0*Lxy), step(0.0, d));
+  vec2 ax = v / max(length(v), 1e-9);
+
+  // Stored angle-doubled, because an axis has no sign and bilinear averaging
+  // of a signed direction cancels itself wherever the field flips. Doubling
+  // makes the interpolation the circular mean of the axis, and the length that
+  // comes back is a free confidence: it collapses only where neighbouring
+  // pixels disagree, which is exactly where the smear should shorten.
+  outColor = vec4(ax.x*ax.x - ax.y*ax.y, 2.0*ax.x*ax.y, k, 1.0);
+}`;
+
+// The oriented smear itself. Same 13-tap gaussian as the halation, but the
+// direction and the reach come out of the orientation field per pixel, so two
+// cascaded passes follow curvature instead of running straight - a kelp frond
+// glows along the frond.
+const STREAK_FS = `
+${GLSL_COMMON}
+uniform sampler2D uSrc, uOrient;
+uniform vec2 uTexel;
+uniform float uStride, uGate;
+in vec2 vUv; out vec4 outColor;
+
+void main(){
+  vec3 o = texture(uOrient, vUv).rgb;
+  float r = length(o.xy);
+  // Half-angle back out of the doubled encoding, again taking whichever branch
+  // is conditioned away from zero.
+  vec2 h = mix(vec2(o.y, r - o.x), vec2(r + o.x, o.y), step(0.0, o.x));
+  vec2 ax = h / max(length(h), 1e-9);
+  float k = clamp(o.z, 0.0, 1.0);
+
+  // Reach is the gate, with no floor under it, and that is load-bearing. A
+  // floor looks harmless and is not: inside a dark occluder the field is a
+  // VALLEY, so the near-zero curvature runs along the valley and the axis this
+  // shader gets back is the one ACROSS it - a residual 30% reach there was
+  // gathering the bright water on both sides of a stalactite and depositing it
+  // inside the stalactite. Measured: the body went from L22 to L47 while the
+  // water beside it moved 3%, which took the silhouette from 4.1:1 to 2.0:1.
+  // With the reach gated the layer can only exist where a ridge exists, so it
+  // cannot cross a silhouette - a silhouette is not a ridge. That is the
+  // occlusion test this file has no depth buffer to run.
+  vec2 stp = uTexel * ax * (uStride * r * k);
+  vec3 c = texture(uSrc, vUv).rgb;
+  float wsum = 1.0;
+  for(int i=1;i<=6;i++){
+    float fi = float(i);
+    float w = exp(-fi*fi*0.09);
+    c += texture(uSrc, vUv + stp*fi).rgb * w;
+    c += texture(uSrc, vUv - stp*fi).rgb * w;
+    wsum += 2.0*w;
+  }
+  // Gated on the way in only. Gating twice would square it and the layer would
+  // survive on nothing but perfect lines.
+  outColor = vec4(c * (mix(1.0, k, uGate) / wsum), 1.0);
 }`;
 
 // A half-res copy of the scene. One bilinear tap lands exactly on a 2x2 box.
@@ -176,6 +309,7 @@ uniform float uChroma, uDefocus, uSmear, uBarrel;
 uniform vec2  uSmearOrg;
 uniform float uVignette, uVigFocal, uVigCorner;
 uniform float uWhite, uHueKeep, uSat, uContrast, uLift, uBlack;
+uniform float uShelf, uShelfCentre, uShelfWidth;
 uniform vec3  uShadowTint, uHighTint, uLiftCol;
 uniform vec3  uAbsorb, uScatterCol;
 uniform float uScatter, uScatterEdge, uScatterBase;
@@ -348,6 +482,8 @@ void main(){
   col += halB * uHaloAmt;
   col += veil * uVeilAmt;
   col += ring * uHalationTint * uHalation;
+  // The oriented layer. Near-neutral tint on purpose: it used to be cooled,
+  // which is right for anamorphic glass and wrong for an organism's own light.
   col += texture(uStreak, uv).rgb * uStreakTint * uStreakAmt;
   col += uFlashCol * uFlash;      // pre-tonemap, so a flash rolls off filmically
 
@@ -400,6 +536,37 @@ void main(){
   // of green where it is 0.72. That is the whole difference between a colour
   // cast and a pedestal.
   col += uLiftCol * uLift * (1.0 - smoothstep(0.0, 0.16, Lb));
+
+  // --- the midtone shelf. The black point fixed the floor and left no ramp:
+  //     the geology arrived as silhouette rather than as modelled surface,
+  //     with 71% of a frame under L16 and 5% between L48 and L159. A gain, not
+  //     an add - an add here is a pedestal and this file has already paid for
+  //     that lesson once. And a gain on luminance with the chroma riding along,
+  //     so the newly-opened rock keeps the water's colour.
+  //
+  //     The window is gaussian in log2 luminance, and it has to be, because the
+  //     two things it must not touch are only a factor of 11 apart. Below sits
+  //     the floor: code 12 is 4x under the centre and lifting it dissolves
+  //     every silhouette - measured, the 450m stalactites lost their width and
+  //     the frame went milky when an earlier rational window carried 42% of
+  //     its gain down there. Above sits the mote's own halo: the focal metric
+  //     averages an annulus 42-58px out, which lands at code 58, only 3x over
+  //     the centre, and every point of gain there is a point off the hero's
+  //     read. A window in L/(L+k) cannot be tight on both sides at once; one
+  //     in log L can. This one is 0.01% at L8, 5% at L16, full at L32, 28% at
+  //     L48 and 4% by L58 - so it expands code 16-40 by about 1.6x, which is
+  //     the falloff from a lit rock face into shadow, and leaves both ends
+  //     alone. Measured on the same scene at four depths: the 16-31 band drains
+  //     by 4-11 points into 32-47, and the fraction below L8 goes UP by 1.2-3.1
+  //     points rather than down.
+  //
+  //     It also pays for the white point. The toe gain is WHITE_REF/white, so
+  //     the white point was doing midtone work at 0.2 of measured focal
+  //     contrast per 1.0 - the shelf buys the same midtone without touching
+  //     the top of the curve, so the white point went back up.
+  L = dot(col, LUMA);
+  float sd = log2(max(L, 1e-6) / uShelfCentre) / uShelfWidth;
+  col *= 1.0 + uShelf * exp2(-sd * sd);
 
   L = dot(col, LUMA);
   col = mix(vec3(L), col, uSat * (1.0 - uDesat));
@@ -458,8 +625,18 @@ export const GRADE = {
   halation: 0.55,         // red-shifted DoG ring
   haloStride: 1.05,       // tight gaussian, quarter-res texels
   haloStride2: 2.25,      // the wider half of the DoG
-  streak: 0.15,
-  streakStride: [2.6, 11.0],
+  // The third bloom character. Same slot in the chain as the old anamorphic
+  // streak - the bench's ?g=streak=0 still ablates exactly this layer - but it
+  // is no longer horizontal and no longer long. Combined sigma is ~34px at
+  // 1600 wide against the bar's ~107px, and it only exists where a source has
+  // an axis of its own. See ORIENT_FS for why that is a Hessian and not a
+  // structure tensor.
+  streak: 0.46,
+  streakStride: [1.7, 3.4],
+  streakSpan: 1.60,       // Hessian stencil spacing, quarter-res texels
+  streakComp: 6.0,        // luminance compression before differentiating
+  streakSig: 0.10,        // curvature below this is noise, not a ridge
+  streakRidge: 1.35,      // how hard 'nearly round' is pushed toward zero
   dirt: 0.55,
   // Dispersion is a property of glass, not of how fast you are going. At 1600
   // wide this is sub-pixel on axis and ~3px in the extreme corner: a fringe.
@@ -469,14 +646,13 @@ export const GRADE = {
   vignette: 0.68,
   vigFocal: 0.95,
   vigCorner: 0.28,
-  // Dropped from 11.0. The toe gain is WHITE_REF/white, so a lower white point
-  // is the cheapest midtone lift available - unlike exposure it does not also
-  // feed the brightpass, so it buys midtone without buying veil. It is not
-  // free: a global lift raises a mid-grey surround faster than a core that is
-  // already on the shoulder, so every 1.0 off the white point costs about 0.2
-  // of the mote's measured contrast against its surround. 10.6 is where those
-  // two stop arguing.
-  white: 10.6,            // linear value the shoulder is built around
+  // Went to 10.6 to buy midtone, and back up now that the shelf buys it more
+  // cheaply. The toe gain is WHITE_REF/white, so dropping the white point
+  // lifts the whole low end - including the mote's own surround, at about 0.2
+  // of measured focal contrast per 1.0. The shelf does the same job with a
+  // window that dies before the surround, so this can go back to sitting where
+  // the shoulder belongs, which is also where the hot cores keep their ladder.
+  white: 11.0,            // linear value the shoulder is built around
   hueKeep: 7.0,           // higher = hue survives further up the shoulder
   saturation: 1.06,
   contrast: 0.145,
@@ -485,6 +661,12 @@ export const GRADE = {
   // the colour of the floor, at a luminance too low to be a pedestal.
   black: 0.0020,
   lift: 0.0045,
+  // The ramp. Gaussian in log2 luminance, centred on display-linear 0.0145 -
+  // code 32, the band the rock was compressed into - and 0.85 octaves wide,
+  // which is the widest that still dies before the mote's halo at code 58.
+  shelf: 0.72,
+  shelfCentre: 0.0145,
+  shelfWidth: 0.72,
   grain: 0.048,
   grainChroma: 0.32,
   absorb: [0.070, 0.026, 0.016],
@@ -495,7 +677,7 @@ export const GRADE = {
   highTint: [1.000, 0.950, 0.868],
   liftCol: [0.030, 0.190, 0.520],
   scatterCol: [0.075, 0.420, 0.440],
-  streakTint: [0.900, 0.970, 1.100],
+  streakTint: [0.980, 1.000, 1.020],
   halationTint: [1.000, 0.320, 0.145],
   hushTint: [0.420, 0.200, 0.850],
 };
@@ -511,12 +693,15 @@ export class Post {
     this.half = rt(2, 2);
     this.halA = rt(2, 2); this.halB = rt(2, 2); this.halC = rt(2, 2);
     this.veil = rt(2, 2);
+    this.orient = rt(2, 2);
     this.streakA = rt(2, 2); this.streakB = rt(2, 2);
 
     this.pBright = compile(gl, FS_VS, BRIGHT_FS, 'bright');
     this.pDown = compile(gl, FS_VS, DOWN_FS, 'down');
     this.pUp = compile(gl, FS_VS, UP_FS, 'up');
     this.pBlur = compile(gl, FS_VS, BLUR_FS, 'blur');
+    this.pOrient = compile(gl, FS_VS, ORIENT_FS, 'orient');
+    this.pStreak = compile(gl, FS_VS, STREAK_FS, 'streak');
     this.pCopy = compile(gl, FS_VS, COPY_FS, 'copy');
     this.pComp = compile(gl, FS_VS, COMPOSITE_FS, 'composite');
     this.w = 0; this.h = 0;
@@ -534,7 +719,8 @@ export class Post {
       mw = Math.max(1, mw >> 1); mh = Math.max(1, mh >> 1);
     }
     const qw = Math.max(1, w >> 2), qh = Math.max(1, h >> 2);
-    for (const t of [this.halA, this.halB, this.halC, this.veil, this.streakA, this.streakB]) t.resize(qw, qh);
+    for (const t of [this.halA, this.halB, this.halC, this.veil,
+      this.orient, this.streakA, this.streakB]) t.resize(qw, qh);
   }
 
   beginScene() { this.scene.bind(true); return this.scene; }
@@ -557,7 +743,7 @@ export class Post {
     return this._fallbackSpec;
   }
 
-  _pass(prog, target, srcTex, uniforms, additive = false) {
+  _pass(prog, target, srcTex, uniforms, additive = false, aux = null) {
     const gl = this.gl;
     target.bind(!additive);
     gl.useProgram(prog.program);
@@ -565,6 +751,15 @@ export class Post {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, srcTex);
     if (prog.u.uSrc) gl.uniform1i(prog.u.uSrc, 0);
+    if (aux) {
+      let unit = 1;
+      for (const k in aux) {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, aux[k]);
+        if (prog.u[k]) gl.uniform1i(prog.u[k], unit);
+        unit++;
+      }
+    }
     for (const k in uniforms) {
       const loc = prog.u[k]; if (!loc) continue;
       const v = uniforms[k];
@@ -621,6 +816,11 @@ export class Post {
     });
     while (waves.length < 2) waves.push([0, 0, 0, 0]);
 
+    // Speed lengthens the oriented smear a little, but most of the motion read
+    // now arrives for free: the scene draws its sprites velocity-stretched, so
+    // at speed the ridge field itself lies along the direction of travel.
+    const stretch = 1 + sk * 0.30 + lg * 0.15;
+
     return {
       time: ctx.t || 0,
       exposure: G.exposure * (1 + lg * 0.13 + bg * 0.04) * (1 - deadK * 0.30) * (1 - hush * 0.06),
@@ -643,10 +843,16 @@ export class Post {
       halation: G.halation * (1 + lg * 0.70 + sk * 0.15),
       haloStride: G.haloStride,
       haloStride2: G.haloStride2,
-      // The streak carries more of the speed read now that the smear is short
-      // enough to stay smooth - it is the cue that survives at 1:1.
-      streak: G.streak * (1 + sk * 1.55 + lg * 1.80 + slow * 0.30),
-      streakStride: G.streakStride,
+      // The old multipliers here were x2.7 at speed, which is affordable for a
+      // wide dim bar and is not affordable for something this close to the
+      // source. It also needs less: the smear grows with the source's own
+      // aspect, not only with this number.
+      streak: G.streak * (1 + sk * 0.85 + lg * 1.10 + slow * 0.25),
+      streakStride: [G.streakStride[0] * stretch, G.streakStride[1] * stretch],
+      streakSpan: G.streakSpan,
+      streakComp: G.streakComp,
+      streakSig: G.streakSig,
+      streakRidge: G.streakRidge,
       dirt: G.dirt,
 
       // These three used to be pushed hard by speed, which is what turned the
@@ -674,6 +880,11 @@ export class Post {
       // little with depth. Death closes it further - the frame is going out.
       black: G.black * (1 + depthK * 0.30 + deadK * 0.45),
       lift: G.lift,
+      // The Hush already floods the frame and death is closing it; neither
+      // moment wants the ramp opened as well.
+      shelf: G.shelf * (1 - hush * 0.35) * (1 - deadK * 0.55),
+      shelfCentre: G.shelfCentre,
+      shelfWidth: G.shelfWidth,
       shadowTint: G.shadowTint,
       // Tethered, you are sitting in an anchor's light: highlights go warmer.
       highTint: mix3(G.highTint, [1.0, 0.905, 0.760], att * 0.35 + lg * 0.40),
@@ -732,11 +943,17 @@ export class Post {
     this._pass(this.pBlur, this.halA, this.halB.tex, { uTexel: qt, uDir: H, uStride: g.haloStride2 });
     this._pass(this.pBlur, this.halC, this.halA.tex, { uTexel: qt, uDir: V, uStride: g.haloStride2 });
 
-    // --- anamorphic streak: two widening horizontal passes ---
-    this._pass(this.pBlur, this.streakA, this.mips[1].tex,
-      { uTexel: qt, uDir: H, uStride: g.streakStride[0] });
-    this._pass(this.pBlur, this.streakB, this.streakA.tex,
-      { uTexel: qt, uDir: H, uStride: g.streakStride[1] });
+    // --- the oriented layer. Ridge axis first, then two cascaded smears along
+    //     it. The second pass re-reads the field, so the smear follows a bend
+    //     instead of running off the end of a curved source. ---
+    this._pass(this.pOrient, this.orient, this.mips[1].tex, {
+      uTexel: qt, uSpan: g.streakSpan, uComp: g.streakComp,
+      uSig: g.streakSig, uRidgePow: g.streakRidge,
+    });
+    this._pass(this.pStreak, this.streakA, this.mips[1].tex,
+      { uTexel: qt, uStride: g.streakStride[0], uGate: 1 }, false, { uOrient: this.orient.tex });
+    this._pass(this.pStreak, this.streakB, this.streakA.tex,
+      { uTexel: qt, uStride: g.streakStride[1], uGate: 0 }, false, { uOrient: this.orient.tex });
 
     // --- wide veil: progressive upsample, stopping at mip2 so the tight
     //     scales stay out of it. The halation owns those. ---
@@ -781,6 +998,7 @@ export class Post {
     f('uWhite', g.white); f('uHueKeep', g.hueKeep);
     f('uSat', g.saturation); f('uContrast', g.contrast);
     f('uLift', g.lift); f('uBlack', g.black);
+    f('uShelf', g.shelf); f('uShelfCentre', g.shelfCentre); f('uShelfWidth', g.shelfWidth);
     v3('uShadowTint', g.shadowTint); v3('uHighTint', g.highTint); v3('uLiftCol', g.liftCol);
     v3('uAbsorb', g.absorb); v3('uScatterCol', g.scatterCol);
     f('uScatter', g.scatter); f('uScatterBase', g.scatterBase); f('uScatterEdge', g.scatterEdge);
