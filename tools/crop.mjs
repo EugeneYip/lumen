@@ -3,10 +3,15 @@
  *   node tools/crop.mjs shots/x/frame.png 400,200,800,450 shots/x/crop.png [zoom] */
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, resolve, relative } from 'node:path';
+import { extname, join, normalize, resolve, relative, isAbsolute } from 'node:path';
+import { existsSync } from 'node:fs';
 import puppeteer from 'puppeteer';
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
 const [src, rect, out, zoomArg] = process.argv.slice(2);
+if (!src || !rect || !out) {
+  console.error('usage: crop.mjs <src.png> <x,y,w,h> <out.png> [zoom]');
+  process.exit(2);
+}
 const [rx, ry, rw, rh] = rect.split(',').map(Number);
 const zoom = Number(zoomArg || 1);
 const MIME = { '.html': 'text/html', '.png': 'image/png' };
@@ -18,7 +23,27 @@ const server = createServer(async (q, r) => {
 });
 await new Promise(r => server.listen(0, r));
 const PORT = server.address().port;
-const url = '/' + relative(ROOT, resolve(src)).split(/[\\/]/).map(encodeURIComponent).join('/');
+/**
+ * Images are served over a local static server rooted at the repo, so a path
+ * outside it resolves to a 404 and the screenshot comes out black -- while the
+ * tool still prints OK and exits 0. For a workflow whose central rule is "look
+ * at the pixels", a pixel tool that silently outputs black is the worst
+ * possible failure, so refuse it loudly instead.
+ */
+function repoRelative(pth, label) {
+  const abs = resolve(pth);
+  const rel = relative(ROOT, abs);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    console.error(`${label} must be inside the repository (${ROOT}); got ${abs}`);
+    process.exit(2);
+  }
+  if (!existsSync(abs)) {
+    console.error(`${label} does not exist: ${abs}`);
+    process.exit(2);
+  }
+  return '/' + rel.split(/[\\/]/).map(encodeURIComponent).join('/');
+}
+const url = repoRelative(src, 'source image');
 const b = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--hide-scrollbars'] });
 const page = await b.newPage();
 await page.setViewport({ width: Math.round(rw * zoom), height: Math.round(rh * zoom) });

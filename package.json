@@ -5,9 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/serve.js",
-    "shots": "node tools/shoot.mjs"
+    "test": "node tools/check.mjs --seeds 7,3",
+    "check": "node tools/check.mjs --seeds 7,3",
+    "state": "node tools/state.mjs",
+    "shots": "node tools/shoot.mjs --out shots/run --scenes title,tethered,launch,fast,hazardNear,hushNear,dead --w 1600 --h 900 --seed 7"
   },
   "dependencies": {
     "puppeteer": "^25.8.0"
+  },
+  "description": "LUMEN - Deep Drift. A one-button browser game about swinging on a light-tether through an abyssal trench.",
+  "engines": {
+    "node": ">=18"
   }
 }

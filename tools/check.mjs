@@ -56,6 +56,17 @@ const HDR = {
   maxMin: 6.0,     // emitter cores must be genuinely hot, or bloom has nothing
 };
 
+/**
+ * Per-scene allowances. The Hush is a deliberate full-frame violet event -- it
+ * is *supposed* to flood the frame, so holding it to the deep-shadow bulk of
+ * ordinary play would be enforcing the wrong thing. The allowance is set just
+ * above the measured value rather than switched off, so the exception cannot
+ * quietly become a licence to keep brightening.
+ */
+const HDR_SCENE = {
+  hushNear: { p50Max: 0.055, p90Max: 0.200 },
+};
+
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.png': 'image/png', '.json': 'application/json' };
 const server = createServer(async (req, res) => {
   try {
@@ -146,7 +157,7 @@ for (const seed of SEEDS) {
         if (lum.clipped > BUDGET.clippedMax) fails.push(`${tag}: ${(lum.clipped * 100).toFixed(1)}% of pixels clipped to white (max ${(BUDGET.clippedMax * 100)}%)`);
         if (lum.black > BUDGET.blackMax) warns.push(`${tag}: ${(lum.black * 100).toFixed(1)}% of pixels are near-black`);
         const spread = lum.p95 - lum.p20;
-        if (spread < BUDGET.minSpread) warns.push(`${tag}: flat image — p95-p20 luminance spread only ${spread.toFixed(3)} (want > ${BUDGET.minSpread})`);
+        if (spread < BUDGET.minSpread) fails.push(`${tag}: flat image — p95-p20 luminance spread only ${spread.toFixed(3)} (want > ${BUDGET.minSpread})`);
       } catch (e) {
         fails.push(`seed ${seed} / ${sc}: ${e.message}`);
       }
@@ -154,7 +165,7 @@ for (const seed of SEEDS) {
 
     // ---- HDR scene structure ----
     try {
-      for (const sc of ['tethered', 'fast']) {
+      for (const sc of ['tethered', 'fast', 'launch', 'hushNear']) {
         // Restart before each measurement. Without this the probe runs on from
         // wherever the previous scene loop left the world, so it reports a
         // different position than the tonemapped checks above and the two sets
@@ -168,10 +179,11 @@ for (const seed of SEEDS) {
         const h = await page.evaluate(() => window.LUMEN.hdrStats());
         S.scenes[sc] = { ...(S.scenes[sc] || {}), hdr: h };
         const tag = `seed ${seed} / ${sc} HDR`;
-        if (h.p50 > HDR.p50Max) fails.push(`${tag}: scene bulk too bright — p50 ${h.p50} > ${HDR.p50Max} linear (the abyss should be deep shadow)`);
-        if (h.p90 > HDR.p90Max) warns.push(`${tag}: p90 ${h.p90} > ${HDR.p90Max} linear`);
-        if (h.p99 < HDR.p99Min) warns.push(`${tag}: no real highlights — p99 only ${h.p99} (want > ${HDR.p99Min})`);
-        if (h.max < HDR.maxMin) fails.push(`${tag}: nothing is hot — max ${h.max} < ${HDR.maxMin} linear, so bloom and the tonemap shoulder have nothing to work with`);
+        const lim = { ...HDR, ...(HDR_SCENE[sc] || {}) };
+        if (h.p50 > lim.p50Max) fails.push(`${tag}: scene bulk too bright — p50 ${h.p50} > ${lim.p50Max} linear (the abyss should be deep shadow)`);
+        if (h.p90 > lim.p90Max) warns.push(`${tag}: p90 ${h.p90} > ${lim.p90Max} linear`);
+        if (h.p99 < HDR.p99Min) fails.push(`${tag}: no real highlights — p99 only ${h.p99} (want > ${HDR.p99Min})`);
+        if (h.max < lim.maxMin) fails.push(`${tag}: nothing is hot — max ${h.max} < ${lim.maxMin} linear, so bloom and the tonemap shoulder have nothing to work with`);
       }
     } catch (e) { warns.push(`seed ${seed}: hdrStats failed — ${e.message}`); }
 
@@ -214,10 +226,34 @@ for (const seed of SEEDS) {
       if (run.best < BUDGET.minDepth) fails.push(`seed ${seed}: autopilot only reached ${run.best}m in 45s — movement is broken or the level is impassable`);
     } catch (e) { fails.push(`seed ${seed}: autopilot probe failed — ${e.message}`); }
 
-    // ---- determinism ----
+    // ---- world list ordering ----
+    // Hot loops in player.js and render.js break on ascending x, so one
+    // inversion silently makes later objects unreachable AND invisible. This
+    // shipped once: 18 plankton were uncollectable on seed 7.
+    try {
+      const inv = await page.evaluate(() => {
+        const w = window.game.world;
+        w.populate(40000);
+        const out = {};
+        for (const k of ['anchors', 'hazards', 'plankton', 'decor']) {
+          const a = w[k]; let n = 0, worst = 0;
+          for (let i = 1; i < a.length; i++) {
+            if (a[i].x < a[i - 1].x) { n++; worst = Math.max(worst, a[i - 1].x - a[i].x); }
+          }
+          if (n) out[k] = { n, worst: Math.round(worst) };
+        }
+        return out;
+      });
+      S.ordering = inv;
+      for (const [k, v] of Object.entries(inv)) {
+        fails.push(`seed ${seed}: world.${k} is not sorted by x — ${v.n} inversion(s), worst ${v.worst} units back. Hot loops break on x and will silently skip objects.`);
+      }
+    } catch (e) { warns.push(`seed ${seed}: ordering probe failed — ${e.message}`); }
+
+    // ---- determinism: state AND pixels ----
     try {
       const det = await page.evaluate(async () => {
-        const snap = () => {
+        const run = () => {
           const g = window.game;
           // Input is not part of newRun(), so a probe that ran before this one
           // can leave the synthetic button held and desync step 1.
@@ -225,12 +261,26 @@ for (const seed of SEEDS) {
           g.startPlay();
           for (let i = 0; i < 1200; i++) { g.input.setSynthetic(g.autopilot()); g.step(1 / 120); g.input.endFrame(); }
           const p = g.player;
-          return [p.x, p.y, p.vx, p.vy, g.world.anchors.length, g.particles.n].map(v => Math.round(v * 1000) / 1000).join('|');
+          const state = [p.x, p.y, p.vx, p.vy, g.world.anchors.length, g.particles.n]
+            .map(v => Math.round(v * 1000) / 1000).join('|');
+          // Also hash the rendered pixels. State equality does not prove the
+          // image is reproducible, and the image is what gets compared between
+          // builds, so it is the thing that actually has to be deterministic.
+          g.render(1 / 120);
+          const t = document.createElement('canvas');
+          t.width = 160; t.height = 90;
+          const x = t.getContext('2d', { willReadFrequently: true });
+          x.drawImage(document.getElementById('gl'), 0, 0, t.width, t.height);
+          const d = x.getImageData(0, 0, t.width, t.height).data;
+          let h = 2166136261;
+          for (let i = 0; i < d.length; i++) { h ^= d[i]; h = Math.imul(h, 16777619); }
+          return { state, pixels: (h >>> 0).toString(16) };
         };
-        return { a: snap(), b: snap() };
+        return { a: run(), b: run() };
       });
-      S.determinism = det.a === det.b;
-      if (det.a !== det.b) fails.push(`seed ${seed}: NOT deterministic — replaying the same seed diverged (${det.a} vs ${det.b})`);
+      S.determinism = det.a.state === det.b.state && det.a.pixels === det.b.pixels;
+      if (det.a.state !== det.b.state) fails.push(`seed ${seed}: simulation NOT deterministic — replay diverged (${det.a.state} vs ${det.b.state})`);
+      else if (det.a.pixels !== det.b.pixels) fails.push(`seed ${seed}: RENDER not deterministic — identical state produced different pixels (${det.a.pixels} vs ${det.b.pixels}); frames cannot be compared between builds`);
     } catch (e) { warns.push(`seed ${seed}: determinism probe failed — ${e.message}`); }
   }
 

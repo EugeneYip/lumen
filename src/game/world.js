@@ -88,7 +88,36 @@ const LINES = {
 };
 
 const byX = (a, b) => a.x - b.x;
-function pushAll(dst, src) { for (let i = 0; i < src.length; i++) dst.push(src[i]); }
+
+/**
+ * Append a sorted block to a sorted list and keep the result sorted.
+ *
+ * Sorting each phrase block and concatenating is NOT enough: a block's objects
+ * can spill past their phrase's nominal end, so the next block starts before
+ * the previous one finished. Hot loops in player.js and render.js `break` on
+ * ascending x, so a single inversion silently makes every later object in that
+ * neighbourhood unreachable and invisible. It measured as 1-4 inversions per
+ * seed and 18 uncollectable plankton on seed 7 before this existed.
+ *
+ * The overlap is small in practice, so this is O(block + overlap), not a resort.
+ */
+function pushAll(dst, src) {
+  const n = src.length;
+  if (!n) return;
+  if (!dst.length || dst[dst.length - 1].x <= src[0].x) {
+    for (let i = 0; i < n; i++) dst.push(src[i]);
+    return;
+  }
+  let i = dst.length;
+  const first = src[0].x;
+  while (i > 0 && dst[i - 1].x > first) i--;
+  const tail = dst.splice(i, dst.length - i);
+  let a = 0, b = 0;
+  while (a < tail.length || b < n) {
+    if (b >= n || (a < tail.length && tail[a].x <= src[b].x)) dst.push(tail[a++]);
+    else dst.push(src[b++]);
+  }
+}
 
 export class World {
   constructor(seed = 7) {
@@ -578,7 +607,8 @@ export class World {
     this._layPlankton(p, r, A, H, K, d);
     this._layDecor(p, r, D);
 
-    // Hot loops break on ascending x, so every list is sorted before it lands.
+    // Hot loops break on ascending x. Sorting each block is necessary but not
+    // sufficient - blocks overlap - so pushAll merges rather than concatenates.
     A.sort(byX); H.sort(byX); K.sort(byX); D.sort(byX);
     pushAll(this.anchors, A); pushAll(this.hazards, H);
     pushAll(this.plankton, K); pushAll(this.decor, D);

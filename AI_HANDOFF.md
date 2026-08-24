@@ -104,9 +104,14 @@ order, and that order *is* the art direction.
 
 1. **Determinism.** No `Math.random()`, no `Date.now()`, no `performance.now()`
    anywhere that affects simulation or rendering. Use the seeded RNG in
-   `src/engine/rng.js` or the clock passed in. A given seed must replay
-   bit-identically, because that is the only reason screenshots from two
-   different builds can be compared at all. `check.mjs` asserts this.
+   `src/engine/rng.js` or the clock passed in. Replaying a seed must reproduce
+   both the simulation state and the rendered image, because that is the only
+   reason screenshots from two builds can be compared at all. `check.mjs`
+   asserts both: a rounded state fingerprint after 1200 steps, and a hash of the
+   rendered pixels. Note it compares two runs *within one page load*, so it
+   catches state leaking between runs but not cross-machine reproducibility.
+   Machine-persistent state must not reach the renderer — the personal best is
+   forced to 0 in headless for exactly this reason.
 2. **Frame-rate independence.** The sim is a fixed 120Hz step. Never use a raw
    per-step multiplier for damping or friction — use `damp`/`spring` from
    `math.js`. At 120Hz `v *= 0.86` annihilates all velocity in under a second.
@@ -120,7 +125,12 @@ order, and that order *is* the art direction.
    in Chrome — it once made the capture harness unusable. `audio.silent` must be
    honoured everywhere; headless capture sets it.
 5. **Arrays in `world.js` stay sorted by ascending `x`.** Several hot loops
-   `break` on `x` and will silently miss objects otherwise.
+   `break` on `x` and will silently miss objects otherwise. Sorting each
+   generated phrase block is *not* sufficient — blocks overlap, so `pushAll`
+   merges rather than concatenates. This shipped broken once: 1-4 inversions per
+   seed made 18 plankton silently uncollectable and invisible on seed 7, which
+   corrupted the scoring mechanic with no visible error. `check.mjs` now asserts
+   global ordering on every list.
 6. **Additive-only module APIs.** Modules are owned by different contributors
    and cannot edit each other. Add exports and fields; do not remove or rename.
 7. **In headless capture, `render()` runs once** at the end of thousands of
@@ -148,7 +158,12 @@ before tonemapping**:
 | `p99` | **> 0.25** | there must be real highlights |
 | `max` (emitter cores) | **> 6** | bloom and the tonemap shoulder need something genuinely hot |
 
-Final tonemapped frames should land at mean sRGB luminance **0.08-0.20**.
+Final tonemapped frames land at mean sRGB luminance **0.08-0.20** in practice;
+the gate enforces the wider **[0.045, 0.240]** so that a deliberate dark or
+bright moment is not blocked. `hushNear` has a documented per-scene allowance in
+`HDR_SCENE` because the Hush is meant to flood the frame — the allowance sits
+just above the measured value so it cannot quietly widen.
+
 Measure, do not guess:
 
 ```js
@@ -161,9 +176,15 @@ curve. That split was established after all three drifted at once.
 
 ### Other contracts checked
 
-Boot time, zero console errors, per-scene mean luminance and contrast spread (a
-flat image fails), clipping fraction, render and step budgets, and that the
-deterministic autopilot can still play (a level it cannot traverse is broken).
+Zero console errors; per-scene mean luminance, contrast spread (a flat image
+fails) and clipping fraction; render and step budgets; that every object list in
+`world.js` is globally sorted by `x`; and that the deterministic autopilot can
+still play (a level it cannot traverse is broken).
+
+**Failures block; warnings do not.** Boot time and the HDR `p90` guideline are
+warnings on purpose — boot time is noisy under machine contention, and `p90` is
+a composition guideline rather than a defect. Everything else fails the run.
+`check.mjs` exits non-zero only on failures.
 
 ## 5. Capture and review workflow
 
@@ -258,14 +279,29 @@ Verify each against the current code before acting; some may be fixed.
 - **Difficulty tuning drifts as movement improves.** Every time the swing gets
   better the curve gets easier. Re-run `tools/_probe.mjs` and `tools/_reach.mjs`
   after any physics change.
-- **`tools/_*.mjs` are scratch instruments** left deliberately: `_probe.mjs`
-  (level coverage and phrase mix), `_reach.mjs` (real-physics fairness),
-  `_feel.mjs` (movement measurement), `_grade.html`/`_grade.mjs` (synthetic HDR
-  bench), `_atlas.*` (sprite atlas viewer), `_audio.mjs` (offline audio
-  analysis). They are not tests and may rot; they are also how most real bugs
-  here were found. Re-run them rather than trusting prose.
+- **`tools/_*` are scratch instruments** left deliberately, because they are how
+  most real bugs here were found. They are not tests, they have no pass/fail
+  contract, and they may rot — re-run them rather than trusting prose.
+  `_probe.mjs` (level coverage, phrase mix), `_reach.mjs` (fairness against the
+  real `Player`; currently reports ~1 dead-end anchor per seed, which has never
+  been triaged as tolerance-or-defect), `_feel.mjs` (movement measurement, many
+  modes), `_spot.mjs` (dumps the level around a death), `_grade.html`/`_grade.mjs`
+  (synthetic HDR bench), `_atlas.html`/`_atlas.mjs` (sprite atlas viewer),
+  `_audio.mjs` (offline audio render + spectrogram), `_sortcheck.mjs` (x-ordering,
+  now also enforced by `check.mjs`). Note `_atlas.mjs` and `_grade.mjs` hardcode
+  an absolute repo path and will need editing if the repo moves.
 - **Audio has never been verified by ear** — only structurally, via offline
   render and spectrogram inspection.
+- **`shots/` is gitignored**, so any "compare against the previous build"
+  instruction has no baseline on a fresh clone. Capture a baseline first.
+- **Nothing mechanically enforces the check before a commit** — no CI, no hooks.
+  It is convention. `npm test` runs it if you prefer that entry point.
+- **`hazardNear` and `deep` can land on nearly the same frame** on some seeds,
+  which quietly weakens A/B coverage. Prefer explicit `--at` times or more seeds
+  when that matters.
+- **The "~23x between best and worst release" figure** in section 6 came from a
+  `_feel.mjs` measurement that is not committed; only `loadTime` is visible in
+  the code. Re-derive it before relying on it.
 
 ## 9. Recovering abandoned work
 

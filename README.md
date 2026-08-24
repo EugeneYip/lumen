@@ -8,7 +8,7 @@ builds a chain multiplier.
 
 No build step. No runtime dependencies. No asset files: every texture, sound and
 piece of geometry is generated procedurally at boot, which is why the whole game
-is a few hundred KB and loads instantly.
+is ~443KB of JavaScript (139KB gzipped) and loads instantly.
 
 ## Run it
 
@@ -40,11 +40,16 @@ ahead of the anchor — so holding longer is not automatically better.
 node tools/check.mjs --seeds 7,3        # AUTHORITATIVE. Must pass before any commit.
 ```
 
-`check.mjs` is the source of truth for quality, not prose. It asserts boot time,
-zero console errors, per-scene exposure and contrast, HDR scene structure,
-render and simulation performance budgets, that the autopilot can actually play,
-and that a replayed seed is bit-identical. See `AI_HANDOFF.md` for what each
-contract means and why.
+`check.mjs` is the source of truth for quality, not prose. It asserts zero
+console errors, per-scene exposure and contrast, HDR scene structure, render and
+simulation performance budgets, that the world's object lists are correctly
+ordered, that the autopilot can actually play, and that replaying a seed
+reproduces both the simulation state and the rendered pixels.
+
+Some checks are warnings rather than failures (boot time, the HDR `p90`
+guideline) — the file distinguishes them explicitly. Read `BUDGET`, `HDR` and
+`HDR_SCENE` at the top of `tools/check.mjs` for the actual thresholds;
+`AI_HANDOFF.md` explains what each one means and why it exists.
 
 ## Look at it
 

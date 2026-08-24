@@ -40,7 +40,11 @@ class Game {
     this.audio = new Audio();
     this.audio.silent = !!opts.headless;   // captures must not touch WebAudio
 
-    this.best = Number(localStorage.getItem('lumen.best') || 0) || 0;
+    // Headless capture must depend on the seed and nothing else. `best` is a
+    // frameCtx field the HUD renders, so reading a machine-persistent record
+    // here would make captured pixels differ between machines and between runs
+    // that happen to beat it.
+    this.best = opts.headless ? 0 : (Number(localStorage.getItem('lumen.best') || 0) || 0);
     this.muted = localStorage.getItem('lumen.muted') === '1';
 
     this.mode = 'title';        // title | play | dead | paused
@@ -163,7 +167,11 @@ class Game {
         this.mode = 'dead';
         this.deadT = 0;
         const d = p.maxX * METRES;
-        if (d > this.best) { this.best = d; localStorage.setItem('lumen.best', String(d)); this.audio.play('best'); }
+        if (d > this.best) {
+          this.best = d;
+          if (!this.headless) localStorage.setItem('lumen.best', String(d));
+          this.audio.play('best');
+        }
         this.envDim = 1;
       }
     } else if (this.mode === 'dead') {

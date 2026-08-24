@@ -31,8 +31,8 @@ Pillars, in priority order:
    command. Zero console errors. `window.LUMEN.ready` must become `true`.
 3. **No new runtime dependencies. No asset files.** Everything is procedural:
    textures are synthesised at boot, audio is synthesised, geometry is generated.
-   That is a hard design constraint, not a preference — it is why this game is
-   ~100KB and loads instantly.
+   That is a hard design constraint, not a preference — it is why the whole game
+   is ~443KB of JavaScript (139KB gzipped) with no assets, and loads instantly.
 4. **Keep your module's exports backward compatible.** Add, don't remove or
    rename. Other files call into yours and you cannot edit them.
 5. **Determinism.** Never call `Math.random()` or `Date.now()`/`performance.now()`
