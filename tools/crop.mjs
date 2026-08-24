@@ -51,7 +51,19 @@ await page.setContent(`<style>*{margin:0;padding:0}html,body{background:#000;ove
  width:${rw * zoom}px;height:${rh * zoom}px}img{position:absolute;left:${-rx * zoom}px;top:${-ry * zoom}px;
  transform:scale(${zoom});transform-origin:0 0;image-rendering:pixelated}</style>
  <img src="http://127.0.0.1:${PORT}${url}">`, { waitUntil: 'load' });
-await page.evaluate(() => Promise.all([...document.images].map(i => i.complete ? 1 : i.decode().catch(() => 1))));
+const ok = await page.evaluate(async () => {
+  const i = document.images[0];
+  if (i && !i.complete) await i.decode().catch(() => {});
+  return !!(i && i.naturalWidth);
+});
+if (!ok) { console.error('source image failed to load; refusing to write a blank crop'); process.exit(3); }
 await page.screenshot({ path: resolve(out) });
+{
+  const buf = await readFile(resolve(out));
+  if (buf.length < 2000) {
+    console.error(`${out} is ${buf.length} bytes - almost certainly blank. Refusing to report success.`);
+    process.exit(3);
+  }
+}
 await b.close(); server.close();
 console.log('OK ->', out);

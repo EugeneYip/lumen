@@ -28,6 +28,11 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.png': 'image/pn
 const server = createServer(async (req, res) => {
   try {
     const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+    if (p === '/__blank') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><title>blank</title>');
+      return;
+    }
     const f = join(ROOT, normalize(p).replace(/^(\.\.[/\\])+/, ''));
     const b = await readFile(f);
     res.writeHead(200, { 'Content-Type': MIME[extname(f).toLowerCase()] || 'application/octet-stream',
@@ -66,9 +71,36 @@ const page = await browser.newPage();
 
 async function shoot(html, w, h, out) {
   await page.setViewport({ width: Math.round(w), height: Math.round(h), deviceScaleFactor: 1 });
+  // The page needs a real http origin before setContent, or the img loads below
+  // never happen and every output is silently black.
+  await page.goto(`http://127.0.0.1:${PORT}/__blank`, { waitUntil: 'domcontentloaded' });
   await page.setContent(html, { waitUntil: 'load' });
-  await page.evaluate(() => Promise.all(Array.from(document.images).map(i => i.complete ? 1 : i.decode().catch(() => 1))));
+  const broken = await page.evaluate(async () => {
+    const imgs = Array.from(document.images);
+    await Promise.all(imgs.map((i) => (i.complete ? 1 : i.decode().catch(() => 1))));
+    return imgs.filter((i) => !i.naturalWidth).length;
+  });
+  if (broken) {
+    console.error(`${broken} image(s) failed to load; refusing to write a blank ${out}`);
+    process.exit(3);
+  }
   await page.screenshot({ path: out });
+  await assertNotBlank(out);
+}
+
+/**
+ * Refuse to claim success for an all-black output. Every silent failure this
+ * tooling has had ended as a black PNG plus an OK line, and a review workflow
+ * built on looking at pixels cannot afford that.
+ */
+async function assertNotBlank(file) {
+  const buf = await readFile(file);
+  // Cheap proxy: a PNG of a uniform field compresses far smaller than any real
+  // frame at these dimensions.
+  if (buf.length < 6000) {
+    console.error(`${file} is ${buf.length} bytes - almost certainly blank. Refusing to report success.`);
+    process.exit(3);
+  }
 }
 
 const SHELL = (body, w, h) => `<!doctype html><meta charset=utf-8><style>
