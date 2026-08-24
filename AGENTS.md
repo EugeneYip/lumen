@@ -3,6 +3,13 @@
 You are one of several specialists polishing a browser game to a genuinely
 AAA visual and tactile standard. Read this whole file before touching anything.
 
+> **Arriving with no context?** Read `README.md` first (what the game is, how to
+> run and verify it), then `AI_HANDOFF.md` (invariants, quality contracts,
+> decisions and their rationale, open problems, how to recover abandoned work).
+> Run `node tools/state.mjs` to see current repository state — never trust
+> documentation for that. This file is the *working contract* for delegated
+> parallel work; it assumes you already know what the project is.
+
 ## The game
 `LUMEN — Deep Drift`. A one-button momentum game. You are a bioluminescent mote
 in an abyssal trench. **Hold** to cast a light-tether at the nearest good anchor
@@ -48,10 +55,16 @@ name so the lead can merge it.
 
 ## Running it
 ```bash
+node tools/state.mjs           # repository state: HEAD, dirty files, worktrees
 node tools/serve.js            # http://localhost:5173  (for a human to play)
+node tools/check.mjs --seeds 7,3   # AUTHORITATIVE quality gate; must pass
 ```
 
 ### Capture (this is how you check your own work)
+Also available: `node tools/crop.mjs <src> x,y,w,h <out> <zoom>` for 1:1 or
+zoomed inspection. Use it. Downscaled contact sheets have hidden every
+hard-edge artefact this project has had, sometimes for several review passes.
+
 ```bash
 node tools/shoot.mjs --out shots/mine --scenes title,tethered,launch,fast,hushNear --w 1600 --h 900 --seed 7
 node tools/montage.mjs sheet --dir shots/mine        # contact sheet of the above
