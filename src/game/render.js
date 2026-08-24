@@ -91,6 +91,18 @@ const FLESH = [PAL.moteInner[0] * 0.62, PAL.moteInner[1] * 0.88, PAL.moteInner[2
 const MAXP = 96;         // longest polyline any shape here needs
 const FAR = 0.44;        // decor depth that moves an object into the far round
 const CORE_MIN = 4.2;    // world units: below this a ribbon core aliases to dots
+// How folded a path has to be before what is drawn along it starts to fade.
+// Measured as chord over arclength between two points on it, which for a
+// circular swing is a pure function of the angle turned - 1.00 straight, 0.90 at
+// a quarter turn, 0.64 at a half, 0.30 at three quarters, 0 when it closes - and
+// is scale free, so the same pair of numbers works for the wake, for the flow
+// line the cilia hang off, and at any zoom.
+//
+// The window is measured, not guessed: over 70s of autopilot on seeds 7, 3 and
+// 11 the median frame's most returned wake sample sits at 0.94 and the lower
+// quartile at 0.83, so at 0.80 nothing in normal play is touched at all, while
+// below 0.30 the path is laying a second arc back across itself.
+const FOLD_LO = 0.30, FOLD_HI = 0.80;
 
 // Emitter cores run at genuinely hot linear values - see the exposure contract
 // in AGENTS.md, which the frame must peak above 6.0 pre-tonemap. Halation, the
@@ -189,7 +201,8 @@ export class Scene {
     // front rather than minting a subarray per shape per frame. Three pools =
     // three polylines can be live at once (body, rim, appendage).
     this._pool = [new Float32Array(MAXP * 2), new Float32Array(MAXP * 2), new Float32Array(MAXP * 2)];
-    this._cv = new Float32Array(MAXP);   // per-sample curvature, for the wake taper
+    this._cv = new Float32Array(MAXP);   // per-sample fold taper for the wake
+    this._ln = new Float32Array(MAXP);   // and its prefix arclength
     this._spine = new Float32Array(8);   // 4 points down the mote's own flow line
     this._ai = 0;                        // monotonic cursor into world.anchors
     this._view = [new Array(MAXP + 1), new Array(MAXP + 1), new Array(MAXP + 1)];
@@ -1366,30 +1379,65 @@ export class Scene {
       pts[s * 2 + 1] = src[i + 1] + (dx / dl) * w;
     }
 
-    // Taper by curvature. A tight swing folds the wake back over itself, and two
+    // Fold taper. A tethered swing folds the wake back over itself, and two
     // stretches of the same additive ribbon crossing at a shallow angle sum into
     // a contour line - the artefact this file has had to remove from the hazard,
-    // the shock and the mote's rim already. Dropping alpha where the polyline
-    // turns hardest means a loop fades out instead of stacking into an edge, and
-    // it costs one pass over points that are already in cache. (1-cos)/2 is 0
-    // through a straight run and 1 through a reversal, so a gentle arc is
-    // untouched and only a genuine fold pays.
-    const cv = this._cv;
-    for (let s = 0; s < n; s++) {
-      let kb = 0;
-      if (s > 0 && s < n - 1) {
-        const ax = pts[s * 2] - pts[(s - 1) * 2], ay = pts[s * 2 + 1] - pts[(s - 1) * 2 + 1];
-        const bx = pts[(s + 1) * 2] - pts[s * 2], by = pts[(s + 1) * 2 + 1] - pts[s * 2 + 1];
-        const la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1;
-        kb = clamp01((1 - (ax * bx + ay * by) / (la * lb)) * 0.5);
+    // the shock and the mote's rim already. Measured over 70s of autopilot on
+    // seeds 7, 3 and 11, the worst crossing puts two stretches of the middle pass
+    // *exactly* on top of each other, at samples 19 and 28 of 44, where that pass
+    // carries nearly its full alpha.
+    //
+    // This used to measure local curvature, which is the wrong quantity twice
+    // over. A swing does not bend sharply anywhere, it bends steadily, so the
+    // term read 0.95 through the reversal above and tapered nothing whatsoever.
+    // And accumulating that same local turn does not rescue it: the oldest
+    // samples of a history are laid down when the mote is slowest, their segments
+    // are ~2 units long, and the angle between two 2-unit segments is noise -
+    // enough of it to make a 230-degree return measure 773.
+    //
+    // Chord over arclength (see FOLD_LO) reads the same thing straight off the
+    // geometry, with no per-segment angle to be noisy about. Taken pairwise and
+    // minimised - for each sample, the lowest ratio it makes with any *later*
+    // sample - it covers every way a wake can cross itself: the reversal at the
+    // end of a swing, where two limbs nine samples apart sit on top of each other
+    // while each is locally straight, and the wide loop that closes back on the
+    // mote a whole history later. A windowed version was tried and found only the
+    // apex between the two limbs, never the limbs themselves.
+    //
+    // Two degeneracies do useful work here rather than needing to be handled.
+    // Adjacent samples give exactly 1, because a single segment is its own chord,
+    // so adjacency never counts as a crossing and needs no exclusion radius. And
+    // it is asymmetric by construction: only the *older* of a crossing pair sees
+    // the other, so the newest wake keeps full strength and stays welded to the
+    // body while the track it has just swum back through dissolves. Which is also
+    // what water does.
+    //
+    // Measured on `src`, not on the turbulence-displaced copy: whether the mote
+    // doubled back is a fact about its path, and at low speed the wiggle above is
+    // wider than a segment, which would collapse the ratio for the wrong reason.
+    const cv = this._cv, ln = this._ln;
+    ln[0] = 0;
+    for (let s = 1; s < n; s++) {
+      const i = off + s * 2;
+      ln[s] = ln[s - 1] + Math.hypot(src[i] - src[i - 2], src[i + 1] - src[i - 1]);
+    }
+    const span = 1 / (FOLD_HI - FOLD_LO);
+    for (let a = 0; a < n; a++) {
+      const ia = off + a * 2;
+      let lo = 1;
+      for (let b = a + 1; b < n; b++) {
+        const arc = ln[b] - ln[a];
+        if (arc < 1) continue;
+        const ib = off + b * 2;
+        const r = Math.hypot(src[ib] - src[ia], src[ib + 1] - src[ia + 1]) / arc;
+        if (r < lo) lo = r;
       }
-      cv[s] = kb;
+      cv[a] = clamp01((lo - FOLD_LO) * span);
     }
     // Smoothed across neighbours, or the taper itself becomes a dashed line.
-    const bend = (f) => {
+    const fold = (f) => {
       const i = Math.round(f * (n - 1));
-      const a = cv[Math.max(0, i - 1)], b = cv[i], c = cv[Math.min(n - 1, i + 1)];
-      return 1 - 0.78 * clamp01((a + b + c) * 0.3333 * 2.2);
+      return (cv[Math.max(0, i - 1)] + cv[i] + cv[Math.min(n - 1, i + 1)]) * 0.3333;
     };
 
     // Three passes whose alpha ramps localise a colour to a stretch of the
@@ -1403,17 +1451,17 @@ export class Scene {
     // mote's own surround out-shining its core.
     this.rGlow.stroke(pts, {
       width: (f) => lerp(34 + sk * 26, 8, Math.pow(f, 0.55)), color: PAL.waterHigh,
-      alpha: (f) => (0.15 + sk * 0.19) * Math.pow(f, 1.1) * Math.pow(1 - f, 0.30) * bend(f), falloff: 1.6,
+      alpha: (f) => (0.15 + sk * 0.19) * Math.pow(f, 1.1) * Math.pow(1 - f, 0.30) * fold(f), falloff: 1.6,
     });
     this.rGlow.stroke(pts, {
       width: (f) => lerp(19 + sk * 13, 5, Math.pow(f, 0.7)), color: PAL.moteTrail,
-      alpha: (f) => (0.26 + sk * 0.40) * Math.pow(Math.sin(f * Math.PI * 0.92), 1.1) * bend(f), falloff: 3.0,
+      alpha: (f) => (0.26 + sk * 0.40) * Math.pow(Math.sin(f * Math.PI * 0.92), 1.1) * fold(f), falloff: 3.0,
     });
     // The head pass is the one a fold can stack, because it is the brightest and
     // the narrowest, so it takes the taper twice.
     this.rGlow.stroke(pts, {
       width: (f) => lerp(7, 3.0, Math.pow(f, 0.8)), color: scaled(FLESH, 3.4, c0),
-      alpha: (f) => (0.34 + sk * 0.56) * Math.pow(f, 7.0) * bend(f) * bend(f), falloff: 5.5,
+      alpha: (f) => (0.34 + sk * 0.56) * Math.pow(f, 7.0) * fold(f) * fold(f), falloff: 5.5,
     });
 
     // Shed grain: keeps it from reading as a clean vector ribbon. Weighted to
@@ -1667,7 +1715,20 @@ export class Scene {
         // No history yet (first frames of a run, or standing still): fall back
         // to the velocity vector so the cilia still have somewhere to be.
         if (acc < need) { cx = p.x - dx * need; cy = p.y - dy * need; acc = need; }
-        SP[k * 2] = cx; SP[k * 2 + 1] = cy;
+        // The same fallback, in proportion, when the history exists but has
+        // doubled back on itself. At the end of a swing the path reverses inside
+        // the 52 units this walk covers, so the flow line folds - and everything
+        // hung off it folds too: masking the trail at seed 7 / 310m left three
+        // near-parallel cilia with U-turns at the top standing directly above the
+        // mote, which is the closed-curve read this file keeps having to remove.
+        // An appendage trailing in water does not reproduce a cusp, it gets
+        // dragged straight, so chord over arclength (see FOLD_LO) lerps the flow
+        // line back onto the velocity ray exactly as far as it has folded. A
+        // gentle swing measures 0.99 here and is untouched.
+        const st = clamp01((Math.hypot(cx - p.x, cy - p.y) / need - FOLD_LO)
+                           / (FOLD_HI - FOLD_LO));
+        SP[k * 2] = lerp(p.x - dx * need, cx, st);
+        SP[k * 2 + 1] = lerp(p.y - dy * need, cy, st);
       }
     }
 
@@ -1724,7 +1785,7 @@ export class Scene {
     // 5. the membrane. The body axis, nose to tail, with a teardrop profile:
     // blunt where it is pushing water and tapered where it is not, which is
     // the whole of "its shape alone should tell you which way it is going".
-    const na = 9, axp = this._p1(na);
+    const na = 13, axp = this._p1(na);
     const prof = (f) => Math.pow(Math.sin(Math.PI * (0.21 + 0.79 * f)), 0.52);
     for (let s = 0; s < na; s++) {
       const f = s / (na - 1);
@@ -1746,14 +1807,40 @@ export class Scene {
       // top edge; a hero lit from nowhere is the one object that would not
       // belong. It also means the rim brightness rotates through a swing, which
       // is secondary motion for free.
-      const up = clamp01(0.5 - sgn * bny * 0.5);
-      const kk = (0.30 + 0.90 * up) * bBody;
-      // The alpha envelope closes at f=0.79, short of the tail, and that is
-      // deliberate. Run to f=1 and the two flanks meet where the profile goes
-      // to zero, which draws a hard V - at 8x it read as a beak. Ending them
-      // while they are still 0.70 of full width apart leaves the taper to the
-      // sac itself, which fades smoothly because it is a sprite.
       //
+      // Squared, and with almost nothing left on the lower flank, because the
+      // linear version failed in exactly the orientation it most needed to work.
+      // bny is the body normal's y, so it is +-1 through horizontal travel and
+      // *zero* at the top and bottom of every swing - where the old weights gave
+      // both flanks 0.75 and drew two matched arcs of equal brightness around the
+      // core. Two matched arcs are what the eye closes into a bracket: named by
+      // elimination at seed 7 / 1000m, masking these two strokes and nothing else
+      // is what removes the concentric contours reported on the player. Squaring
+      // takes the symmetric case from 0.75 + 0.75 to 0.40 + 0.40 while leaving
+      // the lit case at 1.40 + 0.06, so the pair is dimmest precisely when it is
+      // most symmetric, and at every other heading there is one rim and not two.
+      const up = clamp01(0.5 - sgn * bny * 0.5);
+      const kk = (0.06 + 1.34 * up * up) * bBody;
+      // The envelope closes at BOTH ends now, and the nose end is the fix. It
+      // used to open at alpha 0.265 on the first sample, which is a butt cap -
+      // and a ribbon's cap is a hard edge, because ribbons.js gives the last
+      // sample no taper. So the two flanks each ended in a squared-off stub about
+      // 18 world units apart, straddling the nose: two smooth arcs terminating in
+      // two hard edges is a debug primitive however it is shaded. From f=0.125
+      // out this envelope is within 0.05 of the old one everywhere, so the
+      // membrane itself is unchanged; all that has gone is the cap.
+      //
+      // It still closes short of the tail (f=0.769 now, 0.79 before) for the
+      // original reason: run to f=1 and the two flanks meet where the profile
+      // goes to zero, which draws a hard V - at 8x it read as a beak.
+      //
+      // The nose end also tapers to a point in *width*, which is the other half
+      // of not being a butt cap: alpha alone leaves a 5.5px-wide bar fading over
+      // 4px, and at 20x that still steps. Narrowing it as well hands the last of
+      // the fade to the sub-pixel coverage term in ribbons.js, which is what the
+      // cilia already do and what that term was written for.
+      const rw = (f) => lerp(7.0, 4.4, f) * (0.20 + 0.80 * clamp01(f * 4.2));
+      const re = (f) => Math.pow(Math.sin(Math.PI * clamp01(f * 1.30)), 0.62) * 0.95;
       // Gain 3.2, not 4.6: at 4.6 the rim clipped to white, and the focal
       // metric is a *box mean* of the tonemapped frame - so 144 of the mote's
       // ~180 near-white pixels were sitting in two 2px arcs at 8px radius,
@@ -1761,9 +1848,8 @@ export class Scene {
       // interior to read as a membrane; it does not have to be white, and the
       // white it was spending belongs in the nucleus.
       this.rGlow.stroke(rm, {
-        width: (f) => lerp(7.0, 4.4, f), color: scaled(FLESH, 3.2 * kk, c0),
-        alpha: (f) => Math.pow(Math.sin(Math.PI * clamp01(0.07 + f * 1.18)), 0.80) * 0.90,
-        falloff: 3.6,
+        width: (f) => wFloor(rw(f)), color: scaled(FLESH, 3.2 * kk, c0),
+        alpha: (f) => aFloor(rw(f), re(f)), falloff: 3.6,
       });
     }
 

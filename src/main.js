@@ -370,7 +370,14 @@ class Game {
    */
   async seekUntil(cond, maxT = 90) {
     const tests = {
-      tethered: () => this.player.attached && this.player.holdTime > 0.25,
+      // Settled swinging, not the first quarter-second of the run. startPlay()
+      // sets a 0.22 full-screen flash that decays at 7.5/s, and the autopilot
+      // grabs an anchor almost immediately, so `attached && holdTime > 0.25`
+      // resolved at t=0.26s with the opening flash still lit -- adding a flat
+      // +0.025 linear to every pixel and welding the frame's black floor shut.
+      // That made this scene the only one in the build that could never reach
+      // black, and sent two agents looking for the cause in the environment.
+      tethered: () => this.player.attached && this.player.holdTime > 0.25 && this.flash < 0.01,
       launch: () => this.player.launchGlow > 0.55,
       // `fast` used to be satisfied by the same frame as `launch` (a launch is
       // when you are fastest), so on some seeds two of the named moments were

@@ -353,9 +353,21 @@ Longer-standing items:
   either a restart before each seek — the HDR block in `check.mjs` already does
   this and says why — or a predicate describing a moment rather than a
   threshold already crossed. Both live in lead-owned files.
-- **Two `tethered` frames cannot reach black.** `check.mjs` warns; postfx has
-  established this is scene-side, not grade-side (a 0.020 black point, 10x what
-  shipped, only reached 8% while costing 27% of the mean).
+- ~~Two `tethered` frames cannot reach black.~~ **Resolved, and instructive.**
+  Two owners investigated this in good faith and both concluded, correctly, that
+  it was not theirs: postfx measured that a 0.020 black point (10x what shipped)
+  only reached 8% while costing 27% of the mean, and the environment proved by
+  painting its own output pure black that the frame *still* rendered a uniform
+  0.057 field with 0% below L8. It was neither. `startPlay()` sets a 0.22
+  full-screen flash that decays at 7.5/s, and the `tethered` predicate resolved
+  at t=0.26s with that flash still lit, adding a flat +0.025 linear to every
+  pixel. **The scene was sampling the opening flash rather than ordinary play.**
+  Waiting for the flash to clear moved shadow from 0.0% to 12-22% and spread
+  from 0.138 to 0.179-0.209 with no art change at all.
+  The general lesson, which has now cost several rounds: when two owners each
+  prove a defect is not theirs, suspect the measurement before suspecting a
+  third owner. Scene predicates decide *when* a frame is sampled, and a
+  predicate that resolves during a transient measures the transient.
 - **Difficulty tuning drifts as movement improves.** Every time the swing gets
   better the curve gets easier. Re-run `tools/_probe.mjs` and `tools/_reach.mjs`
   after any physics change. `_reach.mjs` reports roughly one dead-end anchor per
@@ -388,19 +400,32 @@ Longer-standing items:
 - **Nothing mechanically enforces the gate before a commit** — no CI, no hooks.
   `npm test` runs it.
 
-## 8b. Work preserved on branches (as of the last edit to this file)
+## 8b. Branches left by autonomous sessions
 
-Run `node tools/state.mjs` for live state; this records only *intent*, which a
-command cannot tell you. When a branch listed here has landed, delete the entry.
+`node tools/state.mjs` lists these live, with how many commits each carries that
+are not on `main`. This section records only *intent*, which a command cannot
+tell you. Delete an entry once its branch has been fully harvested.
 
-- **`claude/kind-colden-21bab0`** — an earlier god-ray investigation. Its fix is
-  superseded on `main`, but its commit message carries a sharper diagnosis than
-  main's ("a smooth field, not a threshold on *magnified texels*"), and its
-  `tools/_shaft.mjs` and `tools/_slot.mjs` instruments have been salvaged onto
-  `main`. Nothing else there is needed; it is kept only as provenance.
+**All of the branches present at the time of writing have been harvested for
+whatever was worth taking, and none should be merged wholesale.** They were each
+cut from an older `main`, so a full merge would revert large amounts of later
+work — one of them would have undone the entire post-processing streak pass and
+743 lines of particle work. This is the concrete reason for the rule in §9.
 
-Neither this nor any other unfamiliar branch should be deleted without reading
-it first. See §9.
+The pattern that works: find the merge base, check whether the file you want has
+changed on `main` since, and if it has not, take that single path.
+
+```bash
+BASE=$(git merge-base main <branch>)
+git diff $BASE..<branch> --stat -- <path>     # what the branch actually did
+git log --oneline $BASE..main -- <path>       # empty means it applies cleanly
+git checkout <branch> -- <path>
+```
+
+Harvested so far: a god-ray diagnosis and two shaft instruments; a scene-collision
+finding plus `tools/_collide.mjs`; and a mote-rim and wake-fold fix taken as a
+single clean `render.js` path. In every case the commit message carried the
+reasoning and was worth reading even where the code was not taken.
 
 ## 9. Recovering abandoned work
 

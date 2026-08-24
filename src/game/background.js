@@ -96,7 +96,14 @@ const float V_RIM   = 0.850;   // grazing light on a near rock edge
 // near-rock strength it single-handedly put p90 at twice its ceiling. Aerial
 // perspective says a distant highlight is veiled anyway.
 const float V_FARRIM = 0.078;
-const float V_SHAFT = 0.780;   // core of a god ray
+// Core of a god ray. The slot field is sat()-clamped, so above raw 0.99 it is a
+// PLATEAU: every pixel across the widest part of a shaft carries the identical
+// peak value and no reshaping exponent can touch it, which is why the shafts
+// measured as slabs and why the last of their mass has to come off the level
+// rather than off the profile. 0.700 puts the brightest broad environment
+// feature at linear ~0.58 against the mote core's 15+, and drops the shaft
+// blocks at hushNear from 7.4 units of highlight energy to below the hero's.
+const float V_SHAFT = 0.700;
 const float V_SILT  = 0.050;   // suspended sediment under full light
 const float V_SNOW  = 0.450;   // one lit fleck of marine snow
 const float V_BIO   = 2.350;   // a living mote - carries its own light
@@ -107,6 +114,20 @@ const float V_VENT  = 2.500;   // vent throat - superwhite on purpose
 // frame's value hierarchy was inverted. The wall is a mass of DARK; only its
 // tearing seam is allowed to be bright, and not brighter than the mote.
 const float V_HUSH  = 6.000;
+// The hierarchy ceiling. A blind review measured the mote as the 43rd most
+// salient bright cluster in its own frame, out-massed 6:1 by the light shafts:
+// the environment was competing for the top of the value ladder with the one
+// object the player has to be able to find. Nothing this file draws is allowed
+// past this, which tonemaps to about 0.72 against the mote core's 0.95.
+//
+// Applied once, at the end of main(), on the peak channel. Once, because eight
+// multiplicative terms cannot each be trusted to stay in their lane as they are
+// retuned; on the peak channel, because a per-channel clamp clips one channel
+// before the others and shifts hue on the way. A soft knee rather than a min():
+// a hard clamp flattens the top of whatever hits it into a plateau, which is
+// the slab this pass spends most of its budget trying not to be.
+const float V_ENVKNEE = 1.100;
+const float V_ENVMAX  = 2.600;
 
 // Warm rock against cold water is the frame's only colour contrast, and the
 // only thing keeping a teal-dominated palette from reading as monochrome.
@@ -494,12 +515,33 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus, vec4 kill2){
   // rock is one of the few real material boundaries in the frame. The term it
   // replaces was a single exponential over the whole lower frame, which is what
   // turned the trench floor into a milky wash.
-  float drape = 0.0;
+  float drape = 0.0, rpp = 0.0;
   if(!roof){
+    // Megaripples. Sediment under a steady current organises into transverse
+    // crests, and at 10 world units per metre the readable scale is the 3-10
+    // metre megaripple, not the centimetre ripple: below about 30 units a crest
+    // is finer than the drift it sits on and reads as noise. Two incommensurate
+    // scales, sheared slightly by y so the row is not a ruler ticked across the
+    // frame.
+    //
+    // It goes into the ALBEDO, not into a lit term. A review called the seabed
+    // an untextured band, and it was right - every feature the floor had lived
+    // inside a fifteen-unit lip along its own silhouette. The first attempt at
+    // this keyed the crests to sky, which is near zero on a trench floor since
+    // that is the deepest point under the roof; the second added a lamp term,
+    // and the lamp is 120 units of reach on a floor that is usually 500 away.
+    // Albedo is light-source-agnostic: whichever of the sky, a beam, a bedding
+    // seam or the mote's own lamp is doing the lighting in a given frame, the
+    // ripple is in the answer.
+    rpp = wave(w.x + w.y * 0.42, 0.0755, 1.7) * 0.64
+        + wave(w.x - 260.0, 0.0268, 4.3) * 0.36;
     float driftN = sat(0.5 + dev(N1(vec2(w.x * 0.00043, 21.7), 0.00043)) * 1.9);
     drape = sat(0.24 + dip * 1.6) * driftN * (1.0 - sat(abs(slope) * 1.5)) * kill2.y;
     drape *= 1.0 - sat(into / (55.0 + 240.0 * driftN));
-    alb  = mix(alb, 0.92 + 0.30 * fine, drape * 0.80);
+    // Mean factor 0.98, so the drape's average albedo does not move; the swing
+    // either side of it is what the eye reads a grain size from.
+    alb  = mix(alb, (0.92 + 0.30 * fine) * (0.70 + 0.56 * sat(rpp * 0.5 + 0.5)),
+               drape * 0.80);
     body = mix(body, uCSilt, drape * 0.70);
   }
 
@@ -509,7 +551,34 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus, vec4 kill2){
   // legible seams has more material in it than a mid-grey mass with faint ones.
   // The previous version needed a 0.115 ambient term to keep a roof-filling
   // frame from going flat, and paid for it with the frame's blacks.
-  float irr = 0.010 + 0.990 * sky;
+  // A ROOF IS BACKLIT. The light that comes down through a fissure travels PAST
+  // the rock beside it and on into the trench; what reaches a downward-facing
+  // face is only the fraction the water below bounces back up. Giving a ceiling
+  // the same irradiance as a floor is what kept the one frame with a ceiling
+  // across the top of it from ever containing a black pixel: at 16m the roof
+  // sits 60 units above the top of the frame, so sky there is near its maximum
+  // and the rock was drawn at full albedo - the brightest unlit surface in the
+  // game. The seam, rim and lamp terms below are deliberately left alone, so
+  // the roof does not become a hole punched in the frame; it becomes a black
+  // mass with legible bedding in it, which is what the rest of this file is
+  // built on.
+  // ROCK AND WATER WERE THE SAME VALUE. medium() responds to the light field as
+  // pow(sky, 2.15) - that exponent is what stops the water bulk marching into
+  // the midtones - but rock took sky LINEARLY. At shallow depth, where sky sits
+  // around 0.37 across the whole frame, that puts rock at 0.028 * 1.5 * 0.37 =
+  // 0.0116 linear and water at 0.104 * 0.37^2.15 = 0.0123. Identical. A trench
+  // whose walls are exactly as bright as the water in front of them has no
+  // silhouette anywhere in it, which is why the shallowest frame in the game -
+  // the first one a player ever sees - measured 90% of its pixels inside 32
+  // code values with nothing at all below L8.
+  //
+  // Putting rock on the same response curve as the medium is the fix, and it is
+  // the physically consistent choice: both are being lit by one field, so both
+  // have to answer to it the same way. A slightly gentler exponent than the
+  // medium's, so that deep rock keeps a little more than the water around it
+  // and the mass stays legible rather than becoming a hole.
+  float skyR = pow(sky, 1.70);
+  float irr = roof ? (0.003 + 0.105 * skyR) : (0.010 + 0.990 * skyR);
   vec3 lamp = lampLight(w, roof ? 1.0 : -1.0);
   vec3 c = body * V_ROCK * alb * exp(-into / 205.0) * irr;
   // A lamp arrives from one side, so a few tens of units of rock swallow it -
@@ -545,13 +614,41 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus, vec4 kill2){
     c += uCHigh * V_RIM * rim * (0.26 + 1.05 * open) * 0.44;
     c += uCSurf * V_RIM * rim * sat(abs(slope) * 1.5) * 0.16 * sky;
   } else {
-    // Upward-facing: takes the beam directly, and takes its caustic net.
-    c += uCSurf * V_RIM * rim * sky * (0.45 + 1.15 * caus);
+    // Gated only SOFTLY on the drape. Hard-gated on it the ripples vanish over
+    // every convex stretch of floor - drape needs a hollow and a shallow slope
+    // - and that is most of what a frame shows. Bare rock on a trench floor is
+    // swept by the same current and carries the same scour, just less of it.
+    // Reaches 34 units in, not 12: the floor's entire lit zone is the 17-unit
+    // rim, so a texture confined tighter than that has nowhere to be read.
+    float crest = sat(rpp) * (0.30 + 0.70 * drape) * exp(-into / 34.0) * kill2.y;
+    // Upward-facing: takes the beam directly, and takes its caustic net. Broken
+    // by the ripple field, so the brightest line in the lower frame is a chain
+    // of separately lit crests instead of one smooth stroke along a curve.
+    c += uCSurf * V_RIM * rim * sky * (0.45 + 1.15 * caus)
+       * (0.58 + 0.72 * sat(rpp * 0.55 + 0.5));
     c += uCSurf * V_SHAFT * 0.20 * exp(-into / 70.0) * sky * caus;
     // The lit surface of a drift. A sediment face is the one thing down here
     // that behaves like a diffuse Lambertian surface, so it is where the
-    // downwelling light is legible as a direction rather than as a haze.
-    c += uCSilt * V_SILT * 1.35 * drape * exp(-into / 46.0) * pow(sat(sky * 2.2), 1.2);
+    // downwelling light is legible as a direction rather than as a haze. Its
+    // broad level is down and the difference has gone into the crests: a lee
+    // slope holds almost no light, and that alternation is what gives the floor
+    // a grain size instead of a value.
+    c += uCSilt * V_SILT * 1.05 * drape * exp(-into / 46.0)
+       * pow(sat(sky * 2.2), 1.2) * (0.42 + 1.30 * sat(rpp * 0.5 + 0.5));
+    // The crest tops. Narrow, and the only part of the floor that faces the
+    // light squarely, so it is the one place the seabed is allowed a highlight -
+    // bought with contrast against the lee slope beside it rather than by
+    // lifting the whole band.
+    //
+    // Lit by the sky where there is any and by the mote and the anchors where
+    // there is not, which is most of the trench floor: it lies deepest under the
+    // roof, so sky() there is near zero and a crest keyed to sky alone stayed
+    // invisible in exactly the frames where the seabed fills the lower third.
+    // A raking lamp across a rippled surface is also the strongest texture cue
+    // available at this depth, and it comes for free - lamp is already in hand.
+    c += (uCSurf * pow(sat(sky * 2.4), 1.1) * (0.40 + 0.80 * caus) * 1.80
+          + lamp * 3.20 + body * (0.06 + 0.94 * seam) * 0.55)
+       * V_SILT * 3.00 * crest * (0.45 + 0.90 * fine);
   }
   return vec4(c, cov);
 }
@@ -634,7 +731,12 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   float syF = bedFrom(w.y + tiltF);
   float alb = 0.55 + 1.00 * hash11(floor(syF) * 1.37 + 0.5);
   vec3 rk = mix(ROCK_COOL, ROCK_WARM, 0.30);
-  vec3 c = rk * V_ROCK * alb * (0.03 + 0.97 * exp(-intoS / 380.0)) * (0.015 + 0.985 * sky);
+  // Same response curve as the near rock and the medium - see irr in
+  // trenchRock. These four layers fill the top and the bottom of every shallow
+  // frame, so whatever they are worth IS the value structure of that frame, and
+  // on a linear response they were landing within 14% of the water they sit in.
+  vec3 c = rk * V_ROCK * alb * (0.03 + 0.97 * exp(-intoS / 380.0))
+         * (0.015 + 0.985 * pow(sky, 1.70));
   // The bedding seam, at distance. Four layers of legible strata is most of
   // what makes the far walls read as rock instead of as tinted fog, and it
   // costs nothing: the bed coordinate is already in hand.
@@ -676,7 +778,24 @@ void main(){
   float below   = max(0.0, w.y - bdN.x);           // how deep under the roof
   float traceX  = w.x - SUN_SLANT * below;         // trace the ray back up
   float raw     = roofRaw(traceX);
-  float sky     = skyAt(below, raw);
+  // THE DRAWN ROOF OCCLUDES. roofRaw is a statistical openness field that knows
+  // nothing about the profile the player can actually see, so a point tucked
+  // under a 600-unit lobe of rock received exactly as much light as one under an
+  // open fissure at the same depth. Deep in the trench that hides, because
+  // below is large and everything down there is dim anyway. In the SHALLOW band
+  // it is the whole image: the roof is close, so exp(-below/1150) is near 1 and
+  // the open/sealed threshold is at its sharpest, and the result was the
+  // brightest and flattest water in the game sitting behind the first frame a
+  // player ever sees - 90% of it inside 32 code values with nothing below L8.
+  //
+  // Two taps along the ray, against the same strip the physics uses, so the
+  // shadow belongs to rock that is on screen rather than to a field nobody can
+  // see. A positive tuck means the roof up-sun hangs LOWER than the roof
+  // overhead, which is exactly the case where the slanted ray had to come
+  // through it to get here.
+  float occl = (1.0 - 0.52 * smoothstep(15.0, 230.0, bandAt(traceX * 0.45 + w.x * 0.55).x - bdN.x))
+             * (1.0 - 0.52 * smoothstep(15.0, 230.0, bandAt(traceX).x - bdN.x));
+  float sky     = skyAt(below, raw) * occl;
   float openSft = openAt(raw, 1.0);
   float openShp = openAt(raw, sat(below / 2600.0) * 0.24);
 
@@ -702,13 +821,13 @@ void main(){
   // last. The contrast difference, not the parallax rate, is what makes air.
   vec3 haze = col;
   float brk = uKill2.w;
-  vec4 r4 = farWall(uv, 0.135, 4.3,  1060.0, 880.0, 980.0, 0.740, haze, brk);
+  vec4 r4 = farWall(uv, 0.135, 4.3,  1060.0, 880.0, 980.0, 0.560, haze, brk);
   col = mix(col, r4.rgb, r4.a * uKill2.x);
-  vec4 r3 = farWall(uv, 0.225, 19.7,  980.0, 790.0, 900.0, 0.600, haze, brk);
+  vec4 r3 = farWall(uv, 0.225, 19.7,  980.0, 790.0, 900.0, 0.440, haze, brk);
   col = mix(col, r3.rgb, r3.a * uKill2.x);
-  vec4 r2 = farWall(uv, 0.360, 37.1,  920.0, 730.0, 800.0, 0.430, haze, brk);
+  vec4 r2 = farWall(uv, 0.360, 37.1,  920.0, 730.0, 800.0, 0.300, haze, brk);
   col = mix(col, r2.rgb, r2.a * uKill2.x);
-  vec4 r1 = farWall(uv, 0.580, 61.9,  880.0, 690.0, 720.0, 0.265, haze, brk);
+  vec4 r1 = farWall(uv, 0.580, 61.9,  880.0, 690.0, 720.0, 0.175, haze, brk);
   col = mix(col, r1.rgb, r1.a * uKill2.x);
 
   // ---------- volumetric light from the surface far above ----------
@@ -743,25 +862,66 @@ void main(){
   // Moving the threshold would change how much of x is lit at all, and the
   // entire bulk budget is tuned against that coverage; the exponent only
   // reshapes a shaft that is already there, so the mean barely moves.
-  float slot = smoothstep(0.69, 0.99, slotRaw);
+  float sm = smoothstep(0.69, 0.99, slotRaw);
   // A fissure is not a slit of uniform transmission, so the beam it casts is
   // striated along its width. The product of two incommensurate waves gives
   // bands that are themselves unevenly spaced.
-  float stri = 0.86 + 0.30 * wave(slotX, 0.0047, 1.9) * wave(slotX, 0.0131, 5.3);
-  slot = pow(slot, 2.55 + vWide * 0.85) * (1.0 + vPeak * 0.55) * stri * 1.02;
+  float stri = 0.72 + 0.44 * wave(slotX, 0.0047, 1.9) * wave(slotX, 0.0131, 5.3);
+  // A BEAM HAS A CORE; A SLAB HAS ONE VALUE ACROSS ITS WIDTH. This was a single
+  // power of the slot field, which is flat near its top and steep at its skirt
+  // - the wrong way round for a beam - and it measured as exactly that: slabs
+  // of near-uniform teal 300 pixels wide whose 80-unit blocks carried 9.6 units
+  // of highlight energy against the mote's 5.5, so the hero ranked 26th of 336
+  // in its own frame and a player scanning a still could not find himself.
+  //
+  // Splitting the profile fixes the hierarchy without dimming the light: a wide
+  // body at a little over half the old value, plus a narrow ridge that keeps
+  // the old peak. Every pixel away from a shaft centre loses 45-70%, the peak
+  // itself does not move - so the p99 the exposure contract asks for is
+  // untouched, and so is the bloom seed - and the shaft gains a middle, which
+  // is the whole difference between light and fog. Contrast, not level: the
+  // same rule the rock in this file is built on, applied to the light at last.
+  float sBody  = pow(sm, 3.30 + vWide * 0.90);
+  float sRidge = pow(sm, 11.0 + vWide * 3.00);
+  // A NARROW APERTURE COLLIMATES; A WIDE ONE ONLY SPILLS. sRidge is the beam's
+  // core, and how much core a beam gets is a property of the hole it came
+  // through: a slot in a sealed roof throws a hard shaft, a broadly open roof
+  // throws a wash with no core at all. openSft is that roof measured wide, so
+  // this is the one term in the pass that can tell the shallow reach - roof
+  // shut, one fissure carrying the whole light source - from an open hall
+  // where the water is lit from every direction at once.
+  //
+  // It has to be gated, because the flat version of this is measurably wrong.
+  // sm^11 SATURATES wherever the roof is fully open: at 483m it sits near 1.0
+  // while at 16m it only reaches 0.31, so a plain coefficient is three times
+  // stronger in the frame that least needs it. Raising it flat to 1.45 bought
+  // the opening frame 0.011 of luminance spread and pushed the mote from 9th
+  // to 29th most salient block in the Hush frame - paying for the first frame
+  // with the one the hierarchy ceiling was built to protect. Gated, the same
+  // spread costs nothing there, and the Hush frame gains a place instead.
+  float seal = smoothstep(0.72, 0.34, openSft);
+  float slot = (0.48 * sBody + (0.62 + 1.00 * seal) * sRidge) * (1.0 + vPeak * 0.45) * stri;
   float shim = 0.72 + 0.34 * sin(traceX * 0.0079 + uTime * 0.42 + vPeak * 2.6)
                           * sin(traceX * 0.0215 - uTime * 0.27 + below * 0.0026);
-  float dust = 0.26 + 1.24 * sat(0.5 + dev(N1(vec2(w.x * 0.00092 + flow.x * 0.05,
+  // The 0.26 was a floor UNDER the whole beam: a shaft stayed a quarter lit
+  // through the clean water between sediment blooms, which is the difference
+  // between a beam carrying dust and a beam painted on. Dropping the floor and
+  // giving it back to the modulation holds the mean and deepens the gaps.
+  float dust = 0.15 + 1.18 * sat(0.5 + dev(N1(vec2(w.x * 0.00092 + flow.x * 0.05,
                                      w.y * 0.00165 - uTime * 0.028), 0.00165)) * 2.1);
   // A second, finer scale of the same thing. One octave of blotches reads as a
-  // soft cloud; two read as sediment drifting through a beam.
-  dust *= 0.70 + 0.54 * sat(0.5 + dev(N1(vec2(w.x * 0.0041 - flow.y * 0.04,
+  // soft cloud; two read as sediment drifting through a beam. The amplitudes are
+  // trimmed from 1.24/0.54: two octaves multiplying out at 1.86 set how hot the
+  // hottest BROAD pixel in the frame got, and it was hotter than anything the
+  // eye is meant to be led to. Trimming the tops costs 5% of the mean and 20%
+  // of the peak, which is the right trade every time.
+  dust *= 0.70 + 0.44 * sat(0.5 + dev(N1(vec2(w.x * 0.0041 - flow.y * 0.04,
                                      w.y * 0.0067 - uTime * 0.075), 0.0067)) * 2.0);
   vec3 beamHue = absorb(uCSurf, below * 0.55 + 300.0);
   // Extinction varies per shaft too: some reach the floor, some are spent
   // halfway down. Uniform reach is what makes a beam field look printed on.
   vec3 rays = beamHue * V_SHAFT * openShp * slot * ramp * shim * dust
-            * exp(-below / (1500.0 * (1.0 + vLive * 0.42)));
+            * exp(-below / (1250.0 * (1.0 + vLive * 0.42)));
   // The wide in-scatter halo either side of each beam.
   rays += uCHigh * V_SHAFT * 0.004 * openSft * ramp * exp(-below / 2400.0);
   // Caustic banding inside the beam - the shimmer that says 'moving water'.
@@ -771,7 +931,10 @@ void main(){
   // light path - the opening itself - as one of the darkest things in the
   // frame, and the upper third of a shallow frame with nothing in it at all.
   // This is in-scatter in the throat, so it is allowed right up to the rock.
-  rays += absorb(uCSurf, 240.0) * V_SHAFT * 0.21 * openShp * (0.30 + 0.70 * slot)
+  // The constant was 0.30: every open throat glowed that much whether or not
+  // a shaft was coming out of it, which is a lamp in the ceiling rather than
+  // in-scatter in a beam. Most of it now rides the slot that earns it.
+  rays += absorb(uCSurf, 240.0) * V_SHAFT * 0.21 * openShp * (0.14 + 0.86 * slot)
         * exp(-below / 380.0) * smoothstep(0.0, 55.0, below);
   rays *= uKill.y;
   col += rays;
@@ -822,9 +985,14 @@ void main(){
     }
   }
   vent *= uKill.z; ventHot *= uKill.z;
-  col += absorb(uCSurf, 1400.0) * V_SILT * 1.7 * vent
+  // The plume's broad terms are cut about a third. Measured with the kill
+  // switches, the vent was the single largest environmental contributor to the
+  // opening frame's mean and it lifted the frame's floor as much as its
+  // highlights - a haze, not a column. The throat below is untouched, so what
+  // is left is the hot part.
+  col += absorb(uCSurf, 1400.0) * V_SILT * 1.15 * vent
        * (0.45 + 1.5 * uDraft) * (0.20 + 0.80 * sat(sky * 3.0));
-  col += uCSilt * V_SILT * 0.9 * vent;
+  col += uCSilt * V_SILT * 0.60 * vent;
   col += vec3(1.00, 0.34, 0.085) * V_VENT * ventHot * (0.30 + 0.85 * uDraft);
 
   // ---------- the rock the physics uses ----------
@@ -844,7 +1012,7 @@ void main(){
   vec4 sn = N(vec2(w.x * 0.00022 - uTime * 0.0035, w.y * 0.00052 + uTime * 0.0018), 0.00052);
   float billow = sat(0.5 + (dev(sn.r) * 1.00 + dev(sn.g) * 0.50 + dev(sn.b) * 0.28) * 2.1);
   float dens = above > 0.0 ? exp(-above / (26.0 + 155.0 * billow * billow)) : 0.0;
-  col += uCSilt * V_SILT * 0.85 * dens * (0.25 + 0.95 * billow)
+  col += uCSilt * V_SILT * 0.62 * dens * (0.25 + 0.95 * billow)
        * pow(sat(sky * 2.4), 1.4) * (1.0 - r0.a) * uKill2.y;
 
   // ---------- marine snow, four depths ----------
@@ -908,8 +1076,27 @@ void main(){
   }
 
   // ---------- the Hush ----------
-  // maxLag keeps the wall 1750-2900 units behind the player, so it is usually
-  // just off the left edge. Its reach, not the wall, is what has to be legible.
+  // THE WALL HAS TWO FRONTS AND ONLY ONE OF THEM IS EVER ON SCREEN.
+  //
+  // uHushX is the annihilation front, where matter stops existing. maxLag holds
+  // it 1750-2900 units behind the player and the left edge of frame is only
+  // ~710 units behind him, so it sits off screen by a thousand units or more
+  // for most of a run. Where it is, is world.js's business; this file cannot
+  // compose the antagonist into a frame it is not in.
+  //
+  // What this file does own is the DRAIN front: the edge of the reach, where
+  // the water has begun to lose its motion, then its colour, then its light.
+  // That front is the only part of the Hush a player ever composes a frame
+  // with, and it was authored as a smooth 1400-unit gradient - which is why a
+  // review measuring left-edge luminance across four frames found no consistent
+  // value break anywhere and called the antagonist absent from its own key art.
+  // A gradient has no edge at any point along it; that is what a gradient is.
+  //
+  // It now gets everything the annihilation front already had: a ragged profile
+  // at three scales, a value break with a hard-ish edge, tendrils licking ahead
+  // of it, and a rim where it has taken a silhouette. Same phenomenon, two
+  // radii - which is also why the two share their noise fields and their
+  // brokenness term rather than being authored twice.
   float dxh = w.x - uHushX;
   if(dxh < 3000.0 && uKill.w > 0.5){
     // A torn frontier, not a gradient: three scales of writhe along y, plus
@@ -919,6 +1106,27 @@ void main(){
     front += pow(sat(0.5 + dev(N1(vec2(w.y * 0.0042 - 3.3, uTime * 0.026), 0.0042)) * 2.4), 4.0) * 620.0;
     float e = dxh - front;
 
+    // Brokenness, at two scales along y. Hoisted out of the seam below because
+    // every edge the Hush draws wants it: an unbroken one is a stroked outline,
+    // and a stroked outline is the tell that this is a shader and not a thing.
+    float rv = 0.30 + 0.80 * N1(vec2(w.y * 0.0031 + 11.0, uTime * 0.048), 0.0031);
+    rv *= 0.35 + 0.85 * sat(0.5 + dev(N1(vec2(w.y * 0.00093 - 4.1, uTime * 0.021), 0.00093)) * 2.2);
+
+    // The drain front, ragged the same way the annihilation front is: a smooth
+    // scale plus a cubed tongue term that licks forward. Its distance is the
+    // Hush's reach, so it moves with the real uHushX and cannot claim a position
+    // the wall does not have - at 250m back there is nothing on screen, and that
+    // is the honest answer.
+    //
+    // Measured from dxh, NOT from e. Off e it inherits the annihilation front's
+    // own tongues and the two stack: the drained zone reached dxh 3375, its
+    // lobes crossed two thirds of the frame, and the break landed on lit water
+    // at the right edge. This front is a different phenomenon at a different
+    // scale and it gets its own raggedness, which also bounds it.
+    float dReach = 1060.0 + wave(w.y, 0.00058, 0.9) * 210.0
+                 + pow(sat(0.5 + dev(N1(vec2(w.y * 0.0027 + 5.1, uTime * 0.017), 0.0027)) * 2.3), 3.0) * 320.0;
+    float ed = dxh - dReach;
+
     // Behind the front the water is unmade: it goes still, then colourless,
     // then gone. Desaturating before crushing is what makes it read as loss.
     // The interior has to be the DARKEST thing in the frame - a mass of dark
@@ -927,9 +1135,24 @@ void main(){
     // wash over everything behind the front and the wall of dark ended up
     // carrying the frame's brightest pixels while its median sat at a
     // twentieth of them.
-    float still = 1.0 - smoothstep(0.0, 1400.0, max(e, 0.0));
+    //
+    // A PLATEAU AND A BREAK, not a ramp. The interior holds a little over half
+    // its value right up to the drain front and then stops inside 155 units,
+    // so the boundary is a place rather than a tendency; behind it the slow
+    // ramp continues to the wall, which is what gives the dark mass depth
+    // instead of making it a flat cutout.
+    float drained = 1.0 - smoothstep(-130.0, 25.0, ed);
+    float still = drained * (0.56 + 0.44 * (1.0 - smoothstep(0.0, dReach, max(e, 0.0))));
     float lum0 = dot(col, vec3(0.25, 0.62, 0.13));
     col = mix(col, mix(col, vec3(lum0), 0.72) * 0.10, still * 0.94);
+
+    // The rim on the drain front. Faint on purpose - the wall is a mass of dark
+    // and this is the only edge it gets - and several times stronger where r0
+    // covers, because that is the front visibly consuming a silhouette rather
+    // than merely dimming water. Half-way to the edge hue rather than the glow
+    // violet: water this far gone has lost most of its colour.
+    col += mix(uCHushGlow, uCHush, 0.45) * V_HUSH * (0.018 + 0.055 * r0.a)
+         * exp(-(ed * ed) / 15000.0) * rv;
 
     float inside = 1.0 - smoothstep(-60.0, 40.0, e);
     if(inside > 0.001){
@@ -938,12 +1161,11 @@ void main(){
                    + uCHushGlow * V_HUSH * 0.0016 * churn * churn, inside);
     }
 
-    // The tearing seam. Its peak is deliberately held under the avatar's: with
-    // the threat out-highlighting the protagonist the frame's value hierarchy
-    // was inverted, measured at 255 against the mote's 217. Broken along its
-    // length at two scales, so it is a tear and not a stroked outline.
-    float rv = 0.30 + 0.80 * N1(vec2(w.y * 0.0031 + 11.0, uTime * 0.048), 0.0031);
-    rv *= 0.35 + 0.85 * sat(0.5 + dev(N1(vec2(w.y * 0.00093 - 4.1, uTime * 0.021), 0.00093)) * 2.2);
+    // The tearing seam, on the annihilation front. Its peak is deliberately
+    // held under the avatar's: with the threat out-highlighting the protagonist
+    // the frame's value hierarchy was inverted, measured at 255 against the
+    // mote's 217. The V_ENVMAX ceiling at the end of main() now guarantees that
+    // rather than leaving it to these coefficients.
     col += uCHush * V_HUSH * rv
          * (exp(-(e * e) / 190.0) * 0.34 + exp(-(e * e) / 4200.0) * 0.06);
     // Reach, not wall: the dread should arrive on screen before the front does,
@@ -951,8 +1173,17 @@ void main(){
     float gd = e >= 0.0 ? e / 560.0 : -e / 190.0;
     col += uCHushGlow * V_HUSH * 0.019 * rv / (1.0 + gd * gd);
 
-    // Fracture: hairline cracks reaching ahead of the front, the water coming
-    // apart before it goes.
+    // Erosion tendrils: hairline fractures licking ahead of the DRAIN front,
+    // the water coming apart before it goes.
+    //
+    // They used to be anchored on the annihilation front and reach 1250 units
+    // out from it. Since that front is a thousand units off the left edge for
+    // most of a run, all the player ever saw was the far tips of very long
+    // cracks - which is why they read as evenly-spaced diagonal rain across the
+    // left third of the frame rather than as something eating the water.
+    // Anchored on the drain front they are a short ragged fringe ON the edge,
+    // which is what a fracture process actually looks like, and they fade in
+    // from just inside it so the edge is never a clean line.
     //
     // A crack is a level set of a SHEARED coordinate, not a grid row with the
     // feature displaced off it. Displacing the feature is why this used to be a
@@ -974,27 +1205,44 @@ void main(){
     // the shear varies at three scales so neighbouring cracks are not
     // parallel, and the population is gated by a slow field so the cracks
     // arrive in gusts with quiet water between them.
-    if(e > 0.0 && e < 1250.0){
+    if(ed > -300.0 && ed < 380.0){
+      // The shear has to vary SLOWLY along y. It multiplies dxh, which is a
+      // couple of thousand units out here, so a shear that turns over inside a
+      // few hundred units folds the mapping and a fold is a bright pinch where
+      // two cracks merge. Slow shear means neighbouring rows lean alike, which
+      // is why the tendrils cannot be allowed to be long: at 500 units they
+      // read as evenly-spaced horizontal rain across the left third, measured
+      // on seed 3. Short licks with staggered roots read as a fringe on an
+      // edge, which is the thing being drawn.
       float shear = wave(w.y, 0.00021, 4.3) * 0.16 + wave(w.y, 0.00074, 1.1) * 0.11
                   + wave(w.y, 0.00160, 5.7) * 0.05;
       float sy = (w.y + max(dxh, 0.0) * shear
-                      + sin(e * 0.0043) * 14.0 + sin(e * 0.0121 + 1.7) * 5.0) / 44.0
+                      + sin(ed * 0.0043) * 14.0 + sin(ed * 0.0121 + 1.7) * 5.0) / 44.0
                + wave(w.y, 0.00135, 2.3) * 3.2
                + dev(N1(vec2(w.y * 0.0012, 3.7), 0.0012)) * 1.6;
       float row = floor(sy);
       float rh  = hash11(row * 1.731 + 5.3);
+      float rb  = hash11(row * 5.11 + 2.7);
       float gust = sat(0.5 + dev(N1(vec2(w.y * 0.00058 + uTime * 0.011, 7.9), 0.00058)) * 2.4);
-      float reach = 90.0 + rh * rh * 1150.0;
-      if(rh > 0.30 + 0.44 * (1.0 - gust) && e < reach){
-        float p = e / reach;
+      // Roots staggered per row, so the tendrils do not all start on one line
+      // even where the drain front happens to run straight.
+      float edr = ed - (rb - 0.5) * 170.0;
+      float tr = 45.0 + rh * rh * 215.0;      // how far this one licks ahead
+      if(rh > 0.40 + 0.42 * (1.0 - gust) && edr > -200.0 && edr < tr){
+        float p = sat(edr / tr);
         float dy = fract(sy) - 0.5 + (rh - 0.5) * 0.40;
         // Thin toward the tip, and broken along its length: a fracture is a
-        // chain of segments, not a stroke of the same width end to end.
-        float thick = (0.030 + rh * 0.070) * (1.0 - 0.62 * p);
-        float seg = sat(0.24 + dev(N1(vec2(e * 0.0039 + row * 0.37, 0.29), 0.0039)) * 3.6);
+        // chain of segments, not a stroke of the same width end to end. The row
+        // spacing varies by design, so a crack in a widely-spaced stretch is
+        // several times thicker in world terms than one in a tight stretch -
+        // which is why this coefficient is small: at the old 0.030-0.100 the
+        // widest rows drew 25-unit bars, and a 20-pixel bar is not a hairline.
+        float thick = (0.022 + rh * 0.050) * (1.0 - 0.62 * p);
+        float seg = sat(0.24 + dev(N1(vec2(edr * 0.0039 + row * 0.37, 0.29), 0.0039)) * 3.6);
         col += uCHush * V_HUSH * 0.115 * exp(-(dy * dy) / (thick * thick))
              * (1.0 - p) * seg * (0.35 + 0.65 * gust)
-             * (0.30 + 0.70 * hash11(row * 5.11 + 2.7))
+             * smoothstep(-200.0, -20.0, edr)
+             * (0.30 + 0.70 * rb)
              * (0.5 + 0.5 * sin(uTime * (1.4 + rh * 3.0) + rh * 30.0));
       }
     }
@@ -1017,12 +1265,24 @@ void main(){
   // the wall itself, or attributing a violet cast has to be done by reading.
   if(uHushProx > 0.01 && uKill.w > 0.5){
     float g = pow(1.0 - uv.x, 2.6) * uHushProx;
-    col = mix(col, mix(col, vec3(dot(col, vec3(0.25, 0.62, 0.13))), 0.42)
-                 * vec3(0.66, 0.54, 1.20), g * 0.55);
-    col += uCHushGlow * V_HUSH * 0.008 * g;
+    // Drained rather than tinted: more desaturation, less added glow. The
+    // additive term is what once left the left edge measuring BRIGHTER than
+    // mid-frame, which is the opposite of a wall of dark approaching.
+    col = mix(col, mix(col, vec3(dot(col, vec3(0.25, 0.62, 0.13))), 0.55)
+                 * vec3(0.62, 0.52, 1.14), g * 0.60);
+    col += uCHushGlow * V_HUSH * 0.005 * g;
   }
 
   col *= uIntensity * mix(1.0, 0.90, uDiff);
+
+  // The hierarchy ceiling. See V_ENVMAX: the environment does not get onto the
+  // hero's rung of the value ladder, and the only way that stays true while
+  // eight multiplicative terms are retuned by different hands is to state it
+  // once, here, after every one of them has landed.
+  float envPk = max(max(col.r, col.g), max(col.b, 1e-5));
+  float envC = V_ENVKNEE + (V_ENVMAX - V_ENVKNEE)
+             * (1.0 - exp(-max(envPk - V_ENVKNEE, 0.0) / (V_ENVMAX - V_ENVKNEE)));
+  col *= min(envC / envPk, 1.0);
 
   // Deep blacks are where banding shows. Static screen-space dither, sized to
   // roughly one 8-bit step after the grade so it never becomes visible grain.

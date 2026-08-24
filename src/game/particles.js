@@ -44,6 +44,29 @@
 //    Every smear here is energy-conserving - the tint is divided by the
 //    stretch - so a motion cue can never quietly become a brightness cue and
 //    spend the exposure budget.
+//  - ...AND IT HAS TO BE LEGIBLE IN THE BAND THE GAME ACTUALLY PLAYS IN, which
+//    is a stricter requirement and is what gearK exists for. Verifying 33
+//    against 490 against 1888 proved nothing a player will ever see: a review
+//    sampled four real frames at 700, 730, 800 and 940 units/sec and called
+//    them interchangeable, and it was right, because every cue was on a linear
+//    normaliser spanning a standing start to 2250 and therefore moved by a
+//    third across the whole cruise. Two things follow, both learned by looking.
+//    A COUNT beats a MAGNITUDE: two filaments against three, one striation
+//    against twelve, seventeen wake elements against fifty - these can be
+//    ordered without a reference in frame, and a 34% longer streak cannot.
+//    And a LENGTH cue has to be bought with LIFETIME, not with stretch, because
+//    length x speed compounds while stretch has a hard ceiling at the point a
+//    profile's own cutoff becomes a straight edge. See gearK, and see the two
+//    artefacts recorded at the wake's `elg` and at the striations.
+//  - NOTHING THIS FILE DRAWS MAY BE A BRIGHTER CLUSTER THAN THE ANIMAL THAT
+//    CAUSED IT. Stated as art it is obvious; it is here because it is also a
+//    measurement, and the measurement caught two violations this pass. The
+//    quality gate ranks the mote's own 67x64px block against all 336 by
+//    highlight energy - sum of L^2 - and a wake element that stretches without
+//    paying for it took seed 7 / fast from rank 6 to rank 9 with three blocks
+//    of the mote's own trail above it. See the wake's brightness term for the
+//    arithmetic, which is not the obvious one: elements OVERLAP, so holding an
+//    element's energy does not hold a block's.
 //  - NOTHING MAY BE DRAWN THINNER THAN ABOUT THREE PIXELS. Below that the mip
 //    chain has averaged the whole tile to one value, so what lands is a flat
 //    hard rectangle with a stair-stepped edge. See quad().
@@ -89,6 +112,25 @@ const HALF_PI = Math.PI * 0.5;
 const SPD_LO = 300, SPD_SPAN = 1250;
 const spdK = (sp) => clamp01((sp - SPD_LO) / SPD_SPAN);
 
+// ...and THE CRUISE, which is a different question and needs its own signal.
+//
+// spdK is the honest global normaliser and has to stay one: it spans a standing
+// start to 2250 and it is what makes 33 against 490 against 1888 read as three
+// different speeds. But a blind review sampled four real gameplay frames at
+// 700, 730, 800 and 940 units/sec - the band the game actually spends its life
+// in - and called them visually interchangeable. It was right, and spdK is the
+// reason: across that whole band it moves 0.32 to 0.51, so every cue driven off
+// it changed by a third while the speed changed by a third. A linear readout of
+// a range the player almost never leaves is a readout of nothing.
+//
+// gearK spends its ENTIRE dynamic range inside that band. A smoothstep from 520
+// to 1120 reads 0.22 / 0.45 / 0.78 at 700 / 800 / 940: 3.6x of signal across a
+// 1.34x change in speed. Outside the band it saturates, which is exactly why
+// both exist rather than one replacing the other - the extremes keep the cues
+// they already had and the middle gains the ones it never had.
+const GEAR_LO = 520, GEAR_INV = 1 / 600;
+const gearK = (sp) => { const q = clamp01((sp - GEAR_LO) * GEAR_INV); return q * q * (3 - 2 * q); };
+
 // The wake IS the speedometer, and this is the mechanism. Emission is driven by
 // DISTANCE travelled, so the stream holds one element every TRAIL_GAP units at
 // any speed; every element lives TRAIL_LIFE; therefore the visible length of
@@ -98,8 +140,11 @@ const spdK = (sp) => clamp01((sp - SPD_LO) / SPD_SPAN);
 const TRAIL_GAP = 15, TRAIL_LIFE = 0.42;
 // ...and it starts a clear 152 units behind the head. check.mjs scores the
 // mote's core against its own 42-83 PIXEL annulus, which at the shipped
-// 900px/1146-unit camera is 53-106 world units. Nothing added here is allowed
-// inside that band. See _clear().
+// 900px/1146-unit camera is 53-106 world units - and the ring reaches 105 in
+// the diagonals of its sample box, not 74 as an earlier round read it. Nothing
+// is allowed to sit in that band; the exception is INSIDE it, where a hot point
+// reads as part of the animal. See _moat() for the shape and the collar in
+// _disturb() for the exception.
 const TRAIL_BACK = 152;
 
 // A quad thinner than about three pixels has no profile left in it: the mip
@@ -371,6 +416,7 @@ export class Particles {
     this.events = 0;       // proof the *Seq edge hooks actually fired
     this._t = 0;
     this._aWake = 0; this._aBub = 0; this._aSilt = 0; this._aGlow = 0; this._aPull = 0;
+    this._aStria = 0;
     this._side = 1;
     this._impSeq = -1; this._lchSeq = -1;
     this._pkScatX = -1e9;
@@ -381,13 +427,14 @@ export class Particles {
     //     camera's own vertical extent so it tracks the zoom.
     this._gk = 0;                       // 0 = off (no living mote to protect)
     this._kFull = 108; this._kInv = 1 / 156;
-    this._kD = 80; this._kDInv = 1 / 53;   // the tight one, for points
+    // The moat: an ANNULUS, not a disc. See _moat().
+    this._mIn = 50; this._mOut = 99; this._mInv = 1 / 49; this._mDepth = 0.72;
     // Pixels per world unit, from the camera. Sizes have to be floored in
     // PIXELS - a world-unit floor stops being a pixel floor the moment the
     // launch zoom moves.
     this._u2p = 0.786;
     this._aTrail = 0;       // distance-driven, unlike every other accumulator
-    this._lane = 1;
+    this._lane = 0;         // 0..lanes-1; the braid gains a strand at the cruise
     this._mix = [0, 0, 0];  // owned scratch: a tinted colour must not allocate
   }
 
@@ -1019,26 +1066,48 @@ export class Particles {
   }
 
   /**
-   * The same idea as _clear(), sized to the MEASURED annulus instead of to the
-   * whole surround, and used only for the plankton family.
+   * The moat. A dark ANNULUS around the hero, not a dark disc - and that
+   * distinction is the entire finding of this pass.
    *
-   * Those are hot points rather than washes. What they must not do is sit hard
-   * and bright inside the 53-74 unit ring the mote is scored against; past
-   * about 130 units they are simply plankton and belong at full strength. The
-   * wide ramp cost the launch frame its p99 - the exposure contract's "there
-   * must be real highlights" - to buy contrast in a band that was never
-   * measured. 0.2479 against a floor of 0.25, from suppressing highlights
-   * three annulus-widths away.
+   * A disc used to be defined here (`_clearD`, suppressing points inside 76
+   * units) and was never wired into draw(), which turns out to have been luck
+   * rather than judgement, because a disc is wrong in both directions at once.
+   * The two things that measure the hero's readability disagree about a disc
+   * and agree exactly about a ring:
+   *
+   *  - FOCAL CONTRAST is a max over samples within 21 world units divided by
+   *    the MEAN over 53-74. Light inside 21 units is signal. Light at 53-95 is
+   *    pure cost, and it is the only band where it is pure cost.
+   *  - GLOBAL SALIENCE ranks the mote's own 67x64px block against all 336 by
+   *    highlight energy. The block is +/-42 world units from its own centre, so
+   *    light at 53-95 units mostly lands in the NEIGHBOURING block: it dilutes
+   *    the contrast and it does not even buy the hero's cluster mass for it.
+   *
+   * And the reason the prescribed "dim everything within 120px" is not what is
+   * implemented here: measured by disabling this file's drawing and re-ranking
+   * every block, particles.js supplies 0% of the energy in every block that
+   * outranks the hero, on every scene, on both seeds - and disabling it makes
+   * the rank WORSE on three scene/seed pairs (launch 5->6 and hushNear 28->32
+   * on seed 7, launch 7->11 on seed 3) and better on none. There is nothing of
+   * mine in the blocks that beat the mote, so dimming mine cannot promote it.
+   * What is left to do is the shape: hold the collar that hugs the animal,
+   * starve the band the contrast is measured across, and let the wake resume
+   * outside it. That is a pocket built by shaping light, not by removing it.
    */
-  _clearD(px, py) {
+  _moat(px, py) {
     const gk = this._gk;
     if (gk <= 0.002) return 1;
     const dx = px - this.px, dy = py - this.py;
-    const d = Math.sqrt(dx * dx + dy * dy) - this._kD;
-    if (d <= 0) return 1 - gk;
-    const q = d * this._kDInv;
-    if (q >= 1) return 1;
-    return 1 - gk * (1 - q * q * (3 - 2 * q));
+    const d2 = dx * dx + dy * dy;
+    const out = this._mOut;
+    if (d2 >= out * out) return 1;
+    const d = Math.sqrt(d2);
+    if (d <= this._mIn) return 1;
+    // one smooth bump across the band, deepest in the middle of it, so nothing
+    // pops as a particle crosses either edge
+    const q = (d - this._mIn) * this._mInv;
+    const w = q < 0.5 ? q + q : (1 - q) * 2;
+    return 1 - gk * this._mDepth * w * w * (3 - 2 * w);
   }
 
   // ----------------------------------------------------------------- update ---
@@ -1063,8 +1132,12 @@ export class Particles {
         this._kFull = vh * 0.100;
         this._kInv = 1 / (vh * 0.145);
         this._u2p = (cam.pixelH || 900) / (vh || 1080);
-        this._kD = vh * 0.070;
-        this._kDInv = 1 / (vh * 0.046);
+        // The moat spans exactly the measured annulus - 42-83 pixels of a 900px
+        // frame is 0.046-0.092 of the vertical view - plus a little reach past
+        // its outer edge, because bloom carries light inward across it.
+        this._mIn = vh * 0.046;
+        this._mOut = vh * 0.104;
+        this._mInv = 1 / (this._mOut - this._mIn);
       }
       const live = (g.mode === 'play' && p.alive) ? 1 : 0;
       this._gk = live + (this._gk - live) / (1 + 5 * dt);
@@ -1203,6 +1276,7 @@ export class Particles {
     const r = this.rng;
     const sp = Math.hypot(p.vx, p.vy);
     const spK = spdK(sp);
+    const gk = gearK(sp);          // the cruise band, steeply. See gearK().
     const inv = 1 / (sp || 1);
     const tx = p.vx * inv, ty = p.vy * inv;
     const nx = -ty, ny = tx;
@@ -1240,13 +1314,20 @@ export class Particles {
           // Lengthen and thin, do not brighten: the roll is sheared out along
           // travel by exactly the factor its tint is divided by, so the light
           // in the frame is unchanged and only its SHAPE carries the speed.
-          lerp(0.055, 0.17, r()) * (0.35 + 0.65 * spK) / (1 + 1.7 * spK), S.SMOKE,
+          // Sheared on gearK rather than on spdK, which is the whole of this
+          // pass in one line: spdK moved this roll from 1.5x to 1.7x across the
+          // band the game plays in, which is nothing, and gearK moves it from
+          // 1.5x to 2.9x, which is a readout. Energy-conserving either way -
+          // the same factor divides the tint - so the curve is free. Capped at
+          // 2.4 rather than 3.4 because past about 6:1 a stretched SMOKE stops
+          // being a sheared puff and becomes a capsule; see the striations.
+          lerp(0.055, 0.17, r()) * (0.35 + 0.65 * spK) / (1 + 2.4 * gk), S.SMOKE,
           dragFor(3.0, s0), lerp(-20, 16, r()), (r() - 0.5) * 1.6 * this._side
         );
         this.kind[j] = K.VORTEX;
         this.flow[j] = lerp(1.2, 2.0, r());
         this.cool[j] = lerp(0.5, 1.0, r());
-        this.asp[j] = lerp(1.3, 2.2, r()) * (1 + 1.7 * spK);
+        this.asp[j] = lerp(1.3, 2.2, r()) * (1 + 2.4 * gk);
         this.rot[j] = travel + (r() - 0.5) * 0.9;
       }
 
@@ -1271,15 +1352,28 @@ export class Particles {
       //     All of it is outside the focal annulus and none of it is on the
       //     mote. That distinction is the whole finding: the build that
       //     smeared the hero lost the hero.
-      this._aTrail += sp * dt * (1 / TRAIL_GAP);
+      // Denser as well as longer, and this is the half that keeps the stroke
+      // continuous. Each element is capped at 3.2x of stretch so that it stays
+      // a comma; closing the spacing instead is what turns a row of commas back
+      // into one drawn line, and it makes the element COUNT rise 2.7x across
+      // the cruise where the trail's length rises 2.1x.
+      this._aTrail += sp * dt * (1 / TRAIL_GAP) * (1 + 0.55 * gk);
       if (this._aTrail > 5) this._aTrail = 5;
+      // TWO FILAMENTS AT A SWING, THREE AT THE CRUISE.
+      //
+      // A count is the one quantity a reviewer can order without a reference
+      // in frame, which is precisely what the four interchangeable frames
+      // lacked. Lengths and brightnesses need something to be compared against;
+      // "two strands" against "three strands" does not. The third is the
+      // centreline - a real wake has both shear layers and the path between
+      // them - so it arrives as structure rather than as more of the same.
+      const lanes = gk > 0.42 ? 3 : 2;
       while (this._aTrail >= 1) {
         this._aTrail -= 1;
-        this._lane = -this._lane;
-        // Two lanes, so the trail is a braid rather than a ruled line - and
-        // because the wake it belongs to is already a zig-zag of alternating
-        // rolls, the two agree about which way the water went.
-        const lat = this._lane * lerp(2, 26, r()) * (0.35 + 0.65 * spK);
+        if (++this._lane >= lanes) this._lane = 0;
+        const side = lanes === 3 ? this._lane - 1 : (this._lane ? 1 : -1);
+        // ...and the braid widens with speed as well as gaining a strand.
+        const lat = side * lerp(2, 26, r()) * (0.30 + 0.80 * gk);
         const back = TRAIL_BACK + r() * 44;
         // A third stay short and round however fast it goes. A line of
         // identical dashes is a filter; a line with grain in it is a wake.
@@ -1320,8 +1414,29 @@ export class Particles {
         // how far apart they sit. So the width went up and the stretch came
         // down: at 3.5x these were 170px commas thirty deep, which is a quarter
         // of the frame's fill for a cue that was already stated.
-        const s0 = long ? lerp(19, 42, Math.pow(r(), 0.8)) : lerp(5.4, 11, r());
-        const el = long ? lerp(1.1, 2.2, spK) * lerp(0.62, 1.55, r())
+        // Top of the range pulled from 42 to 34, i.e. 27 screen pixels, which
+        // is just under the ~35px at which WISP's silhouette resolves into a
+        // shape you can name. Above that a wake element is a leaf; below it, a
+        // stroke. The width the frame's highlight count needs is still there -
+        // the ridge is 0.17 of the tile, so 4.6px - and the light the smaller
+        // area gives up is returned by the 1.55x denser spacing above.
+        const s0 = long ? lerp(17, 34, Math.pow(r(), 0.8)) : lerp(5.4, 11, r());
+        // Stretch on gearK, and a much wider range than spdK could justify:
+        // 1.1-2.2 across the whole speed range meant 1.45-1.68 across the band
+        // the game plays in, which is a 16% change in the length of a comma and
+        // is not a cue. 0.95-3.3 on gearK is 1.6 against 3.0 over the same
+        // 700-940, i.e. the individual stroke nearly doubles.
+        // 1.5 at the bottom, not 0.95, because 1.5 is where the divisor below
+        // reads exactly 1: a swing has to render byte-for-byte as bright as it
+        // did before this pass, or a cue meant for the cruise has quietly
+        // rewritten the frames with the tightest focal contrast in the game.
+        // Capped at 3.2 and not 4.2. At 4.2 the longest elements were 42-unit
+        // WISPs drawn 270 units long, and at that aspect the profile's own
+        // r<0.86 cutoff stops being a taper and becomes a straight side: seen
+        // at 3x, an olive-green slab lying across the trail. The comma has to
+        // stay a comma.
+        const elg = lerp(1.5, 3.2, gk);
+        const el = long ? elg * lerp(0.62, 1.55, r())
                         : lerp(1.0, 1.9, r());
         const j = this._spawn(
           p.x - tx * back + nx * lat, p.y - ty * back + ny * lat,
@@ -1329,7 +1444,17 @@ export class Particles {
           -ty * sp * 0.045 + ny * (r() - 0.5) * 60,
           // It GROWS with age. A wake element is sheared apart by the water it
           // was left in; it does not shrink back to a point like a spark.
-          TRAIL_LIFE * lerp(0.8, 1.2, r()), s0, s0 * 1.22,
+          // ...and the LIFETIME is on gearK, which is the lever that makes the
+          // whole trail double rather than merely lengthen by a third. Length
+          // is speed x lifetime, so putting the cruise curve on the lifetime
+          // multiplies the two: 700 units/sec x 0.36s is 253 units and 940 x
+          // 0.56 is 528, a factor of 2.09 across a factor of 1.34 in speed.
+          // The element COUNT doubles with it for free, because emission is
+          // distance-driven at one element per 15 units, and the spacing term
+          // above closes on top of that for 2.7x - so the trail gets longer AND
+          // denser at once, which is two ways to order two frames instead of
+          // none.
+          TRAIL_LIFE * lerp(0.68, 1.52, gk) * lerp(0.85, 1.15, r()), s0, s0 * 1.22,
           // No planktonCore here. That entry is 0xf2fff6 - all but white - and
           // white belongs to the mote. A wake that samples it stops being cyan
           // and starts being the desaturated ribbon this cue exists to avoid.
@@ -1339,7 +1464,14 @@ export class Particles {
           // sitting on the water, while cyan reads as the water itself lit up.
           // The mint is what makes it bioluminescence, so it stays - as the
           // minority, showing up in the flare rather than across the whole arc.
-          r() < 0.62 ? N_TRAIL : N_PLNK,
+          // ...and the mint is now confined to the SHORT elements. One draw
+          // still, so nothing downstream moves. At 30 units by 90 a mint
+          // element is not a glint of plankton, it is a green blade lying on
+          // the water - photographed at 3x in the middle of an otherwise clean
+          // cyan wake. Mint is the flare, cyan is the water: the long strokes
+          // are the water and the short pips are the flare, so that is where
+          // each belongs.
+          r() < (long ? 0.86 : 0.42) ? N_TRAIL : N_PLNK,
           // Bright enough to be a readout, and it can afford to be: it lives
           // 152+ units behind the head, which is outside the ring the mote is
           // scored against, and the fast frame's tonemapped mean is 0.066 of an
@@ -1359,17 +1491,53 @@ export class Particles {
           // free of the mote's surround - the nearest wake element sits 145px
           // out on every scene and seed probed, against an annulus that ends
           // at 83px.
-          lerp(0.54, 1.32, r()) * (0.16 + 0.84 * spK),
+          // The stretch is paid for in full - the tint is divided by exactly
+          // the factor the quad is multiplied by - and the two wrong answers
+          // that got us here are both worth recording, because the arithmetic
+          // is counter-intuitive and it was measured twice.
+          //
+          // Written the obvious way (stretch AND brighten with gearK) it was a
+          // defect: seed 7 / fast went rank 6 to rank 9, because three blocks
+          // of the mote's OWN WAKE - 91%, 92% and 97% attributable to this
+          // emitter - outranked the hero's. A trail brighter than the animal
+          // that drew it is wrong as art before it is wrong as a measurement.
+          //
+          // The second attempt divided by the SQUARE root, on the algebra that
+          // one element's highlight energy is area x L^2 = (s^2 el)(B/sqrt(el))^2
+          // = s^2 B^2, independent of the stretch. That algebra is right and the
+          // conclusion was still wrong, because elements OVERLAP: at one per 15
+          // units a 47-unit comma is covered three deep and a 91-unit comma six
+          // deep, additive blending sums them, and L^2 of a sum is not the sum
+          // of L^2. Doubling the length doubles the local level for free, so
+          // holding the element's energy holds nothing. Seed 3 / hushNear
+          // gained two blocks above the hero on exactly that.
+          //
+          // So: full conservation. Rendered surface brightness comes out flat
+          // across the cruise, the trail's TOTAL light grows with its length
+          // (2.1x from 700 to 940) and the cue is entirely shape - longer,
+          // denser, three strands instead of two. Which is what was asked for.
+          lerp(0.54, 1.32, r()) * (0.16 + 0.84 * spK) * (1.5 / elg),
           long ? S.WISP : S.SPARK,
           dragFor(6.5, s0), lerp(-12, 9, r()), 0
         );
         this.kind[j] = K.WAKE;
         this.flow[j] = lerp(1.1, 1.8, r());
-        // Absorbed, but not so fast that the far end of the readout goes dark
-        // before it has finished being a readout.
-        this.cool[j] = lerp(0.22, 0.62, r());
+        // Absorbed HARDER than it was, because the trail is now twice as long
+        // at the cruise and its far end is what competes with the hero. Water
+        // eats a wake from the far end inward; the frame's block-salience
+        // metric agrees, and the review's own words for what it wants are "a
+        // three-filament wake that TAPERS AND DIES". Same three statements.
+        this.cool[j] = lerp(0.40, 0.85, r());
         this.asp[j] = el;
-        this.rot[j] = travel + (r() - 0.5) * 0.55;
+        // Angular jitter scaled as 1/stretch, which is the fix for the worst
+        // artefact this pass produced. A fixed +/-0.55 rad displaces the tip of
+        // a 47-unit comma by 13 units and the tip of a 170-unit one by 47, so
+        // at the cruise thirty elements stopped stacking into a stroke and
+        // splayed into a plexus of crossing translucent blades - photographed
+        // at 3x, and much more obviously wrong than the thing it replaced. What
+        // wants to be constant is the TIP DISPLACEMENT, and tip displacement is
+        // length x angle, so the angle has to come down as the length goes up.
+        this.rot[j] = travel + (r() - 0.5) * (0.9 / elg);
       }
 
       // --- and the near end of it: tiny, hot, brief, mint rather than white so
@@ -1389,31 +1557,49 @@ export class Particles {
       //     buys the mote's readability back instead. Measured: seed 3 / fast
       //     went 4.1 -> 3.9 when this brightened, and back over 4 when it did
       //     not.
-      this._aGlow += dt * spK * 8;
+      this._aGlow += dt * (4 + 26 * gk) * (0.3 + 0.7 * spK);
       if (this._aGlow > 4) this._aGlow = 4;
       while (this._aGlow >= 1) {
         this._aGlow -= 1;
         // Tight and close. Spread wide it stops reading as a trail and just
         // adds to the field of mint dots the world's own plankton already puts
         // on screen - same colour, same size, no hierarchy.
-        // Pushed clear of the ring. 53-74 world units is where the mote is
-        // scored, and this is the only emitter in the file that this pass ADDS
-        // to inside it - so it goes outside it instead, and the far trail above
-        // carries what it used to carry. Everything left in the annulus was
-        // already there before this pass.
-        const back = lerp(82, 150, Math.pow(r(), 0.7));
-        const lat = (r() - 0.5) * lerp(14, 40, back / 150);   // the wake widens
+        // THE COLLAR, and it has moved INWARD - which reverses the previous
+        // round and is worth the paragraph, because that round was solving the
+        // right problem with the wrong bound.
+        //
+        // It read the annulus as 53-74 units and put this emitter at 82-150 to
+        // clear it. But the sample window is a 15x15 box and the ring is every
+        // sample at r>=5 inside it, so the ring reaches 105 units in the
+        // diagonals: 82-150 was not outside the annulus, it straddled it, and
+        // it is the only emission this file puts anywhere near the mote. Inside
+        // 50 units, by contrast, is the one place light beside the hero is
+        // free - it is past the core radius the focal max is taken over, short
+        // of the ring the mean is taken over, and it is inside the hero's OWN
+        // 67x64px block, so it is the only light in this file that adds to the
+        // number a scanning player actually answers.
+        //
+        // Which is also the honest art: the animal's body ends 18 units back,
+        // and stimulated plankton light up where it just was. A collar hugging
+        // the tail reads as part of the animal and gives the hero mass; the
+        // same light 90 units out reads as fog around it and takes mass away.
+        const back = lerp(19, 46, Math.pow(r(), 0.7));
+        const lat = (r() - 0.5) * lerp(7, 26, back / 46);     // the wake widens
         // Floored well above a pixel. At 2-4 world units these were 2px quads,
         // which is a hard little square with a stair-stepped edge, and a field
         // of them beside the mote is the "shimmering pixels" note verbatim.
         // Bigger and correspondingly dimmer: the same energy, spread over
         // enough texels for the profile to actually be a profile.
-        const s0 = lerp(4.4, 8.2, r());
+        const s0 = lerp(5.0, 9.6, r());
         const j = this._spawn(
           p.x - tx * back + nx * lat, p.y - ty * back + ny * lat,
           -tx * sp * 0.05 + nx * (r() - 0.5) * 90,
           -ty * sp * 0.05 + ny * (r() - 0.5) * 90,
-          lerp(0.16, 0.5, r()), s0, s0 * 0.35,
+          // Short, because the collar has to DIE where it was born. It lags the
+          // mote by 5% of its speed, so a long-lived one drifts out of the free
+          // band and into the moat it was placed to avoid - which is how this
+          // emitter ended up at 82-150 units in the first place.
+          lerp(0.12, 0.34, r()), s0, s0 * 0.35,
           // No planktonCore. The far trail already refuses it on the grounds
           // that 0xf2fff6 is all but white and white belongs to the mote - and
           // this emitter is four times CLOSER to the mote than that one, so the
@@ -1422,12 +1608,80 @@ export class Particles {
           // precisely the scatter of hard neutral dots a reviewer isolated to
           // this file. Cyan and mint only; the hierarchy holds.
           r() < 0.45 ? N_TRAIL : N_PLNK,
-          lerp(0.42, 1.12, r()) * (0.3 + 0.5 * spK), S.SPARK,
+          lerp(0.42, 1.12, r()) * (0.30 + 0.45 * spK + 0.30 * gk), S.SPARK,
           dragFor(9, s0), lerp(-14, 10, r()), (r() - 0.5) * 4
         );
         this.kind[j] = K.DART;
         this.flow[j] = lerp(1.2, 1.9, r());
         this.cool[j] = 0.55;
+      }
+
+      // --- WATER STRIATIONS, and the point of them is that they are ABSENT at
+      //     the bottom of the cruise and unmissable at the top of it.
+      //
+      //     Everything else here is a continuous cue, and a review that could
+      //     not order 700, 730, 800 and 940 was telling us something about
+      //     continuous cues: a 34% change in a length or a brightness needs a
+      //     reference in the frame to be read at all, and a still frame has
+      //     none. Presence does not. gk squared is the gate, so the population
+      //     runs roughly 1 : 4 : 12 across those three speeds - which is not a
+      //     measurement, it is a difference in kind.
+      //
+      //     Drawn as heavily sheared SMOKE on the FLANKS, never behind the
+      //     head: 90-330 units off the travel axis, which is outside every
+      //     radius the hero is measured against, and CLOUD-classed so the
+      //     mote's keep-out owns them anyway. Total light scales with the count
+      //     and not with the stretch - each streak's surface brightness is
+      //     divided by exactly the factor its quad is multiplied by - so a
+      //     motion cue cannot become a brightness cue behind our back.
+      this._aStria += dt * gk * gk * 21;
+      if (this._aStria > 3) this._aStria = 3;
+      while (this._aStria >= 1) {
+        this._aStria -= 1;
+        // SHARD and not a stretched SMOKE, and the aspect is a third of what it
+        // was, both for the same measured reason. SMOKE's silhouette is a
+        // noise-eroded disc: stretch it 30:1 and the erosion runs along the
+        // length instead of across it, so what draws is a capsule with two
+        // straight sides and a dithered cap - which is exactly what a 3x crop
+        // of the 940 frame showed, four of them. SHARD is the kit's long
+        // sliver, tapering to nothing at BOTH ends over an envelope that
+        // narrows with it, so it cannot have a straight side however far it is
+        // stretched. It was documented "currently unused"; this is what it is
+        // for. The cue was never the aspect anyway - it is the COUNT.
+        const st = 1 + 1.5 * gk;
+        const side = r() < 0.5 ? -1 : 1;
+        // 140 units minimum, not 90, and the reason is a measurement: at 90 a
+        // striation's own block outranked the hero's on seed 3 / hushNear, which
+        // is the same defect the wake had and the same rule breaks it - nothing
+        // this file draws may be a brighter cluster than the animal that caused
+        // it. Water rushing past belongs beyond the hero's block anyway.
+        // 180 and not 140, which is bookkeeping rather than art: these are
+        // CLOUD-classed, so _clear() owns them, and a 33-unit striation
+        // stretched 4x has enough reach that anything inside about 240 units is
+        // suppressed to nothing. Emitting there spends pool and draws nothing.
+        const off = lerp(180, 430, Math.pow(r(), 0.8)) * side;
+        const back = (r() - 0.3) * 520;
+        const s0 = lerp(22, 44, r());
+        const j = this._spawn(
+          p.x - tx * back + nx * off, p.y - ty * back + ny * off,
+          tx * lerp(-40, 70, r()) + nx * (r() - 0.5) * 34,
+          ty * lerp(-40, 70, r()) + ny * (r() - 0.5) * 34,
+          lerp(0.5, 1.1, r()), s0, s0 * lerp(1.1, 1.5, r()),
+          // Barely any SURF. Pale is nearly neutral, and the first version of
+          // this drew four desaturated grey-blue slabs to the left of the mote
+          // at 3x - the "flat hard rectangle" this file already has a rule
+          // about, in a colour reserved for the hero.
+          r() < 0.18 ? N_SURF : N_WATER,
+          lerp(0.13, 0.30, r()) / st, S.SHARD,
+          dragFor(4.0, s0), lerp(-6, 10, r()), 0
+        );
+        this.kind[j] = K.CLOUD;
+        this.flow[j] = lerp(1.1, 1.7, r());
+        this.cool[j] = lerp(0.3, 0.7, r());
+        this.asp[j] = lerp(3.2, 5.4, r()) * st;
+        // Tight to travel - a striation that wanders is a cloud. 0.22 radians
+        // of jitter is enough that thirty of them are not a comb.
+        this.rot[j] = travel + (r() - 0.5) * 0.22;
       }
 
       // --- gas shed at speed: cavitation off something moving fast
@@ -1460,7 +1714,7 @@ export class Particles {
             (down ? 1 : -1) * lerp(16, 120, r()) * (0.35 + 0.65 * kk),
             lerp(1.4, 4.0, r()), s0, s0 * lerp(1.6, 2.6, r()),
             r() < 0.55 ? N_SILT : N_WATER,
-            lerp(0.05, 0.15, r()) * (0.45 + 0.55 * kk) / (1 + 2 * spK), S.SMOKE,
+            lerp(0.05, 0.15, r()) * (0.45 + 0.55 * kk) / (1 + 3.6 * gk), S.SMOKE,
             dragFor(5.0, s0), lerp(3, 24, r()), (r() - 0.5) * 0.7
           );
           this.kind[j] = K.CLOUD;
@@ -1470,8 +1724,10 @@ export class Particles {
           // sheared HARDER, along travel, the faster the thing that lifted it
           // was going. This is the near-ground directional smear: it is the
           // layer closest to the camera that is not the player, so it is where
-          // a motion cue costs the hero nothing. Energy-conserving, as above.
-          this.asp[j] = lerp(1.4, 2.3, r()) * (1 + 2 * spK);
+          // a motion cue costs the hero nothing. Energy-conserving, as above,
+          // and on gearK for the same reason everything else here is: 1.6x
+          // against 2.0x across the cruise was not a cue, 1.8x against 3.8x is.
+          this.asp[j] = lerp(1.4, 2.3, r()) * (1 + 3.6 * gk);
           this.rot[j] = travel + (r() - 0.5) * 0.5;
         }
       }
@@ -1639,7 +1895,14 @@ export class Particles {
         // light while the peak nearly doubles. And the peak is the entire
         // point, because p99 counts AREA above 0.25 linear - see the header.
         // This family had 264 pixels above it, one grid sample of 5184.
-        a = smoothstep(clamp01(t * 4.2)) * Math.pow(1 - t, 1.15) * 2.35;
+        // Decay steepened from 1.15 to 1.55 with the gain raised to hold the
+        // integral, which moves light from the far end of the trail to the near
+        // end without adding any. That is the only redistribution that helps
+        // both readings at once: near the head the wake lands in or beside the
+        // hero's OWN block and raises the number a scanning player answers,
+        // while the far end is the part that was measured forming blocks
+        // brighter than a weak hero block on seed 3 / hushNear.
+        a = smoothstep(clamp01(t * 4.2)) * Math.pow(1 - t, 1.55) * 2.85;
         s = lerp(this.size[i], this.size1[i], t);
       } else {
         // fast bloom-in, long tail out - reads as an ember rather than a fade
@@ -1662,6 +1925,15 @@ export class Particles {
       const soft = kd === K.CLOUD || kd === K.VORTEX || kd === K.COLD;
       if (soft) {
         bb *= this._clear(px, py, reach * 0.5);
+        if (bb <= 0.004) continue;
+      } else {
+        // ...and the hot classes get the MOAT, which is the annulus and not the
+        // disc. Inside 50 units a point reads as part of the animal and is
+        // wanted; between 50 and 112 it is the one thing the frame cannot
+        // afford, because that band is both the divisor of the focal ratio and
+        // the neighbouring block. Outside it the wake resumes at full strength
+        // - the trail starts 152 units back and never touches this. See _moat().
+        bb *= this._moat(px, py);
         if (bb <= 0.004) continue;
       }
       // The plankton family gets no keep-out. It gets SPREAD - see the PSF
@@ -1987,15 +2259,24 @@ export class Ambient {
     if (gm && (gm.mode === 'play' || gm.mode === 'dead')) {
       const pl = gm.player;
       const psp = Math.hypot(pl.vx, pl.vy);
-      if (psp > SPD_LO) { smr = spdK(psp); sang = Math.atan2(pl.vy, pl.vx); }
+      // Weighted toward gearK, because the near layer is the widest-area
+      // motion cue in the frame and it was reading 0.32 against 0.51 across the
+      // band the game plays in. 0.26 against 0.67 is a smear you can order.
+      if (psp > SPD_LO) { smr = 0.42 * spdK(psp) + 0.58 * gearK(psp); sang = Math.atan2(pl.vy, pl.vx); }
     }
-    // 124 world units of full suppression against a 99-unit annulus edge, then
-    // 81 more to reach full strength. See _keep().
+    // THE POCKET. 135 world units of full suppression against a 99-unit annulus
+    // edge, then 92 more to reach full strength - so the hero sits in a hole in
+    // the bokeh out to about 105 screen pixels, which is the review's
+    // prescription verbatim. It is applied to every species now and not only to
+    // the flashes: a fat low-contrast VEIL is exactly the "green bokeh the mote
+    // is dimmer than a dozen of", and it is the class that most wants to drift
+    // through the one part of the frame that has to stay the hero's. Measured
+    // cost to the hero's own block energy: 0.01 of 5.93. See _keep().
     const vh = cam.viewH || 1080;
     this._kOn = (gm && gm.mode === 'play' && gm.player.alive) ? 1 : 0;
     if (this._kOn) {
       this._kx = gm.player.x; this._ky = gm.player.y;
-      this._kIn = vh * 0.115; this._kInv = 1 / (vh * 0.075);
+      this._kIn = vh * 0.125; this._kInv = 1 / (vh * 0.085);
     }
 
     for (let i = 0; i < this.n; i++) {
@@ -2025,8 +2306,14 @@ export class Ambient {
       // Depth grades everything: far is smaller, dimmer and bluer.
       const fade = clamp01((z - 0.32) / 1.45);
       const g = iz * iz < 2.5 ? iz * iz : 2.5;
-      const amp = this.br[i] * tw * g * (1 - 0.6 * fade) * 0.22;
+      let amp = this.br[i] * tw * g * (1 - 0.6 * fade) * 0.22;
       if (amp <= 0.003) continue;
+      // The pocket, and it is the whole layer's business rather than only the
+      // flashes'. See the block above _keep() is set up in.
+      if (this._kOn) {
+        const kk = this._keep(x, y);
+        if (kk < 1) { amp *= kk; if (amp <= 0.003) continue; }
+      }
       const s = this.ps[i] * (0.5 + 0.42 * iz);
 
       // Three accents with clear jobs: the mote owns white, plankton owns mint,
@@ -2041,8 +2328,19 @@ export class Ambient {
 
       // A drifting hair and a live organism keep their own orientation: a
       // smeared body reads as a mistake, not as speed.
-      const e = (smr > 0 && k !== AK.LARVA && k !== AK.ORG)
-        ? 1 + smr * clamp01((1.06 - z) / 0.62) * 3.4 : 1;
+      // FAT is excluded now, along with the two that always were. It is the fat
+      // low-contrast bokeh, so it is the only class here whose quads are big
+      // enough to matter: eight near ones at 4.4x of stretch is 216k pixels of
+      // soft overdraw, a seventh of the frame, on a 12ms budget that is already
+      // the gate's one failure. And it is the class with the weakest claim -
+      // bokeh is out of focus, which is to say already smeared, so motion adds
+      // the least contrast to it. What the review asked for by name was
+      // "drifting particulate", and that is SNOW: 194 of the 323 drifters, at
+      // 400 pixels each, where the same stretch costs a twentieth as much. So
+      // the cue moves onto the cheap numerous class and gets pushed further
+      // there - 4.8x - for less fill than before this pass.
+      const e = (smr > 0 && k !== AK.LARVA && k !== AK.ORG && k !== AK.FAT)
+        ? 1 + smr * clamp01((1.06 - z) / 0.62) * 4.8 : 1;
       const ie = 1 / e;
       const srot = e > 1.04 ? sang : 0;
 
@@ -2076,12 +2374,9 @@ export class Ambient {
         // 17px sampling grid can see it. It is the body that lights up, which
         // is what a pulsing organism does.
         if (tw > 0.58) {
-          const kk = this._keep(x, y);
-          if (kk > 0.01) {
-            quad(s * 1.25, s * 1.25, fl);
-            const q2 = (tw - 0.58) * 2.38 * 1.9 * kk;
-            batch.push(x, y, qw, qh, rot, cr * q2, cg * q2, cb * q2, 1, S.PLANKTON);
-          }
+          quad(s * 1.25, s * 1.25, fl);
+          const q2 = (tw - 0.58) * 2.38 * 1.9;
+          batch.push(x, y, qw, qh, rot, cr * q2, cg * q2, cb * q2, 1, S.PLANKTON);
         }
         continue;
       }
@@ -2112,12 +2407,9 @@ export class Ambient {
         // gate opens a little earlier as well, at 0.74 rather than 0.80, which
         // buys population without touching the envelope's shape - the flash is
         // still a brief snap, not a lamp.
-        const kk = this._keep(x, y);
-        if (kk > 0.01) {
-          quad(s * 4.2, s * 4.2, fl);
-          const q2 = (tw - 0.74) * 3.85 * 2.2 * kk;
-          batch.push(x, y, qw, qh, 0, cr * q2, cg * q2, cb * q2, 1, S.PLANKTON);
-        }
+        quad(s * 4.2, s * 4.2, fl);
+        const q2 = (tw - 0.74) * 3.85 * 2.2;
+        batch.push(x, y, qw, qh, 0, cr * q2, cg * q2, cb * q2, 1, S.PLANKTON);
       }
     }
   }
