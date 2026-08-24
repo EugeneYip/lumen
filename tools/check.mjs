@@ -39,6 +39,13 @@ const BUDGET = {
   blackMax: 0.900,       // fraction of pixels at <0.008 luminance
   minDepth: 40,          // autopilot must get somewhere
   minSpread: 0.14,       // p95-p20 luminance: below this the frame is flat mush
+  // An art-direction review measured 84% of one frame inside a 32-code-value
+  // band, with 0.3% of pixels below L8: murk and bloom with no midtone, and an
+  // abyss that never reaches black. These two are reported as warnings because
+  // they are composition targets rather than defects, but they are the numbers
+  // that axis is judged on.
+  shadowFracMin: 0.08,   // fraction below L8; a real abyss wants 0.15-0.25
+  moteContrastMin: 4.0,  // focal core vs its local surround, at any speed
 };
 
 /**
@@ -136,16 +143,44 @@ for (const seed of SEEDS) {
           const n = t.width * t.height;
           let sum = 0, clipped = 0, black = 0, max = 0;
           const vals = new Float32Array(n);
+          const vals2 = new Float32Array(n);   // unsorted, for spatial sampling
           for (let i = 0, j = 0; i < d.length; i += 4, j++) {
             const l = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) / 255;
-            vals[j] = l; sum += l;
+            vals[j] = l; vals2[j] = l; sum += l;
             if (l >= 0.99) clipped++;
             if (l < 0.008) black++;
             if (l > max) max = l;
           }
+          // Focal clarity: the player's core against its own surround. If the
+          // bloom, the streak and the particle field all pile into one value
+          // band, the eye loses the protagonist exactly when it needs it.
+          let contrast = null;
+          try {
+            const g = window.game;
+            const uv = g.cam.worldToUv(g.player.x, g.player.y);
+            const cx = uv[0] * t.width, cy = uv[1] * t.height;
+            if (cx > 6 && cy > 6 && cx < t.width - 6 && cy < t.height - 6) {
+              let core = 0, ring = 0, ringN = 0;
+              for (let y = -7; y <= 7; y++) for (let x = -7; x <= 7; x++) {
+                const px = Math.round(cx + x), py = Math.round(cy + y);
+                if (px < 0 || py < 0 || px >= t.width || py >= t.height) continue;
+                const l = vals2[py * t.width + px];
+                const r = Math.hypot(x, y);
+                if (r <= 2) core = Math.max(core, l);
+                else if (r >= 5) { ring += l; ringN++; }
+              }
+              if (ringN) contrast = core / Math.max(ring / ringN, 1e-3);
+            }
+          } catch { /* mote off-screen */ }
+
+          let shadow = 0;
+          for (let i = 0; i < n; i++) if (vals[i] < 8 / 255) shadow++;
+          const shadowFrac = shadow / n;
+
           vals.sort();
           const q = (p) => vals[Math.min(n - 1, Math.floor(p * n))];
           return { mean: sum / n, max, clipped: clipped / n, black: black / n,
+            shadowFrac, contrast,
             p20: q(0.2), p50: q(0.5), p90: q(0.9), p95: q(0.95), p99: q(0.99) };
         });
 
@@ -156,6 +191,8 @@ for (const seed of SEEDS) {
         else if (lum.mean > BUDGET.meanLumMax) fails.push(`${tag}: too bright — mean luminance ${lum.mean.toFixed(3)} > ${BUDGET.meanLumMax}`);
         if (lum.clipped > BUDGET.clippedMax) fails.push(`${tag}: ${(lum.clipped * 100).toFixed(1)}% of pixels clipped to white (max ${(BUDGET.clippedMax * 100)}%)`);
         if (lum.black > BUDGET.blackMax) warns.push(`${tag}: ${(lum.black * 100).toFixed(1)}% of pixels are near-black`);
+        if (lum.shadowFrac < BUDGET.shadowFracMin) warns.push(`${tag}: no real blacks — only ${(lum.shadowFrac * 100).toFixed(1)}% of pixels below L8 (want > ${BUDGET.shadowFracMin * 100}%); the abyss never reaches black`);
+        if (lum.contrast != null && lum.contrast < BUDGET.moteContrastMin) warns.push(`${tag}: weak focal point — mote core only ${lum.contrast.toFixed(1)}:1 over its surround (want > ${BUDGET.moteContrastMin}:1)`);
         const spread = lum.p95 - lum.p20;
         if (spread < BUDGET.minSpread) fails.push(`${tag}: flat image — p95-p20 luminance spread only ${spread.toFixed(3)} (want > ${BUDGET.minSpread})`);
       } catch (e) {
@@ -304,7 +341,8 @@ if (JSON_OUT) {
       (S.determinism === false ? '  NON-DETERMINISTIC' : ''));
     for (const [sc, v] of Object.entries(S.scenes)) {
       if (v.hdr) console.log(`  ${(sc + ' hdr').padEnd(11)} p50 ${v.hdr.p50}  p90 ${v.hdr.p90}  p99 ${v.hdr.p99}  max ${v.hdr.max}   (linear, pre-tonemap)`);
-      console.log(`  ${sc.padEnd(11)} mean ${v.mean.toFixed(4)}  p50 ${v.p50.toFixed(3)}  spread ${(v.p95 - v.p20).toFixed(3)}  p99 ${v.p99.toFixed(3)}` +
+      console.log(`  ${sc.padEnd(11)} mean ${v.mean.toFixed(4)}  p50 ${v.p50.toFixed(3)}  spread ${(v.p95 - v.p20).toFixed(3)}` +
+        `  shadow ${((v.shadowFrac || 0) * 100).toFixed(1)}%  focal ${v.contrast ? v.contrast.toFixed(1) + ':1' : '--'}` +
         `  clipped ${(v.clipped * 100).toFixed(2)}%  black ${(v.black * 100).toFixed(1)}%  (${v.depth}m)`);
     }
   }

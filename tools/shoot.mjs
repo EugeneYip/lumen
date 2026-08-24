@@ -9,6 +9,9 @@
  *   --at  <list>    simulated seconds to capture          default 0,2,6,14,30
  *   --scenes <list> named moments instead of times:
  *                   title,tethered,launch,fast,hazardNear,hushNear,deep,dead
+ *   --depths <list> metres reached, e.g. 20,120,400,900. PREFER THIS FOR A/B:
+ *                   named scenes land at different distances as the physics
+ *                   changes, so they compare content instead of rendering.
  *   --w --h         viewport size                         default 1600x900
  *   --dpr <n>       device pixel ratio                    default 1
  *   --seed <n>      world seed                            default 7
@@ -33,6 +36,7 @@ const flag = (k) => argv.includes('--' + k);
 const OUT   = resolve(ROOT, arg('out', 'shots/run'));
 const AT    = String(arg('at', '0,2,6,14,30')).split(',').map(Number).filter(n => !Number.isNaN(n));
 const SCENES = arg('scenes', null);
+const DEPTHS = arg('depths', null);
 const W     = Number(arg('w', 1600)), H = Number(arg('h', 900));
 const DPR   = Number(arg('dpr', 1));
 const SEED  = Number(arg('seed', 7));
@@ -97,7 +101,21 @@ try {
 
 const written = [];
 if (!problems.some(p => p.startsWith('LUMEN never'))) {
-  if (SCENES) {
+  if (DEPTHS) {
+    const list = DEPTHS.split(',').map(Number).filter((n) => !Number.isNaN(n));
+    for (const m of list) {
+      try {
+        const info = await page.evaluate(async (d) => await window.LUMEN.seekToDepth(d, 240), m);
+        const name = `${TAG}-${String(m).padStart(5, '0')}m.png`;
+        const file = join(OUT, name);
+        await page.screenshot({ path: file });
+        written.push({ t: `${m}m`, file, info });
+        if (!QUIET) console.log(`  ${name}  ${info && info.summary ? info.summary : ''}`);
+      } catch (e) {
+        problems.push(`depth ${m}m failed: ${e.message}`);
+      }
+    }
+  } else if (SCENES) {
     const list = SCENES.split(',').map(s => s.trim()).filter(Boolean);
     for (let i = 0; i < list.length; i++) {
       const sc = list[i];

@@ -392,6 +392,29 @@ class Game {
     return this.stats();
   }
 
+  /**
+   * Advance until the run has reached `metres`, restarting on death.
+   *
+   * Named scenes ("fast", "hazardNear") land wherever the physics happens to
+   * put them, so as movement changes the same scene name captures a different
+   * part of the level - which makes an A/B comparison between builds compare
+   * content rather than rendering. Anchoring on distance fixes that.
+   */
+  async seekToDepth(metres, maxT = 240) {
+    if (this.mode === 'title') this.startPlay();
+    const limit = this.t + maxT;
+    let guard = 0;
+    while (this.t < limit && guard++ < 900000) {
+      if (this.player.maxX * METRES >= metres && this.player.alive) break;
+      if (this.mode === 'dead' && this.deadT > 1.2) this.startPlay();
+      this.input.setSynthetic(this.autopilot());
+      this.step(FIXED);
+      this.input.endFrame();
+    }
+    await new Promise((res) => requestAnimationFrame(() => { this.render(FIXED); requestAnimationFrame(() => res()); }));
+    return this.stats();
+  }
+
   _nearestHazard() {
     const p = this.player;
     let best = 1e9;
@@ -475,6 +498,7 @@ export function boot() {
       ready: true,
       seekTo: (t) => game.seekTo(t),
       seekUntil: (c, m) => game.seekUntil(c, m),
+      seekToDepth: (d, m) => game.seekToDepth(d, m),
       stats: () => game.stats(),
       hdrStats: () => game.hdrStats(),
       game,
@@ -486,6 +510,7 @@ export function boot() {
   requestAnimationFrame(loop);
   window.LUMEN = {
     ready: true, seekTo: (t) => game.seekTo(t), seekUntil: (c, m) => game.seekUntil(c, m),
+    seekToDepth: (d, m) => game.seekToDepth(d, m),
     stats: () => game.stats(), hdrStats: () => game.hdrStats(), game,
   };
 }
