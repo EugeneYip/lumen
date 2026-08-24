@@ -246,6 +246,14 @@ whether to keep iterating.
 - **No auto-exposure**, deliberately. It would mask exactly the contract
   violations `check.mjs` exists to catch.
 
+### Determinism has a specific GPU trap
+
+Implicit-derivative mip LOD selection in non-uniform control flow will make the
+renderer vary *per draw call* while every input is identical. If a shader
+samples a mipmapped texture from inside a branch or after an early return, use
+`textureLod` with an analytic level. `node tools/_det3.mjs` renders one frozen
+state five times and is the fastest way to see it.
+
 ## 7. How artefacts have actually been diagnosed here
 
 Worth reading before you guess at a rendering bug. Grey rectangles littered
@@ -309,25 +317,17 @@ Verify each against the current code before acting; some may be fixed.
 
 ## 8b. Work preserved on branches (as of the last edit to this file)
 
-Run `node tools/state.mjs` for live state; this only records *intent*, which a
-command cannot tell you.
+Run `node tools/state.mjs` for live state; this records only *intent*, which a
+command cannot tell you. When a branch listed here has landed, delete the entry.
 
-- **`wip/background-material`** — a full rewrite of `src/game/background.js`
-  (terrain material, strata, silt, diffuse vent plume, irregular Hush
-  turbulence) by an agent killed immediately after writing it, before it
-  verified anything. Deliberately **not** merged: it makes the renderer vary
-  per draw call, so five renders of one frozen state produce three distinct
-  images, which breaks blind A/B comparison. Bisected to that file; ruled out
-  `Math.random`/wall-clock, `bandTop`/`bandBot` instability and NaN, and the
-  draw path's uniforms. Suspect the shader or a GL resource hazard.
-  Reproduce with `node tools/_det3.mjs`.
 - **`claude/kind-colden-21bab0`** — an earlier god-ray investigation. Its fix is
   superseded on `main`, but its commit message carries a sharper diagnosis than
-  main's ("a smooth field, not a threshold on *magnified texels*") and it
-  contains the `tools/_shaft.mjs` and `tools/_slot.mjs` instruments, which have
-  since been salvaged onto `main`.
+  main's ("a smooth field, not a threshold on *magnified texels*"), and its
+  `tools/_shaft.mjs` and `tools/_slot.mjs` instruments have been salvaged onto
+  `main`. Nothing else there is needed; it is kept only as provenance.
 
-Neither branch should be deleted without reading it first. See §9.
+Neither this nor any other unfamiliar branch should be deleted without reading
+it first. See §9.
 
 ## 9. Recovering abandoned work
 

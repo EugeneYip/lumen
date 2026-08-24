@@ -170,6 +170,15 @@ before you declare done.**
   during the simulated run. Drive simulation from `step`-reachable state only.
 - Write your file in **one atomic write**. A half-written file blocks every
   other agent's captures.
+- **Never sample a mipmapped texture with plain `texture()` from inside a
+  branch, a loop with a conditional, or after an early return.** GLSL implicit
+  derivatives are undefined in non-uniform control flow, so the mip level comes
+  from a neighbouring lane's registers rather than from any shader input, and
+  the render stops being deterministic. Use `textureLod` with an analytic level
+  (`log2(scale * worldUnitsPerPixel * textureSize)`). This is also the *correct*
+  filter width; the implicit path is only correct by accident. It cost a day
+  here, and it hid for weeks because the LOD clamps at 0 and no fetch in that
+  shader was minified until one was.
 - `-x ** 2` is a JavaScript **SyntaxError**. Write `-(x ** 2)`. This broke the
   whole build once and blocked every other agent from capturing.
 - State that `newRun()` does not reset leaks between runs. Input is one such
