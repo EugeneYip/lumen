@@ -315,6 +315,30 @@ for (const seed of SEEDS) {
         };
         return { a: run(), b: run() };
       });
+      // Stronger: re-render a FROZEN state several times. Run-to-run comparison
+      // misses a renderer that varies per draw call, which is how an unverified
+      // shader with a per-draw GL hazard reached the tree unnoticed.
+      const frozen = await page.evaluate(() => {
+        const g = window.game;
+        const h = () => {
+          g.render(1 / 120);
+          const t = document.createElement('canvas');
+          t.width = 160; t.height = 90;
+          const x = t.getContext('2d', { willReadFrequently: true });
+          x.drawImage(document.getElementById('gl'), 0, 0, t.width, t.height);
+          const d = x.getImageData(0, 0, t.width, t.height).data;
+          let v = 2166136261;
+          for (let i = 0; i < d.length; i++) { v ^= d[i]; v = Math.imul(v, 16777619); }
+          return (v >>> 0).toString(16);
+        };
+        return [h(), h(), h(), h(), h()];
+      });
+      const distinct = new Set(frozen).size;
+      S.frozenRender = distinct;
+      if (distinct > 1) {
+        fails.push(`seed ${seed}: RENDER varies per draw call — 5 renders of one frozen state gave ${distinct} distinct images (${frozen.join(' ')}). Frames cannot be compared between builds.`);
+      }
+
       S.determinism = det.a.state === det.b.state && det.a.pixels === det.b.pixels;
       if (det.a.state !== det.b.state) fails.push(`seed ${seed}: simulation NOT deterministic — replay diverged (${det.a.state} vs ${det.b.state})`);
       else if (det.a.pixels !== det.b.pixels) fails.push(`seed ${seed}: RENDER not deterministic — identical state produced different pixels (${det.a.pixels} vs ${det.b.pixels}); frames cannot be compared between builds`);

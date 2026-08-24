@@ -112,6 +112,10 @@ order, and that order *is* the art direction.
    catches state leaking between runs but not cross-machine reproducibility.
    Machine-persistent state must not reach the renderer — the personal best is
    forced to 0 in headless for exactly this reason.
+   The gate also re-renders a **frozen** state five times and fails if the
+   images differ. That is strictly stronger than comparing two runs, and it is
+   what caught a shader that varied per draw call while every input was
+   identical. If you touch a shader, run `node tools/_det3.mjs`.
 2. **Frame-rate independence.** The sim is a fixed 120Hz step. Never use a raw
    per-step multiplier for damping or friction — use `damp`/`spring` from
    `math.js`. At 120Hz `v *= 0.86` annihilates all velocity in under a second.
@@ -302,6 +306,28 @@ Verify each against the current code before acting; some may be fixed.
 - **The "~23x between best and worst release" figure** in section 6 came from a
   `_feel.mjs` measurement that is not committed; only `loadTime` is visible in
   the code. Re-derive it before relying on it.
+
+## 8b. Work preserved on branches (as of the last edit to this file)
+
+Run `node tools/state.mjs` for live state; this only records *intent*, which a
+command cannot tell you.
+
+- **`wip/background-material`** — a full rewrite of `src/game/background.js`
+  (terrain material, strata, silt, diffuse vent plume, irregular Hush
+  turbulence) by an agent killed immediately after writing it, before it
+  verified anything. Deliberately **not** merged: it makes the renderer vary
+  per draw call, so five renders of one frozen state produce three distinct
+  images, which breaks blind A/B comparison. Bisected to that file; ruled out
+  `Math.random`/wall-clock, `bandTop`/`bandBot` instability and NaN, and the
+  draw path's uniforms. Suspect the shader or a GL resource hazard.
+  Reproduce with `node tools/_det3.mjs`.
+- **`claude/kind-colden-21bab0`** — an earlier god-ray investigation. Its fix is
+  superseded on `main`, but its commit message carries a sharper diagnosis than
+  main's ("a smooth field, not a threshold on *magnified texels*") and it
+  contains the `tools/_shaft.mjs` and `tools/_slot.mjs` instruments, which have
+  since been salvaged onto `main`.
+
+Neither branch should be deleted without reading it first. See §9.
 
 ## 9. Recovering abandoned work
 
