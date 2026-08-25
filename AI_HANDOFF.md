@@ -581,6 +581,29 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **The documented "10-25 degrees" release window does not survive measurement,
+  and the reason is interesting.** `README.md` states "the distance-optimal
+  release is a narrow window 10-25 degrees ahead of the anchor".
+  `node tools/_feel.mjs --mode skill` says best **30 deg** on seed 7 and best
+  **25 deg** on seed 3, with a sweet spot 15 deg wide on one and 5 deg on the
+  other. Worse, on seed 7 the whole 10-25 band scores 37-193 units against 795 at
+  30 deg — 4x to 20x worse — and the curve is *non-monotone*, which physics alone
+  cannot produce.
+  The explanation is that `runSkill` calls `RIG.clear`, which deletes plankton,
+  hazards and the Hush but **not the trench walls**. So the sweep measures
+  distance flown in a real, empty trench, and a flight that a wall truncates
+  scores near zero however good the release was.
+  That makes the flat claim misleading, but it also says something better about
+  the game than the claim did: **the optimal release is a function of the local
+  trench geometry, not a constant.** The player has to read the terrain rather
+  than memorise an angle. Nobody has isolated the pure-physics optimum (it would
+  need a sweep with the walls held flat), and until someone does, no single
+  number belongs in the README.
+  One consequence worth knowing: the `good` policy in `_feel.mjs` gates on
+  `deg > 8 && deg < 30`, which is the stale window — so part of why `good`
+  underperforms is that it was built from this claim. `ace` does not use an angle
+  rule at all, and beats it by 1.5x on rate.
+
 - **On a portrait phone, two thirds of the screen is rock.** The viewport meta in
   `index.html` (`user-scalable=no, viewport-fit=cover`) and the unified
   mouse/touch/key path in `input.js` both say mobile is intended, but every
