@@ -148,6 +148,78 @@ const HOT = 34;          // peak gain of the mote nucleus - the one knob
 // Peaks in this file are therefore moved reluctantly and areas freely.
 const HDR_FLOOR = 21;
 
+// ------------------------------------------------ the hero's reserved value ---
+// A ceiling on the peak of every sprite this file emits for a WORLD object,
+// applied as a CLASS at the one point where light leaves for the batch rather
+// than per emitter, so no later retune of an individual creature can breach it.
+// Same construction as particles.js's emit(), for the same reason, and the
+// numbers come from the same place: inverting the shipped tone curve rather
+// than picking them. postfx applies Hable with WHITE_REF 12.3 over a white
+// point of 11, so a linear surface brightness lands on display white as
+//
+//     linear    1.30   3.00   5.00   11     21     30
+//     display   0.51   0.72   0.81   0.91   0.95   0.96
+//
+// and the top of that table is the whole problem. Measured by isolation on
+// seed 7 - drawing one family into an otherwise empty frame and reading
+// hdrStats().max - the build this replaces shipped:
+//
+//     mote       28.4 - 33.6      display 0.962 - 0.967
+//     plankton   29.5 - 33.4      display 0.963 - 0.967      <- a tie
+//     anchor     10.2 - 17.0      display 0.900 - 0.930
+//     anemone     2.6 -  4.0      display 0.700 - 0.775
+//     kelp        0.9 -  2.1      display 0.420 - 0.640
+//
+// The protagonist and the collectible were the same value to within one code
+// value, and there are thirty to forty collectibles in frame. That is exactly
+// the standing review finding - "hand this still to someone cold and ask them
+// to point at their character, and they will point at a particle" - and it is
+// arithmetic rather than taste: above about 8 linear the curve has 0.06 of
+// display range left, so every emitter authored hot lands in the same band and
+// the hero cannot be the brightest thing however hot it is drawn. The gap has
+// to be made in the CEILING, not in the gain. Rule 4 is finally enforced
+// rather than asserted, and the enforcement is structural.
+//
+//   CEIL_DECOR   kelp lamps, anemone tips, spire glints. Scenery is never the
+//                subject of a frame: the bottom half of the range.
+//   CEIL_REWARD  plankton - the one thing in the world layer the player is
+//                meant to chase, so it gets the top of the world's band and
+//                nothing above it.
+//   CEIL_WARM    anchors, the tether's beads, the hazard rim. These are lamps,
+//                so they keep the hottest peak in the world layer - but a full
+//                stop below the hero instead of a fortieth of one.
+//
+// The mote is exempt because it IS the subject: _mote owns everything above 6,
+// which is also the exposure contract's emitter-core floor, and it is the only
+// object in the game allowed a white-hot nucleus.
+//
+// Ribbon light is not routed through here and does not need to be: every stroke
+// in this file is a depth-faded palette colour at alpha < 1, and the family
+// isolation above measures the hottest of them (the urchin's rim) at 1.5. The
+// gains live on the sprite path, so that is where the class point belongs.
+const CEIL_DECOR = 1.30, CEIL_REWARD = 3.0, CEIL_WARM = 5.0;
+// A spread quad puts light further out than the keep-out it was evaluated
+// against - the mote's 42-83px annulus in particular - so the payback is capped
+// and whatever it cannot absorb is trimmed. A ceiling that yields is not one.
+const CEIL_SPREAD = 2.2;
+
+// Below about a dozen screen pixels a CORE quad has no profile left in it. Its
+// hot lobe is exp(-105 r^2), i.e. 5% of the quad's width, so the sampler picks a
+// mip four or five levels down and what lands is a flat block of three or four
+// texels with a stair-stepped edge - not a point with a falloff.
+//
+// Found at 6x in the plankton field as pale neutral squares 3-4px across, and
+// it was in the shipped build too: it only became conspicuous once the field
+// around it stopped being blown white, which is the general shape of this whole
+// pass. A near-white artefact hides inside a near-white field.
+//
+// The remedy is to FADE rather than to widen, which is the opposite of the
+// remedy elsewhere in this file and in ribbons.js. Widening a near-white pip
+// makes a bigger near-white pip, and near-white area on a collectible is the
+// exact defect being fixed; whereas a grain that simply loses its white centre
+// with distance is also what water does to one.
+const PIP_PX = 13;
+
 // The Hush's absorption profile, in world units. Light starts to go before the
 // front arrives (the field has a leading edge of scatter) and is gone well
 // behind it, rather than switching off at a line.
@@ -196,6 +268,7 @@ export class Scene {
     this.rDark = new Ribbons(gl, 49152);
     this.rGlow = new Ribbons(gl, 65536);
     this._hx = -1e9;             // Hush front, world x. Set per frame in draw().
+    this._ppu = 1;               // screen pixels per world unit; see PIP_PX.
 
     // Ribbons.stroke() needs an exactly-sized array, so cache every view up
     // front rather than minting a subarray per shape per frame. Three pools =
@@ -217,6 +290,42 @@ export class Scene {
 
   /** How much of the object at world x the Hush has already eaten. 0..1. */
   _eat(x) { return clamp01((this._hx + HUSH_LEAD - x) / HUSH_DEEP); }
+
+  /**
+   * The one path from a world emitter into the light batch.
+   *
+   * Clamps the peak channel to `ceil` and pays the shortfall back as AREA -
+   * quad x f, tint x 1/f^2 - so the light is MOVED rather than deleted, and
+   * hard-trims whatever the spread cap could not absorb.
+   *
+   * The payback is not a courtesy. This file carries most of "there must be
+   * real highlights": suppressing _plankton alone takes seed 7 / fast from
+   * p99 0.268 to 0.224 against a contract floor of 0.250, and seed 3 / hushNear
+   * ships at 0.253, so there is nothing to spend. p99 is a COUNT of pixels over
+   * 0.25 linear rather than a level, and for a falloff of peak P the area above
+   * a threshold T goes as w^2 ln(P/T) - so holding the energy while lowering
+   * the peak by f multiplies that area by f^2 ln(ceil/T) / ln(P/T), which for
+   * plankton's 21 -> 3.0 is a factor of about four. Clamping the peak this way
+   * RAISES p99 while lowering salience. That is the only reason a ceiling can
+   * be imposed at all on the family the highlight contract rests on.
+   */
+  _emit(x, y, w, h, rot, r, g, b, layer, ceil) {
+    const pk = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    if (pk > ceil) {
+      let f = Math.sqrt(pk / ceil);
+      if (f > CEIL_SPREAD) f = CEIL_SPREAD;
+      const k = 1 / (f * f);
+      w *= f; h *= f; r *= k; g *= k; b *= k;
+      const over = pk * k;
+      if (over > ceil) { const c = ceil / over; r *= c; g *= c; b *= c; }
+    }
+    this.glow.push(x, y, w, h, rot, r, g, b, 1, layer);
+  }
+
+  /** `puts` form of _emit: a square quad from a colour register and a gain. */
+  _emits(x, y, size, col, k, layer, ceil, rot = 0) {
+    this._emit(x, y, size, size, rot, col[0] * k, col[1] * k, col[2] * k, layer, ceil);
+  }
 
   /**
    * A light being consumed by the Hush. Saturation goes before value: the
@@ -241,6 +350,10 @@ export class Scene {
     const b = cam.bounds(460);
     const dim = g.envDim === undefined ? 1 : g.envDim;
     this._hx = world.hushX === undefined ? -1e9 : world.hushX;
+    // cam.viewH world units span the full pixel height, and the zoom runs out
+    // to 1/1.87 at speed, so a quad's screen size is not a function of its
+    // world size alone. Anything authored against the mip chain needs this.
+    this._ppu = (g.pixelH || 900) / cam.viewH;
 
     // --- round 1: the far parallax layer, desaturated and low contrast ---
     this._decor(world, b, t, dim, true);
@@ -409,8 +522,8 @@ export class Scene {
       // dark blob on dark rock and the plant still looks placed rather than
       // gripping - the joint has to be *lit* to be read at all.
       const gk = 0.30 * dm * (1 - d.depth * 0.72);
-      this.glow.push(lx, ly - hw * 0.62, hw * 2.2, hw * 0.52, (hk - 0.5) * 0.34,
-        c1[0] * gk, c1[1] * gk, c1[2] * gk, 1, S.GLOW);
+      this._emit(lx, ly - hw * 0.62, hw * 2.2, hw * 0.52, (hk - 0.5) * 0.34,
+        c1[0] * gk, c1[1] * gk, c1[2] * gk, S.GLOW, CEIL_DECOR);
     }
 
     // Blades. A bare curve is a wire; blades make it a plant. Fewer of them at
@@ -440,9 +553,9 @@ export class Scene {
       // the height reads as the lit side of the same ribbon.
       const bn = ang + Math.PI * 0.5;
       const bk = 1.30 * (0.40 + 0.90 * hash2(sid, k * 11 + 9)) * dm * (1 - d.depth * 0.74);
-      this.glow.push(px + Math.cos(ang) * bl * 0.44 - Math.cos(bn) * bw * 0.17,
+      this._emit(px + Math.cos(ang) * bl * 0.44 - Math.cos(bn) * bw * 0.17,
         py + Math.sin(ang) * bl * 0.44 - Math.sin(bn) * bw * 0.17,
-        bl * 0.84, bw * 0.58, ang, c1[0] * bk, c1[1] * bk, c1[2] * bk, 1, L_LEAF);
+        bl * 0.84, bw * 0.58, ang, c1[0] * bk, c1[1] * bk, c1[2] * bk, L_LEAF, CEIL_DECOR);
     }
 
     // Edge light. The single thing that lets a dark plant read against dark
@@ -487,14 +600,20 @@ export class Scene {
         const py = lerp(pts[si * 2 + 1], pts[si * 2 + 3], lf);
         const pk = 0.40 + 0.60 * Math.sin(t * (1.3 + hk * 1.1) + k * 2.3 + d.phase * 2.1);
         const kk = lit * pk;
-        this.glow.puts(px, py, d.w * 7.0, scaled(c2, kk * 0.34, c3), 1, S.GLOW);
-        this.glow.puts(px, py, d.w * 1.7, scaled(pc, kk * 5.5, c3), 1, S.CORE);
+        this._emits(px, py, d.w * 7.0, c2, kk * 0.26, S.GLOW, CEIL_DECOR);
+        // d.w runs 3.4-15 world units, so a CORE quad at d.w*1.7 is 2.6-21px on
+        // screen - which is where those flat pale squares scattered through the
+        // kelp beds at 6x were coming from, and they were in the shipped build
+        // too. GLOW at an eighth of the gain and a wider quad is the same lamp
+        // with an actual falloff in it, and it lands on the decor tier instead
+        // of borrowing the reward's near-white.
+        this._emits(px, py, d.w * 3.0, pc, kk * 0.66, S.GLOW, CEIL_DECOR);
       }
       const tx = pts[(n - 1) * 2], ty = pts[(n - 1) * 2 + 1];
       const tp = 0.58 + 0.42 * Math.sin(t * 1.7 + d.phase * 2.1);
-      this.glow.puts(tx, ty, d.w * 14, scaled(c2, lit * tp * 0.40, c3), 1, S.GLOW);
-      this.glow.puts(tx, ty, d.w * 3.8, scaled(c2, lit * tp * 0.85, c3), 1, S.GLOW);
-      this.glow.puts(tx, ty, d.w * 1.4, scaled(pc, lit * tp * 8.0, c3), 1, S.CORE);
+      this._emits(tx, ty, d.w * 14, c2, lit * tp * 0.32, S.GLOW, CEIL_DECOR);
+      this._emits(tx, ty, d.w * 3.8, c2, lit * tp * 0.70, S.GLOW, CEIL_DECOR);
+      this._emits(tx, ty, d.w * 2.8, pc, lit * tp * 0.80, S.GLOW, CEIL_DECOR);
     }
   }
 
@@ -696,14 +815,42 @@ export class Scene {
       }
       this.rGlow.stroke(pts, {
         width: (f) => lerp(wCore(d.r * 0.16, 3.5), wCore(0, 3.5), Math.pow(f, 0.7)), color: base,
-        alpha: (f) => k * 0.42 * (1 - f * 0.35), falloff: 3.5,
+        alpha: (f) => k * 0.30 * (1 - f * 0.35), falloff: 3.5,
       });
       const ex = pts[(n - 1) * 2], ey = pts[(n - 1) * 2 + 1];
-      this.glow.puts(ex, ey, d.r * 0.95, scaled(tip, k * 2.9, c1), 1, S.CORE);
-      this.glow.puts(ex, ey, d.r * 2.8, scaled(base, k * 0.20, c1), 1, S.GLOW);
+      // FEWER, BETTER BEADS, and this is the one place in the file authored
+      // against `rank` rather than against the eye, so the measurement is
+      // written down. check.mjs ranks the mote's own 66x64px block against all
+      // 336 by highlight energy - the sum of L^2 over the block - and on seed 7
+      // / launch the three blocks above the hero were the seabed colony at 11.7,
+      // 13.3 and 16.7 against the mote's 8.5. Attributed by zeroing each
+      // emitter in turn: all three are anemone and the kelp field contributes
+      // nothing to any of them.
+      //
+      // A sum of squares punishes a cluster of separate bright points harder
+      // than anything else a frame can contain, so eleven lit tips in one block
+      // is the worst possible shape for it. Six of them read as the same animal
+      // - the other five arms still carry their stroke, so the silhouette does
+      // not change at all and only the count of highlights falls.
+      //
+      // GLOW rather than CORE for the same reason as the kelp lamps above: a
+      // CORE quad at d.r*0.95 is 5-30px and delivers a flat block.
+      if (h > 0.42) this._emits(ex, ey, d.r * 1.25, tip, k * 0.40, S.GLOW, CEIL_DECOR);
+      this._emits(ex, ey, d.r * 2.60, base, k * 0.115, S.GLOW, CEIL_DECOR);
     }
-    this.glow.puts(d.x, d.y + dir * d.r * 0.35, d.r * 6.0, scaled(base, k * 0.30, c1), 1, S.GLOW);
-    this.glow.puts(d.x, d.y + dir * d.r * 0.55, d.r * 1.5, scaled(tip, k * 2.3, c1), 1, S.CORE);
+    // ...and DIMMER-BUT-LARGER for the wash, which is the other half of the
+    // same measurement and the counter-intuitive half. Conserving linear energy
+    // while lowering a peak always RAISES a block's L^2, because the tone curve
+    // is concave and a spread of mid-tones is worth more display light than one
+    // white pixel - Jensen, not taste. But p99 is a count of pixels over 0.25
+    // LINEAR, which is display 0.14, and L^2 is weighted to the top of the
+    // range. So there is a window: widen by 1.3 and drop the peak from 3.0 to
+    // 1.3 and the above-threshold area goes UP 15% while the energy behind it
+    // goes DOWN 35%. That window is the only reason this colony can be made to
+    // stop out-ranking the protagonist without taking the frame's highlights
+    // out with it - zeroing the anemones outright costs p99 0.112.
+    this._emits(d.x, d.y + dir * d.r * 0.35, d.r * 5.4, base, k * 0.150, S.GLOW, CEIL_DECOR);
+    this._emits(d.x, d.y + dir * d.r * 0.55, d.r * 1.90, tip, k * 0.62, S.GLOW, CEIL_DECOR);
   }
 
   // ---------------------------------------------------------------- hazards ---
@@ -742,9 +889,9 @@ export class Scene {
       const hq = hash2(sid, q * 7 + 3), hq2 = hash2(sid, q * 7 + 5);
       const a = spin * 0.35 + (q / 7) * TAU + (hq - 0.5) * 0.7;
       const rr = r * (1.02 + hq2 * 0.86);
-      this.glow.puts(h.x + Math.cos(a) * rr, h.y + Math.sin(a) * rr,
+      this._emits(h.x + Math.cos(a) * rr, h.y + Math.sin(a) * rr,
         r * (1.10 + hq * 1.05),
-        scaled(cBod, (0.16 + 0.10 * p) * hot * (0.45 + hq2 * 1.05), c1), 1, S.GLOW);
+        cBod, (0.16 + 0.10 * p) * hot * (0.45 + hq2 * 1.05), S.GLOW, CEIL_WARM);
     }
 
     // Shell: an absence. THORN carries the material - it is the profile the
@@ -802,10 +949,10 @@ export class Scene {
         const ey = lerp(pts[i0 * 2 + 1], pts[i0 * 2 + 3], lf);
         const sa = Math.atan2(pts[i0 * 2 + 3] - pts[i0 * 2 + 1], pts[i0 * 2 + 2] - pts[i0 * 2]);
         const bk = gk * (0.85 + h1 * 0.55);
-        this.glow.push(ex, ey, r * 0.72, r * 0.32, sa,
-          cBod[0] * bk * 1.5, cBod[1] * bk * 1.5, cBod[2] * bk * 1.5, 1, S.STREAK);
-        this.glow.push(ex, ey, r * 0.20, r * 0.11, sa,
-          cRim[0] * bk * 7.0, cRim[1] * bk * 7.0, cRim[2] * bk * 7.0, 1, S.CORE);
+        this._emit(ex, ey, r * 0.72, r * 0.32, sa,
+          cBod[0] * bk * 1.5, cBod[1] * bk * 1.5, cBod[2] * bk * 1.5, S.STREAK, CEIL_WARM);
+        this._emit(ex, ey, r * 0.60, r * 0.33, sa,
+          cRim[0] * bk * 1.6, cRim[1] * bk * 1.6, cRim[2] * bk * 1.6, S.GLOW, CEIL_WARM);
       }
     }
 
@@ -833,7 +980,7 @@ export class Scene {
 
     // Ember down in the shell. Dim on purpose: the core is a hole, and a hot
     // point here is the exact mistake that made this thing read as a flower.
-    this.glow.puts(h.x, h.y, r * 0.54, scaled(cBod, (0.28 + 0.20 * p) * hot, c1), 1, S.GLOW);
+    this._emits(h.x, h.y, r * 0.54, cBod, (0.28 + 0.20 * p) * hot, S.GLOW, CEIL_WARM);
   }
 
   _jelly(h, t) {
@@ -867,10 +1014,10 @@ export class Scene {
     // --- interior. Deliberately *low*: the dome is a dark translucent body,
     // not a lit ball. PETAL supplies the membrane's own material - canals,
     // scalloped margin, gonads - which stacked GLOWs cannot. ---
-    this.glow.push(cx, cy - hh * 0.28, w * 2.30, hh * 2.15, 0,
-      cBod[0] * 0.20 * bell, cBod[1] * 0.20 * bell, cBod[2] * 0.20 * bell, 1, S.PETAL);
-    this.glow.push(cx, cy - hh * 0.34, w * 1.90, hh * 1.66, 0,
-      cBod[0] * 0.09 * bell, cBod[1] * 0.09 * bell, cBod[2] * 0.09 * bell, 1, S.VOLUME);
+    this._emit(cx, cy - hh * 0.28, w * 2.30, hh * 2.15, 0,
+      cBod[0] * 0.20 * bell, cBod[1] * 0.20 * bell, cBod[2] * 0.20 * bell, S.PETAL, CEIL_WARM);
+    this._emit(cx, cy - hh * 0.34, w * 1.90, hh * 1.66, 0,
+      cBod[0] * 0.09 * bell, cBod[1] * 0.09 * bell, cBod[2] * 0.09 * bell, S.VOLUME, CEIL_WARM);
 
     // --- bell outline: the membrane ---
     const n = 32, out = this._p2(n);
@@ -898,10 +1045,10 @@ export class Scene {
       const ox = cx + u * w * 0.74;
       const oy = cy - hh * 0.34 - Math.abs(u) * hh * 0.12;
       const gk = (0.46 + 0.30 * Math.sin(t * 1.9 + k * 1.7 + h.bellPhase)) * bell * hotb;
-      this.glow.push(ox, oy, w * 0.36, hh * 0.60, 0,
-        cBod[0] * gk * 0.7, cBod[1] * gk * 0.7, cBod[2] * gk * 0.7, 1, L_MEMB);
-      this.glow.push(ox, oy, w * 0.14, hh * 0.26, 0,
-        cRim[0] * gk * 4.2, cRim[1] * gk * 4.2, cRim[2] * gk * 4.2, 1, S.CORE);
+      this._emit(ox, oy, w * 0.36, hh * 0.60, 0,
+        cBod[0] * gk * 0.7, cBod[1] * gk * 0.7, cBod[2] * gk * 0.7, L_MEMB, CEIL_WARM);
+      this._emit(ox, oy, w * 0.29, hh * 0.54, 0,
+        cRim[0] * gk * 0.95, cRim[1] * gk * 0.95, cRim[2] * gk * 0.95, S.GLOW, CEIL_WARM);
       // canal from the apex out to the rim
       this.rGlow.segment(cx + u * w * 0.14, cy - hh * 0.82, cx + u * rim * 0.94, cy - hh * 0.03,
         wCore(w * 0.045, 3), cRim, 0.24 * bell, 3);
@@ -983,12 +1130,12 @@ export class Scene {
     // Danger telegraph. Placed as flanking lobes and one puff under the bell,
     // never a disc over the dome: the dome has to stay the dark part.
     const tg = 0.075 * (1 - e);
-    this.glow.push(cx, cy + hh * 1.5, w * 4.6, hh * 3.4, 0,
-      cBod[0] * tg, cBod[1] * tg, cBod[2] * tg, 1, S.VEIL);
+    this._emit(cx, cy + hh * 1.5, w * 4.6, hh * 3.4, 0,
+      cBod[0] * tg, cBod[1] * tg, cBod[2] * tg, S.VEIL, CEIL_WARM);
     for (let k = 0; k < 2; k++) {
       const sx = cx + (k ? 1 : -1) * w * 2.1;
-      this.glow.push(sx, cy - hh * 0.2, w * 3.0, hh * 3.0, 0,
-        cBod[0] * tg * 0.9, cBod[1] * tg * 0.9, cBod[2] * tg * 0.9, 1, S.VEIL);
+      this._emit(sx, cy - hh * 0.2, w * 3.0, hh * 3.0, 0,
+        cBod[0] * tg * 0.9, cBod[1] * tg * 0.9, cBod[2] * tg * 0.9, S.VEIL, CEIL_WARM);
     }
   }
 
@@ -1093,8 +1240,12 @@ export class Scene {
       const ny = lerp(sp[si * 2 + 1], sp[si * 2 + 3], lf);
       const nr = r * (0.20 + hash2(sid, q * 5 + 1) * 0.15);
       const np = 0.38 + 0.62 * Math.sin(t * (1.5 + hash2(sid, q * 5 + 2) * 1.2) + q * 2.2 + a.phase);
-      this.glow.puts(nx, ny, nr * 4.4, scaled(cRim, k * np * 0.20, c0), 1, S.GLOW);
-      this.glow.puts(nx, ny, nr * 1.25, scaled(cMid, k * np * 3.0, c0), 1, S.CORE);
+      this._emits(nx, ny, nr * 4.4, cRim, k * np * 0.20, S.GLOW, CEIL_WARM);
+      // nr is r*0.20..0.35, so a CORE quad at nr*1.25 was 3-17 world units -
+      // the flat-block size band described at PIP_PX. Every small hot CORE in
+      // this file is now a GLOW at roughly twice the width, whose own core is
+      // 16% of its quad rather than 5% and therefore survives minification.
+      this._emits(nx, ny, nr * 2.0, cMid, k * np * 0.42, S.GLOW, CEIL_WARM);
     }
 
     // ---- bulb: a teardrop, from a profiled stroke over its vertical axis ----
@@ -1120,23 +1271,28 @@ export class Scene {
     // interior is filled by glows that follow the teardrop's own profile. Amber
     // and orange carry the volume; near-white is rationed to the core alone, or
     // the anchor competes with the mote for hue as well as value.
-    this.glow.push(bx, by - r * 0.10, r * 10 * (isHeld ? 1.30 : 1), r * 9.2 * (isHeld ? 1.30 : 1), 0,
-      cRim[0] * k * 0.105, cRim[1] * k * 0.105, cRim[2] * k * 0.105, 1, S.VEIL);
+    // Trimmed a third. This is a 250 x 230px wash of orange around every bulb
+    // and it is the least characterful light on the object, but `rank` is a sum
+    // of L^2 over a 66x64px block, so a broad mid-value wash is expensive in
+    // exactly the currency the hero needs: on seed 3 / launch four blocks beat
+    // the mote and all four were anchors, attributed by zeroing them.
+    this._emit(bx, by - r * 0.10, r * 10 * (isHeld ? 1.30 : 1), r * 9.2 * (isHeld ? 1.30 : 1), 0,
+      cRim[0] * k * 0.070, cRim[1] * k * 0.070, cRim[2] * k * 0.070, S.VEIL, CEIL_WARM);
     // Sampled along the teardrop's own axis so the light fills the body's shape
     // rather than sitting behind it as a disc.
     for (let q = 0; q < 4; q++) {
       const f = 0.22 + q * 0.185;
       const ww = bw(f);
       const amb = q === 1 || q === 2 ? cLive : cMid;
-      const kk = k * (q === 1 ? 0.86 : q === 2 ? 0.74 : 0.54);
-      this.glow.push(bx + stx(f), lerp(axTop, axBot, f) + sty(f), ww * 1.20, ww * 1.04, 0,
-        amb[0] * kk, amb[1] * kk, amb[2] * kk, 1, S.GLOW);
+      const kk = k * (q === 1 ? 0.76 : q === 2 ? 0.65 : 0.48);
+      this._emit(bx + stx(f), lerp(axTop, axBot, f) + sty(f), ww * 1.20, ww * 1.04, 0,
+        amb[0] * kk, amb[1] * kk, amb[2] * kk, S.GLOW, CEIL_WARM);
     }
     // Hot core: small, and the only near-white on the object.
     const cf = 0.46;
     const ccx = bx + stx(cf), ccy = lerp(axTop, axBot, cf) + sty(cf);
-    this.glow.push(ccx, ccy, r * 0.92, r * 0.80, 0,
-      cCore[0] * k * 3.4, cCore[1] * k * 3.0, cCore[2] * k * 2.1, 1, S.GLOW);
+    this._emit(ccx, ccy, r * 1.30, r * 1.13, 0,
+      cCore[0] * k * 2.05, cCore[1] * k * 1.80, cCore[2] * k * 1.26, S.GLOW, CEIL_WARM);
     // The quad was widened to r*7.8 to satisfy the `max` statistic back when
     // hdrStats sampled a coarse grid and could not see a narrow lobe. It is an
     // exact per-pixel scan now, and the frame peaks above 60 linear against a
@@ -1152,8 +1308,19 @@ export class Scene {
     // three near-whites in the game with the mote's nucleus first among them.
     // Dropping the blue and green weights turns the wide part of the core amber
     // and leaves the small GLOW above as the only white highlight on the object.
-    this.glow.push(ccx, ccy, r * 3.4, r * 3.0, 0,
-      cCore[0] * k * 11, cCore[1] * k * 8.8, cCore[2] * k * 4.8, 1, S.CORE);
+    // ...and the gain comes down rather than the quad going back out. Measured
+    // by isolation, the anchors were the second-brightest family in the game at
+    // 10.2-17.0 linear, which the tone curve delivers at display 0.90-0.93
+    // against the mote's 0.96 - a distinction the eye cannot make, on the one
+    // object rule 4 says must never be the brightest. At 4.9 they land at 0.805,
+    // a sixth of the display range below the hero, and the mote is left as the
+    // only emitter core in the frame above 6 linear. DIMMED, not spread: the
+    // quad already came in from r*7.8 to r*3.4 to get out of the mote's 42-83px
+    // annulus (see below) and paying this shortfall back as area would put it
+    // straight back in. The p99 that buys is taken from the plankton instead,
+    // which is where a reward's highlight belongs.
+    this._emit(ccx, ccy, r * 3.4, r * 3.0, 0,
+      cCore[0] * k * 4.9, cCore[1] * k * 3.95, cCore[2] * k * 2.15, S.CORE, CEIL_WARM);
 
     // Rim that catches the bulb's own light. Warm, and subordinate to the core.
     const nr2 = 15, rimL = this._p1(nr2);
@@ -1208,8 +1375,8 @@ export class Scene {
       const py = lerp(axTop, axBot, ff) + sty(ff);
       const sk = 0.32 + 0.68 * Math.sin(t * (1.3 + hash2(sid, q * 7 + 1) * 2.0) + q * 2.4 + a.phase);
       const kk = k * (0.45 + sk * 0.85);
-      this.glow.puts(px, py, r * 1.5, scaled(cRim, kk * 0.26, c0), 1, S.GLOW);
-      this.glow.puts(px, py, r * 0.34, scaled(cLive, kk * 4.0, c0), 1, S.CORE);
+      this._emits(px, py, r * 1.5, cRim, kk * 0.26, S.GLOW, CEIL_WARM);
+      this._emits(px, py, r * 0.72, cLive, kk * 0.62, S.GLOW, CEIL_WARM);
     }
 
     // Tendrils: secondary motion, and the reason it reads as alive.
@@ -1241,8 +1408,8 @@ export class Scene {
         const nx = lerp(tp[si * 2], tp[si * 2 + 2], lf);
         const ny = lerp(tp[si * 2 + 1], tp[si * 2 + 3], lf);
         const np = 0.35 + 0.65 * Math.sin(t * (1.9 + hq) + q * 2.7 + a.phase);
-        this.glow.puts(nx, ny, r * 1.0, scaled(cMid, k * np * 0.42, c0), 1, S.GLOW);
-        this.glow.puts(nx, ny, r * 0.24, scaled(cLive, k * np * 3.6, c0), 1, S.CORE);
+        this._emits(nx, ny, r * 1.0, cMid, k * np * 0.42, S.GLOW, CEIL_WARM);
+        this._emits(nx, ny, r * 0.52, cLive, k * np * 0.58, S.GLOW, CEIL_WARM);
       }
     }
 
@@ -1260,12 +1427,12 @@ export class Scene {
       // *area* in the frame on seed 3 (538 pixels over L0.72 against the mote's
       // 259), which puts an anchor above the protagonist on the ladder in rule 4.
       // The only near-white the eye should find is the mote's nucleus.
-      this.glow.puts(ex, ey, r * 1.85, scaled(cLive, 0.58 * pulse, c0), 1, S.GLOW);
-      this.glow.puts(ex, ey, r * 1.05, scaled(cLive, 5.2 * pulse, c0), 1, S.CORE);
+      this._emits(ex, ey, r * 1.85, cLive, 0.58 * pulse, S.GLOW, CEIL_WARM);
+      this._emits(ex, ey, r * 1.75, cLive, 1.55 * pulse, S.GLOW, CEIL_WARM);
       // One dim anamorphic bar, tall enough that its core is not a hairline.
-      this.glow.push(bx, by, r * 9, r * 2.4, 0,
+      this._emit(bx, by, r * 9, r * 2.4, 0,
         cMid[0] * 0.26 * pulse, cMid[1] * 0.24 * pulse, cMid[2] * 0.18 * pulse,
-        1, S.STREAK);
+        S.STREAK, CEIL_WARM);
     }
   }
 
@@ -1297,28 +1464,57 @@ export class Scene {
       mixCol(PAL.plankton, PAL.planktonCore, hash2(sid, 6) * 0.42, c0);
       if (e > 0) this._ate(c0, e, c0);
       const pc = e > 0 ? this._ate(PAL.planktonCore, e, o0) : PAL.planktonCore;
-      // Areas trimmed again at unchanged peaks, and this time the measurement
-      // came from the focal metric rather than from the HDR contract. A swarm
-      // puts thirty of these inside the mote's own 42-83px annulus: on seed 3 at
-      // launch the annulus measured 0.271 against a frame median of 0.010, and
-      // the excess was almost entirely plankton cores clipped to white with
-      // their bloom overlapping. Same peak, ~40% less near-white area, so they
-      // stay crisp bright points and stop out-ranking the protagonist by area -
-      // which is rule 4 at the top of this file, measured for the third time.
-      this.glow.puts(x, y, sz * 4.6, scaled(c0, k * 0.24, c1), 1, S.GLOW);
-      this.glow.puts(x, y, sz * 2.1, scaled(c0, k * 0.82, c1), 1, S.PLANKTON, orb * 0.6);
-      this.glow.puts(x, y, sz * 2.15, scaled(pc, k * 13.5, c1), 1, S.CORE);
-      // A third of the field is ripe: hotter, and a step larger. It gives the
-      // reward a size ladder, which a field of identically-sized dots did not
-      // have. It has been narrowed twice for the same reason and the trend is
-      // the lesson: it was sz*6.4 to buy the frame's `max` statistic back when
-      // hdrStats sampled a coarse grid and missed a narrow lobe 19 times in 20,
-      // then sz*4.2 once `max` became an exact per-pixel scan, and now sz*3.3 at
-      // full HDR_FLOOR gain. Peak has never moved. Nothing in this file needs to
-      // be wide in order to be measured, and a wide hot lobe on each of thirty
-      // grains is a lot of bloom in the one place the protagonist needs dark.
+      // The reward's value tier, and the number a blind review has now named
+      // three times. Every previous pass here trimmed AREA at an unchanged
+      // PEAK - sz*6.4 to sz*4.2 to sz*3.3, "peak has never moved" written down
+      // as a virtue - and that was the wrong axis all along, because peak is
+      // what the eye ranks and area is what the exposure contract wants. Gain
+      // 13.5, and 21 on the ripe third, renders at 29-33 linear, which the tone
+      // curve delivers at display 0.963: the mote's own value to three decimal
+      // places, on thirty to forty objects at once. See CEIL_REWARD.
+      //
+      // So the light moves OUT of CORE and into PLANKTON, which is the kit's
+      // profile for exactly this object at exactly this size - a hot nucleus,
+      // one soft halo, one off-centre glint. Its nucleus is 16% of its quad
+      // against CORE's 5%, so at 13-46px on screen it renders a resolved little
+      // organism where CORE renders a white pinprick with no shape in it, and
+      // it does that at a sixth of the peak for the same energy. What was
+      // keeping the hero ahead at all was minification eating the CORE lobe,
+      // which is to say the protagonist's whole margin was an accident of the
+      // mip chain rather than anything authored.
+      //
+      // CORE stays, small and well under the ceiling: a grain still needs one
+      // crisp centre or it reads as a smudge. It is a sharpener now, not the
+      // object.
+      //
+      // And the sizes are NOT free, which is the correction the first pass
+      // needed. Paying the whole shortfall back as area put PLANKTON at sz*2.9
+      // under a sz*5.2 halo, and at 1:1 the reward field had become thirty soft
+      // green discs 40px across - bokeh, not organisms, and "one blur radius
+      // for everything reads as a filter" is on the amateur list for good
+      // reason. p99 had gone from 0.231 to 0.276 on the 1000m frame against a
+      // floor of 0.250, so the area was overpaid several times over: the profile
+      // swap ALONE buys the highlight contract, because PLANKTON holds a sixth
+      // of the peak over four times the above-threshold area at the same quad
+      // size CORE used to occupy. So the dot is very nearly the size it always
+      // was, and the ceiling is what changed.
+      this._emits(x, y, sz * 4.6, c0, k * 0.25, S.GLOW, CEIL_REWARD);
+      this._emits(x, y, sz * 2.55, c0, k * 1.25, S.PLANKTON, CEIL_REWARD, orb * 0.6);
+      // The near-white centre. A second PLANKTON at a different rotation rather
+      // than a CORE, because a CORE quad at a grain's size is a flat block (see
+      // PIP_PX), and rotated so the two off-centre glints do not stack into one
+      // symmetric bead. It fades out with screen size instead of being floored.
+      const pip = clamp01(sz * 1.75 * this._ppu / PIP_PX);
+      if (pip > 0.03) {
+        this._emits(x, y, sz * 1.75, pc, k * 0.95 * pip, S.PLANKTON, CEIL_REWARD, -orb * 0.35);
+      }
+      // A third of the field is ripe: a step LARGER and a shade whiter, never
+      // hotter. The size ladder is what a field of identically-sized dots did
+      // not have, and once the ceiling is in place size is the only currency
+      // left - which is the right one, because a reward is read by how much of
+      // it there is, not by how far past white its centre goes.
       if (hash2(sid, 7) > 0.66) {
-        this.glow.puts(x, y, sz * 3.3, scaled(pc, k * HDR_FLOOR, c1), 1, S.CORE);
+        this._emits(x, y, sz * 3.55, pc, k * 0.85, S.PLANKTON, CEIL_REWARD, orb * 0.22);
       }
     }
   }
@@ -1337,6 +1533,14 @@ export class Scene {
       pts[s * 2 + 1] = y;
     }
     // Body behind the front, then a bright leading edge at an honest width.
+    // Widening these was tried as a way to buy back the p99 that capping the
+    // anchors cost seed 3 / hushNear, on the theory that a full-height band
+    // spreads across a dozen blocks of the salience grid instead of piling into
+    // one. It moved p99 by nothing on either seed, because on that frame the
+    // front is off camera and this whole function early-returns - the Hush is
+    // *near the player* there, which is not the same as being in shot. Recorded
+    // because it is a cheap mistake to repeat: hushProx is a distance, not a
+    // visibility test.
     this.rGlow.stroke(pts, { width: 130, color: PAL.hushGlow, alpha: 0.42, falloff: 1.1 });
     this.rGlow.stroke(pts, { width: 40, color: PAL.hushEdge, alpha: 0.50, falloff: 2.6 });
     this.rGlow.stroke(pts, {
@@ -1566,8 +1770,8 @@ export class Scene {
         + (q ? 1 : -1) * (0.13 + 0.05 * Math.sin(t * 2.3 + q * 2.1));
       const fl = L * (0.16 + q * 0.07);
       const kk = 0.30 * gf * (0.6 + 0.4 * Math.sin(t * 3.1 + q * 1.7));
-      this.glow.push(fx + Math.cos(fa) * fl * 0.5, fy + Math.sin(fa) * fl * 0.5,
-        fl, fl * 0.10, fa, c0[0] * kk, c0[1] * kk, c0[2] * kk, 1, S.FILAMENT);
+      this._emit(fx + Math.cos(fa) * fl * 0.5, fy + Math.sin(fa) * fl * 0.5,
+        fl, fl * 0.10, fa, c0[0] * kk, c0[1] * kk, c0[2] * kk, S.FILAMENT, CEIL_WARM);
     }
     // Energy running down the line, unevenly spaced so it is not a metronome,
     // and cooling as it goes.
@@ -1578,8 +1782,8 @@ export class Scene {
       const bx = ax + dx * bt + px * wob, by = ay + dy * bt + py * wob + Math.sin(bt * Math.PI) * sag;
       const kb = gf * en * (0.72 - q * 0.17);
       mixCol(c1, PAL.moteInner, bt, c2);
-      this.glow.puts(bx, by, lerp(34, 22, bt), scaled(c2, kb * 0.50, c3), 1, S.GLOW);
-      this.glow.puts(bx, by, lerp(22, 13, bt), scaled(c2, kb * 8.0, c3), 1, S.CORE);
+      this._emits(bx, by, lerp(34, 22, bt), c2, kb * 0.50, S.GLOW, CEIL_WARM);
+      this._emits(bx, by, lerp(40, 25, bt), c2, kb * 1.35, S.GLOW, CEIL_WARM);
     }
   }
 
