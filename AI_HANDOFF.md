@@ -209,6 +209,27 @@ tethered, launch, fast, hazardNear, hushNear, deep, dead` — via
 `?noRibbons=1`. Those switches exist because they are how the worst artefact in
 the project's history was attributed to the right file — see §7.
 
+### Two traps that will silently invalidate a measurement run
+
+Both were found the hard way, by probes that reported confident nonsense.
+
+**`seekToDepth` tests a run maximum, so a depth ladder can return one frame
+several times.** It reads `player.maxX`, which only resets in `newRun()`. A ladder
+of *increasing* depths from a fresh run is safe — each target is genuinely
+reached in order, and the eight-frame baseline for a recent critic round was
+verified byte-distinct. But any target the run has *already passed* is satisfied
+on the first step it is tested, so a repeated depth, a descending ladder, or a
+depth reached during an earlier seek all yield the previous frame. One probe had
+three of its six "speed samples" be the same frame. This is the same hazard as
+the scene-predicate latch described further down: **a predicate testing a run
+maximum is a latch, not a moment.** Hash your frames before you trust a set.
+
+**`Game.newRun()` re-instantiates `particles` and `ambient`.** A handle grabbed
+before the first autopilot death points at an orphaned pool and reads empty
+forever — which looks exactly like "the system emitted nothing", and was
+reported as such once. Re-read `window.game.particles` after any restart rather
+than holding a reference across one.
+
 ### The critic loop
 
 `tools/CRITIC.md` is the protocol. In short: capture two builds, produce blind
