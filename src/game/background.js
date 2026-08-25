@@ -1279,24 +1279,108 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   float alb = 0.55 + 1.00 * hash11(floor(syF - bpF.z * uKill3.z) * 1.37 + 0.5);
   // VERTICAL STRIATION, and it is the one kind of structure that costs the
   // frame no level: a joint is a shadow, so a wall that gains legibility this
-  // way gains blacks with it rather than spending them. Same sheared level-set
-  // and the same 186-unit spacing as joints() on the near rock, so one fracture
-  // set runs through all five planes and perspective shrinks it correctly.
-  // No fetch - a wave() shear instead - because this runs four times a pixel.
-  float jsx = (w.x + w.y * 0.22) / 186.0 + wave(w.y, 0.00130, 3.1 + seed) * 0.30;
-  float jh = hash11(floor(jsx) * 3.17 + 1.9);
+  // way gains blacks with it rather than spending them. Same 186-unit spacing
+  // as joints() on the near rock, so one fracture set runs through all five
+  // planes and perspective shrinks it correctly. No fetch - wave(), sin and a
+  // second hash instead - because this runs four times a pixel, and the near
+  // rock's segmentation noise fetch would be four more.
+  //
+  // THIS DREW A RULED HATCH ACROSS THE FRAME, and the cause was the two things
+  // it did NOT copy from joints(). The lean was a constant 0.22 and the shear
+  // was global, so jsx = c and jsx = c+1 differ by a pure translation in x:
+  // every joint on a plane stood at exactly the same angle, and four planes
+  // each drawing their own parallel set at their own projected scale is a hatch
+  // rather than a few cracks. And there was no segmentation term at all, so
+  // each one ran unbroken from the top of the frame to the bottom. Measured
+  // with tools/_hair.mjs, seed 7 at 900m, sprite and ribbon passes off: notch
+  // 1.331 against a 0.581 bgNoFar floor, so the far walls owned 92% of the
+  // ruling in the image.
+  //
+  // Two per-joint fields fix it, both off a SECOND hash so neither correlates
+  // with the joint's own in-cell offset or its width:
+  //  - a meander, so adjacent joints do not share an angle. Bounded to 0.105 of
+  //    a cell, because a per-joint offset is applied AFTER floor() and a joint
+  //    that reaches its own cell edge is truncated there - which would be the
+  //    same defect again, one construction later. Worst case: centre 0.245 from
+  //    the edge against a 2.5-sigma tail of 0.148.
+  //  - a segment field along the length. joints() already records why: a joint
+  //    is a chain of segments and an unbroken one reads as a drawn line rather
+  //    than as a crack.
+  //
+  // THE LEAN MUST STAY BOUNDED AWAY FROM VERTICAL - see FAULT_LEAN above and
+  // AI_HANDOFF section 6, where a level set whose slope passed through zero
+  // drew a dead vertical line down the whole frame. A wandering lean can
+  // reintroduce that one layer back, so it is bounded here rather than copied
+  // from joints(), whose lean does reach zero and is saved only by being
+  // broken. Effective lean is 0.44 plus the global shear (186 * 0.17 * 1.5 *
+  // 0.00130 = +-0.062) plus the meander (186 * 0.105 * (0.72 * 0.0031 + 0.28 *
+  // 0.0119) = +-0.109): it runs 0.269..0.611, which is 15.1 to 31.4 degrees off
+  // vertical and never nearer than 6.2 degrees to what the camera roll can
+  // cancel (bank 0.105 * 1.2 plus shake 0.03 = 0.156 rad = 8.9 degrees).
+  float jsx = (w.x + w.y * 0.44) / 186.0 + wave(w.y, 0.00130, 3.1 + seed) * 0.17;
+  float ji = floor(jsx);
+  float jh = hash11(ji * 3.17 + 1.9);
   float jnt = 0.0;
   if(jh > 0.44){
-    float jd = abs(fract(jsx) - 0.5 + (jh - 0.5) * 0.42);
-    float jt = 0.020 + jh * 0.032;
-    jnt = exp(-(jd * jd) / (jt * jt));
+    // Two raw sinusoids rather than two wave() calls: the same known +-1 range
+    // for half the transcendentals, and the two fields want their own phases
+    // anyway. The meander leans on the low octave, the segments on the high.
+    float p = hash11(ji * 7.13 + 4.7) * 43.7 + seed;
+    float s1 = sin(w.y * 0.0031 + p);
+    float s2 = sin(w.y * 0.0119 + p * 2.7);
+    float jd = abs(fract(jsx) - 0.5 + (jh - 0.5) * 0.30
+                 + (s1 * 0.72 + s2 * 0.28) * 0.105);
+    // Mean seg is 0.507 (integrated over phase), so the channel loses about
+    // half its mass and this width is 1.135x to give some of it back - 0.576 of
+    // the old mass, not 1.0. Going the rest of the way is NOT free and was
+    // measured: at 0.035 + 0.055 * jh the mass is 0.880 of the old and the
+    // notch goes the WRONG WAY, 0.971 -> 1.032 at 900m and 1.683 -> 1.837 at
+    // 300m. Widening works on the fault below because that zone is already a
+    // several-pixel band; a joint at s = 0.135 is around a pixel, so widening
+    // it only recruits more pixels into the hairline instead of dissolving it.
+    // The 42% of mass that stays lost is worth 0.0000 of scene mean and at most
+    // 0.3pp of pixels below L8 on any gate scene, which is the price paid.
+    float jt = 0.023 + jh * 0.036;
+    float seg = sat(0.52 + (s2 * 0.62 + s1 * 0.38) * 1.9);
+    jnt = exp(-(jd * jd) / (jt * jt)) * seg;
   }
   // ...and the fault plane, which is the one break that must appear on every
   // plane at once. A fault that stops at the foreground is a scratch on the
   // lens; a fault that runs through all five planes is a structure the trench
   // was cut along, and it is free here because fdF is already in hand.
-  float fwF = 0.0055 + 0.0105 * bpF.w;
-  jnt = max(jnt, exp(-(fdF * fdF) / (fwF * fwF)) * 0.90 * uKill3.z);
+  //
+  // IT DOES NOT HAVE TO ARRIVE AS A HAIRLINE ON EVERY PLANE, THOUGH, AND THAT
+  // IS THE SECOND HALF OF THE HATCH. FAULTW is 1180 units, so the plane at
+  // s = 0.135 shows ten fault planes across the frame and the four together
+  // show about twenty - all at FAULT_LEAN, all unbroken by construction, which
+  // is exactly what the joint set was before it was segmented. Bisected on
+  // seed 7 at 300m with the sprite and ribbon passes off, this term alone is
+  // worth notch 0.253 (1.847 with it, 1.594 without, against a 0.559 bgNoFar
+  // floor), and with the joint channel zeroed it plainly draws its own ruled
+  // set at 1:1. That is a measurement, and it says the joint channel was only
+  // ever half of this defect.
+  //
+  // The fix is NOT to break it - see above, and it stays unbroken here - but to
+  // spread it. A slip surface is a hairline; a fault DAMAGE ZONE is tens of
+  // metres of broken rock, and which of the two you resolve is a question of
+  // how far away you are. So the zone widens and dims with distance, exactly
+  // mass-neutral (width x depth is constant, so the blacks the channel buys are
+  // untouched: measured flat to four decimals of scene mean, and +-0.3pp of
+  // pixels below L8). At s = 0.58 it is bit-identical to the crisp line the
+  // near rock draws, and only the deep planes - which carry most of the twenty
+  // lines and are the ones that must read low-contrast anyway - soften.
+  // Measured, seed 7, sprite and ribbon passes off: notch 1.042 -> 0.971 at
+  // 900m and 1.847 -> 1.688 at 300m on top of the joint fix.
+  //
+  // A per-fault size HIERARCHY off the throw hash was tried here first and is
+  // recorded as a negative result: mass-neutral it moved notch by 0.015, which
+  // is noise, and the version that did move it (0.996 at 900m) took seed 3
+  // tethered from 6.7% to 6.4% of pixels below L8 - level, on the one scene
+  // already warning for want of blacks. Width is the axis that pays; weight is
+  // not.
+  float fsoft = mix(2.30, 1.00, sat(s / 0.58));
+  float fwF = (0.0055 + 0.0105 * bpF.w) * fsoft;
+  jnt = max(jnt, exp(-(fdF * fdF) / (fwF * fwF)) * (0.90 / fsoft) * uKill3.z);
   alb *= 1.0 - 0.88 * jnt;
   vec3 rk = mix(ROCK_COOL, ROCK_WARM, 0.30);
   // Same response curve as the near rock and the medium - see irr in
