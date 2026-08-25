@@ -31,6 +31,7 @@ and byte-identical frames within one build. Those checks exist because a
 filename-tagging regex once collapsed five distinct frames to one key and an
 entire review round was spent reviewing the same image four times — see
 AI_HANDOFF §7. If it refuses to pair, believe it.
+
 `shots/cmpN/pair-*.png` are the blind composites (LEFT | RIGHT, side randomised
 per pair). `shots/cmpN/key.json` holds the mapping — **the critic must never be
 given it, or the directory listing, before it answers.** Pass explicit file paths
