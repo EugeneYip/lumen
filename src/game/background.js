@@ -105,6 +105,19 @@ const float V_FARRIM = 0.078;
 // blocks at hushNear from 7.4 units of highlight energy to below the hero's.
 const float V_SHAFT = 0.700;
 const float V_SILT  = 0.050;   // suspended sediment under full light
+// The water's own life, and the backscatter between the eye and a far wall.
+// Both ride one mottled cloud field - see 'cloud' in main() - because a lift
+// that does NOT ride it is a pedestal: measured, every flat version of these
+// two terms took a lit frame from 14% of its pixels below sRGB 8 to 3% while
+// the frame's p95-p20 spread fell, which is the milky failure this whole file
+// exists to avoid. Riding the field, the same mean lifts a fixed FRACTION of
+// whatever was black, which is the only shape that fits both ends of the
+// contract at once: 'fast' has to give up a third of its blacks and 'tethered'
+// can only afford four tenths of its own.
+const float V_ABYSS = 0.021;
+// The floor the glow puts under a receding plane. See farWall.
+const float V_GLOW  = 0.078;
+const float V_VEIL  = 0.018;
 const float V_SNOW  = 0.450;   // one lit fleck of marine snow
 const float V_BIO   = 2.350;   // a living mote - carries its own light
 const float V_VENT  = 2.500;   // vent throat - superwhite on purpose
@@ -482,7 +495,7 @@ vec3 medium(float wy, float sky){
 
 // ------------------------------------------------------------------- rock ---
 // The rock the physics uses. Coverage in .a.
-vec4 trenchRock(vec2 w, float sky, float open, float caus, vec4 kill2){
+vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float caus, vec4 kill2){
   vec2 bd = bandAt(w.x);
   float top = bd.x + reliefRoof(w.x, kill2.w);
   float bot = bd.y - reliefFloor(w.x, kill2.w);
@@ -579,8 +592,24 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus, vec4 kill2){
   // and the mass stays legible rather than becoming a hole.
   float skyR = pow(sky, 1.70);
   float irr = roof ? (0.003 + 0.105 * skyR) : (0.010 + 0.990 * skyR);
+  // ...plus the water's own glow, which in a sealed reach is the only light
+  // this rock gets at all. Small, and it rides the cloud field, so it models
+  // the mass rather than lifting it: rock is still the frame's black.
+  irr += 0.15 * amb;
   vec3 lamp = lampLight(w, roof ? 1.0 : -1.0);
   vec3 c = body * V_ROCK * alb * exp(-into / 205.0) * irr;
+  // A ROOF SEEN FROM UNDER IT IS A SURFACE, NOT A SOLID. 'into' is distance
+  // behind the drawn silhouette, and at the top of frame that is a thousand
+  // units - so exp(-into/205) put the entire receding ceiling at two percent of
+  // its edge value. Painted white, the near rock took a fast frame from 40% of
+  // its pixels below sRGB 8 to 16%: the ceiling alone was twenty-four points of
+  // deleted geometry, and it is where the stalactite field and the bedding the
+  // review asked for actually live. Zero for the first 260 units, so the
+  // foreground buttress the review praised keeps its black edge, and carried by
+  // alb so what comes back is strata and joints rather than a grey plate.
+  float deep = sat((into - 55.0) / 380.0);
+  vec3 gr = body * V_ROCK * alb * 2.50 * deep * (0.10 + 0.90 * glowM);
+  c = sqrt(c * c + gr * gr);
   // A lamp arrives from one side, so a few tens of units of rock swallow it -
   // it must not reach as deep as the diffuse sky does, or the whole mass lifts.
   c += body * V_ROCK * alb * exp(-into / 62.0) * lamp * 2.6;
@@ -661,7 +690,8 @@ vec4 trenchRock(vec2 w, float sky, float open, float caus, vec4 kill2){
 // depthOf() off it paints a false lit surface at the top of the frame and a
 // false void across the bottom. The haze between eye and wall is real water.
 vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
-             float fog, vec3 haze, float brk){
+             float fog, vec3 haze, float cloud, float awN, float veilK,
+             float glowM, float brk){
   vec2 w = toLayer(uv, s);
   // A layer at apparent scale s covers 1/s times more world per pixel, so its
   // fetches want a coarser mip than the near plane by exactly that factor.
@@ -730,23 +760,84 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // rock at every distance.
   float syF = bedFrom(w.y + tiltF);
   float alb = 0.55 + 1.00 * hash11(floor(syF) * 1.37 + 0.5);
+  // VERTICAL STRIATION, and it is the one kind of structure that costs the
+  // frame no level: a joint is a shadow, so a wall that gains legibility this
+  // way gains blacks with it rather than spending them. Same sheared level-set
+  // and the same 186-unit spacing as joints() on the near rock, so one fracture
+  // set runs through all five planes and perspective shrinks it correctly.
+  // No fetch - a wave() shear instead - because this runs four times a pixel.
+  float jsx = (w.x + w.y * 0.22) / 186.0 + wave(w.y, 0.00130, 3.1 + seed) * 0.30;
+  float jh = hash11(floor(jsx) * 3.17 + 1.9);
+  float jnt = 0.0;
+  if(jh > 0.44){
+    float jd = abs(fract(jsx) - 0.5 + (jh - 0.5) * 0.42);
+    float jt = 0.020 + jh * 0.032;
+    jnt = exp(-(jd * jd) / (jt * jt));
+  }
+  alb *= 1.0 - 0.88 * jnt;
   vec3 rk = mix(ROCK_COOL, ROCK_WARM, 0.30);
   // Same response curve as the near rock and the medium - see irr in
   // trenchRock. These four layers fill the top and the bottom of every shallow
   // frame, so whatever they are worth IS the value structure of that frame, and
   // on a linear response they were landing within 14% of the water they sit in.
-  vec3 c = rk * V_ROCK * alb * (0.03 + 0.97 * exp(-intoS / 380.0))
-         * (0.015 + 0.985 * pow(sky, 1.70));
+  // The glow lights this wall too, and it is gated on THIS wall's darkness,
+  // not on the near plane's: a layer four deep is somewhere else in the world,
+  // and gating it by the light over the player's own head left whole receding
+  // planes black in frames whose foreground was lit.
+  float aw = awN;
+  // A DISTANT WALL DOES NOT HAVE AN INTERIOR. The body falloff was authored
+  // for the near plane, where 'into' is a few hundred units; at s = 0.58 a
+  // pixel two thousand units inside the mass reads intoS = 1160 and the term
+  // collapsed to four percent of its edge value. Painted white, these four
+  // layers took a fast frame from 43% of its pixels below sRGB 8 to 3% - they
+  // ARE the black slab the review found, and every one of them is a plane the
+  // level artist built. The floor is what the eye actually sees at that
+  // distance: a surface, not a solid. What it is worth still rides the cloud
+  // field through 'aw', so it models the plane rather than lifting it.
+  // Two responses, not one, and the split is the whole point. The SKY-lit part
+  // keeps the near plane's steep body falloff, so where the glow is absent this
+  // wall is exactly the near-black it was. The GLOW-lit part gets a far
+  // surface's floor instead: at s = 0.58 a pixel two thousand units inside the
+  // mass reads intoS = 1160 and a falloff authored for the near plane collapses
+  // it to four percent of its edge - which is why these four layers, painted
+  // white, took a fast frame from 43% of its pixels below sRGB 8 to 3%. They
+  // ARE the black slab the review found, and every one is a plane the level
+  // artist built. Folding the floor into both halves instead of one was a
+  // pedestal and measured like one: a tethered frame went milky, 14% blacks to
+  // 6%, because the sky term got the floor too.
+  float bodyF = 0.045 + 0.955 * exp(-intoS / 380.0);
+  vec3 c = rk * V_ROCK * alb
+         * (bodyF * (0.015 + 0.985 * pow(sky, 1.70))
+            + (0.46 + 0.54 * exp(-intoS / 380.0)) * 0.55 * aw);
   // The bedding seam, at distance. Four layers of legible strata is most of
   // what makes the far walls read as rock instead of as tinted fog, and it
   // costs nothing: the bed coordinate is already in hand.
   float bfF = fract(syF);
   float sw = max(0.11, 2.0 * pxL / BEDY);
   c += rk * V_ROCK * 0.50 * (0.11 / sw) * (1.0 - smoothstep(0.0, sw, min(bfF, 1.0 - bfF)))
-     * sky * exp(-intoS / 650.0);
+     * (sky + 1.10 * aw) * exp(-intoS / 650.0);
   // Aerial perspective is the fog toward the local haze, full stop. Stacking an
   // absorb() on top of it just annihilated the rock and fought the same effect.
-  vec3 o = mix(c, haze, fog);
+  // BACKSCATTER, and the reason a receding plane read as a black slab. The
+  // water between the eye and a wall four layers back is itself lit, so a
+  // distant surface cannot reach the black a near buttress does. Keyed to the
+  // LAYER'S OWN DISTANCE, which is what makes it a depth cue and not a lift:
+  // the near rock gets none of it, the open water gets none of it, and what is
+  // left is the separation between a black foreground wedge and the plane
+  // behind it. Measured, the top quarter of a fast frame is layer four and it
+  // was arriving at linear 0.002 against the 0.007 that encodes to sRGB 8.
+  vec3 o = mix(c, haze + uCMid * V_VEIL * pow(1.0 - s, 1.6) * veilK, fog);
+  // A FLOOR, NOT AN ADDITION, and this is the shape the exposure contract
+  // actually asks for. An additive lift moves a pixel already sitting a hair
+  // under sRGB 8 as easily as one sitting five times lower, so it strips a lit
+  // frame of three quarters of its blacks while a sealed frame - whose blacks
+  // are genuinely deep - barely moves. A floor inside a mask lifts a fixed
+  // FRACTION OF AREA instead, which is the only shape that fits both ends at
+  // once: 'fast' has to give up a third of its blacks and 'tethered' can afford
+  // four tenths, and a mask covering about that much of the frame does both.
+  // Soft-maxed rather than min'd, so the crossing is a curve and not a contour.
+  vec3 gl = uCMid * V_GLOW * pow(1.0 - s, 0.55) * glowM;
+  o = sqrt(o * o + gl * gl);
   o += uCHigh * V_FARRIM * sky * (roof ? 0.40 : 1.00) * (1.0 - fog)
      * (exp(-intoS / 20.0) + 0.20 * exp(-intoS / 46.0));
   return vec4(o, cov);
@@ -802,8 +893,72 @@ void main(){
   float causW = smoothstep(0.020, 0.095, sky);
   float caus = causW > 0.0 ? caustic(w) * causW : 0.0;
 
+  // ---------- the water's own light ----------
+  // Under a sealed reach of roof the downwelling term is worth 0.0009 linear -
+  // eight times under what encodes to sRGB 8 - so a frame with no fissure over
+  // it had no water in it at all: half of 'fast' measured below L8 on both
+  // seeds, and what the eye reads there is not darkness, it is absence. An
+  // abyss is not empty; it is lit from the inside.
+  //
+  // CLOUDS, WITH REAL WATER BETWEEN THEM. Thresholded rather than floored,
+  // because a floor under this is a pedestal and behaves like one. Thresholded,
+  // the same mean buys mottling: the troughs stay at the medium's own near-zero
+  // and are the frame's black point, the clouds carry value, and the boundary
+  // between them is a shape instead of a level. Coverage is the whole design
+  // parameter - it decides what FRACTION of a frame's blacks survive, and the
+  // two ends of the exposure contract only both fit if that fraction is about
+  // three fifths.
+  //
+  // Mid-heavy octaves - 600 and 300 world units, several per screen - because
+  // with the coarsest octave dominant a whole frame lands inside one trough,
+  // and the left third of 'fast' did, on both seeds.
+  float bioC = sat(0.5 + (dev(fl.g) * 0.55 + dev(fl.b) * 1.00
+                        + dev(fl.a) * 0.62) * GAIN);
+  float cloud = smoothstep(0.25, 0.68, bioC);
+  // Gated on darkness: it fades out wherever the sky already arrives, so it
+  // costs nothing in the lit halls, cannot raise p90, and never competes with
+  // the hero because it only exists in the parts of the frame he is not in.
+  // The gate has to run out where the WATER clears sRGB 8 on its own, near
+  // sky 0.33; cut short at 0.125 it left a band of trench too lit to glow and
+  // too dark to see, which is where the left third of 'fast' was living.
+  float unlit = 1.0 - sat(sky * 3.0);
+  // The mote's own lantern drowns it. Without this the haze fills the annulus
+  // the focal metric reads and the hero loses his surround contrast.
+  vec2 dpl = w - uLights[0].xy;
+  float own = dot(dpl, dpl) / (dot(dpl, dpl) + 72000.0);
+  float amb = cloud * cloud * unlit * unlit * own;
+  // What the far layers get. A PARTIAL floor under the cloud, because a far
+  // wall's own 'sky' in this file is a statistical stand-in that knows nothing
+  // about whether the trench overhead is actually open - so gating those four
+  // planes on the cloud alone left them at the mercy of where the noise fell,
+  // and the left half of a fast frame stayed a slab on both seeds. Gated
+  // instead on the REAL darkness over the player's head, which is the thing
+  // that decides whether a receding plane has any light on it at all.
+  float awN = (0.32 + 0.68 * cloud) * unlit * unlit;
+  // ...and the veil in front of them takes the same gate. Ungated it is the one
+  // term in the pass that lifts water which is ALREADY nearly at sRGB 8, and
+  // that is the whole population a lit frame's blacks are drawn from: a
+  // tethered frame lost three quarters of its blacks to this alone while a
+  // sealed one, whose blacks sit five times lower, barely moved.
+  float veilK = cloud * unlit;
+  // The mask the floor works inside. Its COVERAGE is the design parameter - it
+  // decides what fraction of a frame's blacks survive - so it is authored as a
+  // threshold on the cloud field and nothing else.
+  float glowM = cloud * (0.58 + 0.42 * unlit);
+
   // ---------- the water column ----------
   vec3 col = medium(w.y, sky);
+  vec3 gw = mix(mediumHue(depthOf(w.y)), BIO_MINT, 0.30) * V_ABYSS * cloud * unlit * own;
+  col = sqrt(col * col + gw * gw);
+
+  // Contact shadow. A wall shades the water in front of it, and that band is
+  // the one place the medium is allowed to be darker than the medium. It is
+  // also where a frame's blacks belong - packed against a silhouette, where
+  // they read as occlusion - rather than spread through the bulk, where they
+  // read as absence. Only inside the swimmable band: above the roofline the
+  // same expression would darken the far planes this pass just recovered.
+  float wallD = min(w.y - bdN.x, bdN.y - w.y);
+  col *= 1.0 - 0.62 * exp(-max(wallD, 0.0) / 110.0) * step(0.0, wallD);
 
   // Thermocline: real water is layered, and the layers show as faint
   // interfaces - but only where there is light to catch them.
@@ -821,13 +976,13 @@ void main(){
   // last. The contrast difference, not the parallax rate, is what makes air.
   vec3 haze = col;
   float brk = uKill2.w;
-  vec4 r4 = farWall(uv, 0.135, 4.3,  1060.0, 880.0, 980.0, 0.560, haze, brk);
+  vec4 r4 = farWall(uv, 0.135, 4.3,  1060.0, 880.0, 980.0, 0.560, haze, cloud, awN, veilK, glowM, brk);
   col = mix(col, r4.rgb, r4.a * uKill2.x);
-  vec4 r3 = farWall(uv, 0.225, 19.7,  980.0, 790.0, 900.0, 0.440, haze, brk);
+  vec4 r3 = farWall(uv, 0.225, 19.7,  980.0, 790.0, 900.0, 0.440, haze, cloud, awN, veilK, glowM, brk);
   col = mix(col, r3.rgb, r3.a * uKill2.x);
-  vec4 r2 = farWall(uv, 0.360, 37.1,  920.0, 730.0, 800.0, 0.300, haze, brk);
+  vec4 r2 = farWall(uv, 0.360, 37.1,  920.0, 730.0, 800.0, 0.300, haze, cloud, awN, veilK, glowM, brk);
   col = mix(col, r2.rgb, r2.a * uKill2.x);
-  vec4 r1 = farWall(uv, 0.580, 61.9,  880.0, 690.0, 720.0, 0.175, haze, brk);
+  vec4 r1 = farWall(uv, 0.580, 61.9,  880.0, 690.0, 720.0, 0.175, haze, cloud, awN, veilK, glowM, brk);
   col = mix(col, r1.rgb, r1.a * uKill2.x);
 
   // ---------- volumetric light from the surface far above ----------
@@ -907,7 +1062,7 @@ void main(){
   // through the clean water between sediment blooms, which is the difference
   // between a beam carrying dust and a beam painted on. Dropping the floor and
   // giving it back to the modulation holds the mean and deepens the gaps.
-  float dust = 0.15 + 1.18 * sat(0.5 + dev(N1(vec2(w.x * 0.00092 + flow.x * 0.05,
+  float dust = 0.19 + 1.19 * sat(0.5 + dev(N1(vec2(w.x * 0.00092 + flow.x * 0.05,
                                      w.y * 0.00165 - uTime * 0.028), 0.00165)) * 2.1);
   // A second, finer scale of the same thing. One octave of blotches reads as a
   // soft cloud; two read as sediment drifting through a beam. The amplitudes are
@@ -915,13 +1070,13 @@ void main(){
   // hottest BROAD pixel in the frame got, and it was hotter than anything the
   // eye is meant to be led to. Trimming the tops costs 5% of the mean and 20%
   // of the peak, which is the right trade every time.
-  dust *= 0.70 + 0.44 * sat(0.5 + dev(N1(vec2(w.x * 0.0041 - flow.y * 0.04,
+  dust *= 0.70 + 0.52 * sat(0.5 + dev(N1(vec2(w.x * 0.0041 - flow.y * 0.04,
                                      w.y * 0.0067 - uTime * 0.075), 0.0067)) * 2.0);
   vec3 beamHue = absorb(uCSurf, below * 0.55 + 300.0);
   // Extinction varies per shaft too: some reach the floor, some are spent
   // halfway down. Uniform reach is what makes a beam field look printed on.
   vec3 rays = beamHue * V_SHAFT * openShp * slot * ramp * shim * dust
-            * exp(-below / (1250.0 * (1.0 + vLive * 0.42)));
+            * exp(-below / (1300.0 * (1.0 + vLive * 0.42)));
   // The wide in-scatter halo either side of each beam.
   rays += uCHigh * V_SHAFT * 0.004 * openSft * ramp * exp(-below / 2400.0);
   // Caustic banding inside the beam - the shimmer that says 'moving water'.
@@ -934,7 +1089,7 @@ void main(){
   // The constant was 0.30: every open throat glowed that much whether or not
   // a shaft was coming out of it, which is a lamp in the ceiling rather than
   // in-scatter in a beam. Most of it now rides the slot that earns it.
-  rays += absorb(uCSurf, 240.0) * V_SHAFT * 0.21 * openShp * (0.14 + 0.86 * slot)
+  rays += absorb(uCSurf, 240.0) * V_SHAFT * 0.21 * openShp * (0.17 + 0.85 * slot)
         * exp(-below / 380.0) * smoothstep(0.0, 55.0, below);
   rays *= uKill.y;
   col += rays;
@@ -990,15 +1145,15 @@ void main(){
   // opening frame's mean and it lifted the frame's floor as much as its
   // highlights - a haze, not a column. The throat below is untouched, so what
   // is left is the hot part.
-  col += absorb(uCSurf, 1400.0) * V_SILT * 1.15 * vent
+  col += absorb(uCSurf, 1400.0) * V_SILT * 1.55 * vent
        * (0.45 + 1.5 * uDraft) * (0.20 + 0.80 * sat(sky * 3.0));
-  col += uCSilt * V_SILT * 0.60 * vent;
+  col += uCSilt * V_SILT * 0.82 * vent;
   col += vec3(1.00, 0.34, 0.085) * V_VENT * ventHot * (0.30 + 0.85 * uDraft);
 
   // ---------- the rock the physics uses ----------
   // Warped inside a vent plume: heat shimmer bending the silhouette behind it.
   vec2 wr = w + vec2(sin(w.y * 0.021 + uTime * 1.6) * vent * 12.0, vent * 8.0);
-  vec4 r0 = trenchRock(wr, sky, openSft, caus, uKill2);
+  vec4 r0 = trenchRock(wr, sky, amb, glowM, openSft, caus, uKill2);
   col = mix(col, r0.rgb, r0.a);
   col += rays * 0.25 * r0.a;   // the beam still reads across the rock it lands on
 
@@ -1012,7 +1167,7 @@ void main(){
   vec4 sn = N(vec2(w.x * 0.00022 - uTime * 0.0035, w.y * 0.00052 + uTime * 0.0018), 0.00052);
   float billow = sat(0.5 + (dev(sn.r) * 1.00 + dev(sn.g) * 0.50 + dev(sn.b) * 0.28) * 2.1);
   float dens = above > 0.0 ? exp(-above / (26.0 + 155.0 * billow * billow)) : 0.0;
-  col += uCSilt * V_SILT * 0.62 * dens * (0.25 + 0.95 * billow)
+  col += uCSilt * V_SILT * 0.84 * dens * (0.25 + 0.95 * billow)
        * pow(sat(sky * 2.4), 1.4) * (1.0 - r0.a) * uKill2.y;
 
   // ---------- marine snow, four depths ----------
@@ -1098,6 +1253,57 @@ void main(){
   // radii - which is also why the two share their noise fields and their
   // brokenness term rather than being authored twice.
   float dxh = w.x - uHushX;
+
+  // THE WALL IS OFF SCREEN, AND WHERE IT IS, IS LEVEL DESIGN. world.js holds
+  // uHushX 1750-2900 units behind the player while the left edge of frame is
+  // only ~700-1200 behind him: measured across the named scenes, the left edge
+  // sits at dxh 2000-2540 through ordinary play, so the annihilation front is
+  // never in shot and no honest term in this file can put it there.
+  //
+  // Its INFLUENCE is another matter, and that is this file's. Absorption,
+  // graded along x and anchored on the real uHushX: the light goes first, then
+  // the colour. It MULTIPLIES the finished frame rather than sitting in front
+  // of it, so it takes the marine snow and the wall striations with it as it
+  // advances - which is the whole difference between a thing and a vignette.
+  // And the reach lengthens as the run does, so it is a hint at 25m and has
+  // taken the left of frame by 450m.
+  float hushK = uKill.w * pow(sat(uDiff * 4.0), 0.70);
+  // Ragged, and fetch-free: this runs on every pixel of every frame, not just
+  // the ones near the wall, so it cannot afford the noise tap the detailed
+  // block below uses. Two incommensurate sinusoids have a known range and cost
+  // less than a texture read.
+  float reach = 800.0 + 1700.0 * hushK
+              + wave(w.y, 0.00058, 0.9) * 210.0
+              + pow(sat(0.5 + wave(w.y, 0.00270, 5.1 + uTime * 0.30) * 0.55), 3.0) * 320.0;
+  float ed = dxh - reach;
+  // Tapered off BEHIND the front, where the block below already owns the
+  // crush: stacked, the two took the Hush frame to 38% below sRGB 8 and its
+  // spread from 0.221 to 0.173 - a wall of dark with nothing in it.
+  float drain = uKill.w * exp(-max(ed, 0.0) / 1150.0)
+              * smoothstep(-460.0, -40.0, ed);
+  // The leading edge is a RIPPLE in the medium, not a line drawn across it: the
+  // water bends before it goes. A review found no consistent value break at any
+  // left edge in the set and called the antagonist absent from its own key art;
+  // a gradient has no edge at any point along it, which is what a gradient is.
+  float lead = uKill.w * exp(-(ed * ed) / 26000.0);
+  float rip = wave(w.y + uTime * 26.0, 0.0165, dxh * 0.0022);
+  drain = sat(drain * (1.0 + 0.44 * lead * rip));
+  {
+    float lumD = dot(col, vec3(0.25, 0.62, 0.13));
+    col = mix(col, vec3(lumD), sat(0.66 * drain + 0.34 * lead));
+    // Takes the midtone, not the cores. A flat multiply here crushed the Hush
+    // frame's own highlights and its p95-p20 spread fell from 0.221 to 0.173:
+    // the wall of dark has to eat the water and the striations, which is where
+    // the dread is, and leave the few hot things in frame to be eaten last.
+    float keep = sat(lumD * 2.2);
+    col *= 1.0 - 0.66 * drain * (1.0 - 0.74 * keep);
+    // What the edge itself is worth. Small: the wall is a mass of dark and only
+    // its seam is allowed to be bright, and not brighter than the mote.
+    // A MASS OF DARK, not a violet fog. At 0.011 this alone laid a 570-pixel
+    // lilac band across the deep frames and the antagonist read as weather.
+    col += uCHushGlow * V_HUSH * 0.0029 * lead * (0.45 + 0.55 * sat(rip + 0.5));
+  }
+
   if(dxh < 3000.0 && uKill.w > 0.5){
     // A torn frontier, not a gradient: three scales of writhe along y, plus
     // tongues of nothing licking forward.
@@ -1123,9 +1329,7 @@ void main(){
     // lobes crossed two thirds of the frame, and the break landed on lit water
     // at the right edge. This front is a different phenomenon at a different
     // scale and it gets its own raggedness, which also bounds it.
-    float dReach = 1060.0 + wave(w.y, 0.00058, 0.9) * 210.0
-                 + pow(sat(0.5 + dev(N1(vec2(w.y * 0.0027 + 5.1, uTime * 0.017), 0.0027)) * 2.3), 3.0) * 320.0;
-    float ed = dxh - dReach;
+    float dReach = reach;
 
     // Behind the front the water is unmade: it goes still, then colourless,
     // then gone. Desaturating before crushing is what makes it read as loss.
@@ -1142,7 +1346,7 @@ void main(){
     // ramp continues to the wall, which is what gives the dark mass depth
     // instead of making it a flat cutout.
     float drained = 1.0 - smoothstep(-130.0, 25.0, ed);
-    float still = drained * (0.56 + 0.44 * (1.0 - smoothstep(0.0, dReach, max(e, 0.0))));
+    float still = drained * (0.56 + 0.44 * (1.0 - smoothstep(0.0, max(dReach, 1.0), max(e, 0.0))));
     float lum0 = dot(col, vec3(0.25, 0.62, 0.13));
     col = mix(col, mix(col, vec3(lum0), 0.72) * 0.10, still * 0.94);
 
