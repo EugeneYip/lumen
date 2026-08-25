@@ -541,9 +541,16 @@ export class Scene {
     }
     const wroot = (f) => lerp(d.w * 5.6, d.w * 4.1, f)
       * (0.86 + 0.30 * noise1(f * 3.1 + sid * 0.05));
+    // ...and "below the floor where nothing can see it" was wishful: the scene
+    // has no depth buffer, so a cap under the band profile is still painted over
+    // the rock. Same fade as the spire root, over the same band, for the same
+    // reason - the holdfast lobes below carry the mass, so what is lost here is
+    // only the ruled edge. bur below the floor against d.h/11 above it.
+    const fbk = bur / (bur + d.h * 0.091 + 1);
     this.rDark.stroke(rt, {
       width: (f) => wFloor(wroot(f)), color: c0,
-      alpha: (f) => aFloor(wroot(f), 0.97 * opa), falloff: 1.05,
+      alpha: (f) => aFloor(wroot(f), 0.97 * opa * smoothstep(clamp01(f / fbk))),
+      falloff: 1.05,
     });
 
     const side = hash2(sid, 91) > 0.5 ? 1 : -1;
@@ -742,6 +749,20 @@ export class Scene {
         pts[s * 2 + 1] = sy + dir * (hq * f - wq * 0.34 * Math.pow(1 - f, 3));
       }
       const emerge = (f) => clamp01(f * 7);
+      // The buried band, and the same defect as the anemone column one tier up.
+      // A column's first sample is a butt cap, and putting it under the band
+      // profile does not hide it - there is no depth buffer, so the scene paints
+      // this over the lit rock the background shader already drew. The cap was a
+      // ruled horizontal edge as wide as the column, sitting on the floor. Only
+      // q === 0 had a skirt over it, so every SUB-column ended in a visible box,
+      // which is the "hard-edged dark quads at reed bases" finding: proved in
+      // this frame by zeroing this alpha, which removed two of them. Fade the
+      // body in across the band that is under the rock and the column ends by
+      // dissolving into the floor rather than stopping at a line. fb is where
+      // the axis actually crosses the profile, so the ramp is spent entirely
+      // below it and the column is at full strength the moment it emerges.
+      const fb = clamp(wq * 0.34 / Math.max(1, hq), 0.02, 0.45);
+      const root = (f) => smoothstep(clamp01(f / fb));
       // Ridged width, two octaves: rock has facets and steps, and one smooth
       // low-frequency wobble on a cone still measures as a constant-width
       // stroke. The fine octave is what puts a burr on the silhouette.
@@ -753,7 +774,7 @@ export class Scene {
       // the tip a hairline, and a hairline is what made frame 1 differ.
       this.rDark.stroke(pts, {
         width: (f) => wFloor(wfn(f)), color: c0,
-        alpha: (f) => aFloor(wfn(f), 0.985 * opa), falloff: 0.95,
+        alpha: (f) => aFloor(wfn(f), 0.985 * opa * root(f)), falloff: 0.95,
       });
 
       if (blunt) {
@@ -812,10 +833,15 @@ export class Scene {
         });
       }
 
+      // Skirt: without it the spire floats instead of growing out of the rock.
+      // EVERY column gets one, not just the first - a sub-column had neither
+      // skirt nor rubble, so its joint was the bare ribbon cap described above.
+      // L_ROCK's edge is torn by its own noise field, which is what makes this a
+      // flare of broken rock rather than a second drawn shape.
+      this.occl.push(sx, sy + dir * wq * 0.12, wq * 2.8, wq * 1.0,
+        (hash2(sid, q * 9 + 17) - 0.5) * 0.5, c0[0], c0[1], c0[2], 0.55 * opa, L_ROCK);
+
       if (first) {
-        // Skirt: without it the spire floats instead of growing out of the rock.
-        this.occl.push(sx, sy + dir * wq * 0.12, wq * 2.8, wq * 1.0, 0,
-          c0[0], c0[1], c0[2], 0.55 * opa, L_ROCK);
         // Rubble. Three blocks of unequal size, because a clean joint between a
         // column and the floor is the giveaway that both were drawn, not grown -
         // each one sitting on the floor under itself, not under the column.
@@ -855,20 +881,50 @@ export class Scene {
     const breathe = 0.55 + 0.45 * Math.sin(t * 1.15 + d.phase);
     const k = (0.40 + breathe * 0.62) * (1 - d.depth * 0.75) * dim * (1 - e);
 
-    // Stubby column, dark, so the thing sits on rock instead of hovering. World
-    // gen places these 8 units clear of the band profile, so the column's own
-    // butt cap floated over the floor; it now starts *inside* the rock at the
-    // floor height under its own x.
+    // The column, and the reason it is no longer a ribbon.
+    //
+    // A ribbon's cross-section is exp(-x^2*falloff) across its own half-width,
+    // so at the falloff that reads as SOLID - near 1 - the value at the ribbon's
+    // own edge is still exp(-1) = 0.37 of its peak, and both ends are butt caps.
+    // A body stroked along a SHORT medial axis is therefore not a body at all:
+    // it is a filled quadrilateral with four hard steps around it. This column
+    // was 1.6r wide over a 1.1r axis at falloff 1.0 and alpha 0.90, and a colony
+    // is four to nine of them clumped on a slope, so their union was the hard
+    // dark trapezoid that sat under every anemone in the frame. Attributed by
+    // elimination rather than by argument: ?noSprites=1 left it, ?noRibbons=1
+    // removed it, and zeroing this one alpha removed it on its own.
+    //
+    // That property has now been paid for three times here - it is also why the
+    // mote's rim arcs once read as a bracket - so the rule is absolute: a ribbon
+    // cannot draw a soft edge at any tuning, because raising the falloff far
+    // enough to fade the edge turns the cross-section into a filament. Anything
+    // that must fade to nothing is a SPRITE, which reaches zero inside its quad.
+    //
+    // So the trunk is VOLUME. Its profile is a chord integral - flat through the
+    // middle, rolled off by a knee, exactly zero at 0.74 of the quad - which is
+    // a solid mass with a rim rather than a gaussian smear, and it is the one
+    // profile in the kit that can be an opaque body AND end in nothing. Two of
+    // them offset along the axis give a taper no single ellipse has. The foot is
+    // L_ROCK, whose silhouette is eroded by its own noise field, so where the
+    // animal grips the rock the edge is torn rather than ruled.
     depthFade(PAL.voidDeep, d.depth * 0.4, c0);
-    const cp = this._p1(2);
     const fy = d.up ? world.bandBot(d.x) : world.bandTop(d.x);
-    cp[0] = d.x; cp[1] = fy - dir * d.r * 0.35;
-    cp[2] = d.x + d.r * 0.08; cp[3] = d.y + dir * d.r * 0.72;
-    const wcol = (f) => lerp(d.r * 1.6, d.r * 0.95, f);
-    this.rDark.stroke(cp, {
-      width: (f) => wFloor(wcol(f)), color: c0,
-      alpha: (f) => aFloor(wcol(f), 0.90), falloff: 1.0,
-    });
+    const hc = hash2(sid, 71), hc2 = hash2(sid, 73);
+    const rr = d.r;
+    // Proportion carries the form, and it has to, because LIGHT cannot be spent
+    // here. A lit flank on this trunk was built and measured three ways - at
+    // gain 0.32, at 0.20, and paid for by trimming the wash below - and every
+    // one of them moved seed 7 / tethered from rank 7 to rank 8. The colony's
+    // block sits within a hair of the hero's, so any light added beside it wins
+    // the block and the protagonist loses a place. Scenery does not get to buy
+    // form out of the hero's salience: the trunk is narrow, the foot is wide,
+    // and that silhouette is free.
+    this.occl.push(d.x + (hc - 0.5) * rr * 0.24, fy + dir * rr * 0.02,
+      rr * 2.25, rr * 0.60, (hc2 - 0.5) * 0.42, c0[0], c0[1], c0[2], 0.76, L_ROCK);
+    this.occl.push(d.x, fy + dir * rr * 0.30, rr * 1.70, rr * 1.50,
+      (hc - 0.5) * 0.26, c0[0], c0[1], c0[2], 0.90, S.VOLUME);
+    this.occl.push(d.x + rr * 0.09, d.y + dir * rr * 0.34, rr * 1.14, rr * 1.24,
+      (hc2 - 0.5) * -0.30, c0[0], c0[1], c0[2], 0.88, S.VOLUME);
 
     const arms = 11;
     const base0 = Math.atan2(dir, 0);
@@ -922,6 +978,12 @@ export class Scene {
     // rather than the weather. d.r*5.4 at 0.150 was 130 world units of even
     // mid-tone over the whole colony - the single most expensive shape a block
     // of L^2 can contain, and the thing that read as gas between the arms.
+    // Paying for the trunk's flank out of this was tried and is NOT what the
+    // numbers wanted: 0.26 to 0.225 did not recover the rank slot the flank cost
+    // and it took seed 7 / fast p99 from 0.2867 to 0.2846, so this wash is
+    // inside the frame's top 1% and is load-bearing for "there must be real
+    // highlights". The flank was dropped instead. Do not trim this to buy
+    // something else without re-reading p99 on fast.
     this._emits(d.x, d.y + dir * d.r * 0.35, d.r * 2.85, base, k * 0.26, S.GLOW, CEIL_PROP);
     this._emits(d.x, d.y + dir * d.r * 0.55, Math.min(d.r * 1.30, CORE_PX * 2.0 / this._ppu),
       tip, k * 2.20, S.GLOW, CEIL_PROP);
