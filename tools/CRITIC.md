@@ -5,10 +5,32 @@ blind pairs, and hands the pair images to a critic that has never seen either
 build and does not know which side is which.
 
 ## Producing the pairs
+
+**Capture by DEPTH, not by named scene.** `shoot.mjs`'s own header says why and
+AI_HANDOFF §5 repeats it: named scenes are sought by predicate, so as the physics
+changes they land at different distances in each build, and the pair then
+compares *content* rather than *rendering*. Depths pin both builds to the same
+place in the world. Named scenes are still the right tool for `check.mjs`, which
+is asking a different question.
+
 ```bash
-node tools/shoot.mjs   --out shots/iterN --scenes title,tethered,launch,fast,hazardNear,hushNear,dead --w 1600 --h 900 --seed 7
+# one capture per seed, same depths and the same --tag in BOTH builds
+for s in 7 3; do
+  node tools/shoot.mjs --out shots/iterN --depths 20,120,400,900 --seed $s --tag s$s --w 1600 --h 900
+done
 node tools/montage.mjs pair --a shots/iterPREV --b shots/iterN --out shots/cmpN --width 2400
 ```
+
+Capture the "before" build from a **detached worktree at the baseline commit**
+(`git worktree add --detach <tmp> <sha>`, symlink `node_modules`), not from the
+working tree. Agents edit the tree while a round is being prepared, and a
+baseline captured from under them is not a baseline.
+
+`montage.mjs` pairs by tag and hard-fails on duplicate tags, partial coverage,
+and byte-identical frames within one build. Those checks exist because a
+filename-tagging regex once collapsed five distinct frames to one key and an
+entire review round was spent reviewing the same image four times — see
+AI_HANDOFF §7. If it refuses to pair, believe it.
 `shots/cmpN/pair-*.png` are the blind composites (LEFT | RIGHT, side randomised
 per pair). `shots/cmpN/key.json` holds the mapping — **the critic must never be
 given it, or the directory listing, before it answers.** Pass explicit file paths
