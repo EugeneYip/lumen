@@ -75,6 +75,7 @@ uniform float uDraft;
 uniform float uDiff;
 uniform vec4  uKill;         // debug: x snow, y rays, z vents, w hush (1 = on)
 uniform vec4  uKill2;        // debug: x far walls, y silt, z grain, w silhouette
+uniform vec4  uKill3;        // debug: x lamp on rock, y ledges, z dip/faults, w talus
 uniform vec4  uLights[${MAXL}];   // xy world pos, z strength, w warmth
 
 // Chromaticities: peak channel is 1.0, brightness comes from the V_ constants.
@@ -295,24 +296,79 @@ vec3 absorb(vec3 c, float dist){
 // four unrelated noise fields that happen to be stacked.
 float bedTilt(float wx, float px){ return (N1z(vec2(wx * 0.0000745, 0.41), 0.0000745, px) - 0.5) * 1750.0; }
 
-// Beds are NOT of constant thickness. A perfectly even 135-unit stack reads as
-// ruled paper, which is the single loudest regularity a strata field can have.
-// Warping the bedding COORDINATE - rather than displacing the seams off a
-// regular grid - keeps every pixel on a bed agreeing which bed it is on, which
-// displacement does not: displace it and the mapping folds and pinches. The
-// amplitude is chosen against the analytic slope below so local thickness runs
-// 102-201 units and the sequence can never invert.
-float bedFrom(float y){ return y / BEDY + wave(y, 0.00260, 1.7) * 0.62; }
-float bedSlope(float y){
-  float f = 0.00260;
-  return 1.0 / BEDY + 0.62 * f * (0.62 * cos(y * f + 1.7) + 0.880 * cos(y * f * 2.317 + 4.59));
+// ------------------------------------------------------------ fault blocks --
+// A ROCK MASS IS NOT ONE DECK OF LAYERS. A blind review reading this frame
+// cold: 'the strata are perfectly horizontal and perfectly parallel across
+// every landform in the frame, at constant band thickness. Real rock dips,
+// faults and offsets.' It was right, and the cause was structural rather than a
+// matter of tuning: one bedding grid served the near rock and all four far
+// walls, tilted only by bedTilt above - whose measured amplitude is about 70
+// world units over a 3400-unit wavelength, which is two and a half degrees.
+// Two and a half degrees is level.
+//
+// So x is partitioned into fault blocks and each block gets its own dip, its
+// own bed thickness sequence and its own throw. The partition is a level set of
+// a SHEARED and wandering x - the same construction joints() uses - so the
+// fault planes lean about eighty degrees and are irregularly spaced instead of
+// being a picket fence of verticals.
+const float FAULTW = 1180.0;   // mean fault block width: ~1.6 blocks a screen
+float faultShear(float wy){ return wave(wy, 0.00042, 1.1) * 0.34; }
+
+// Per-block character, off one hash: x = dip tangent (tan 5-20 degrees, either
+// way), y = bed thickness multiplier, z = throw in beds, w = the block's own
+// warp phase, which is what makes its thickness SEQUENCE differ from its
+// neighbour's rather than only its mean. The throw is never near zero: layers
+// that happen to line up across a break are the one thing a fault must not do.
+vec4 bodyOf(float fi){
+  float h = hash11(fi * 1.731 + 8.3);
+  float sg = fract(h * 41.17) < 0.5 ? -1.0 : 1.0;
+  return vec4(sg * (0.087 + 0.277 * fract(h * 7.913)),
+              0.86 + 0.34 * h,
+              sg * (0.17 + 0.42 * fract(h * 17.31)),
+              fract(h * 3.137));
 }
-// Snap a profile height onto the bedding grid: a bench forms where a resistant
-// bed outcrops, not at an arbitrary height. One Newton step inverts the warp,
-// and an error of a few units is invisible against a 135-unit bed.
-float snapBed(float y, float tilt){
-  float u = bedFrom(y + tilt);
-  return y + (floor(u) + 0.5 - u) / bedSlope(y + tilt);
+
+// The bedding coordinate inside a block. Beds are NOT of constant thickness: a
+// perfectly even 135-unit stack reads as ruled paper, which is the loudest
+// regularity a strata field can have. Warping the bedding COORDINATE rather
+// than displacing seams off a regular grid keeps every pixel on a bed agreeing
+// which bed it is on - displace it instead and the mapping folds and pinches.
+// With the per-block phase and multiplier, local thickness runs 79-322 units
+// AND differs between neighbouring blocks at the same height, while the
+// analytic slope below can never reach zero, so the sequence cannot invert.
+float bedU(float y, vec4 bp){
+  return y / (BEDY * bp.y) + wave(y, 0.00260, 1.7 + bp.w * 6.283) * 0.62;
+}
+float bedSlopeU(float y, vec4 bp){
+  float f = 0.00260, ph = 1.7 + bp.w * 6.283;
+  return 1.0 / (BEDY * bp.y)
+       + 0.62 * f * (0.62 * cos(y * f + ph) + 0.880 * cos(y * f * 2.317 + ph * 2.7));
+}
+
+// The bedding frame at a point: which block it is in, what its beds are doing,
+// and how far it is from the fault plane bounding it - in block units, so
+// x FAULTW for world units. The dip is anchored on the block's OWN axis, so
+// twenty degrees is worth at most half a block width of offset; a global tilt
+// term cannot be given a real angle because its offset runs away with x.
+float bedFrame(vec2 w, float px, out vec4 bp, out float tilt, out float fd){
+  float sh = faultShear(w.y);
+  float fu = (w.x + w.y * 0.19) / FAULTW + sh;
+  float fi = floor(fu);
+  bp = bodyOf(fi);
+  fd = min(fract(fu), 1.0 - fract(fu));
+  float xc = (fi + 0.5 - sh) * FAULTW - w.y * 0.19;
+  tilt = bp.x * (w.x - xc) * uKill3.z + bedTilt(w.x, px);
+  return bedU(w.y + tilt, bp) + bp.z * uKill3.z;
+}
+
+// Snap a profile height onto the bedding grid of the block it stands in: a
+// bench forms where a resistant bed outcrops, not at an arbitrary height. One
+// Newton step inverts the warp, and an error of a few units is invisible
+// against a bed a hundred and more units thick.
+float snapBedB(float y, float tilt, vec4 bp){
+  float yy = y + tilt;
+  float u = bedU(yy, bp);
+  return y + (floor(u) + 0.5 - u) / bedSlopeU(yy, bp);
 }
 
 // Sediment grain, four world-space octaves off two fetches. The finest is faded
@@ -350,14 +406,25 @@ float joints(vec2 w){
 // the eye actually reads strata from, and the only ones still legible in a mass
 // that is - correctly - near black.
 float strata(vec2 w, float det, out float fine, out float seam, out vec2 bedf){
-  float sy = bedFrom(w.y + bedTilt(w.x, pxWorld()));
-  float bi = floor(sy), bf = fract(sy);
+  vec4 bp; float tilt, fd;
+  float sy = bedFrame(w, pxWorld(), bp, tilt, fd);
+  // Bed identity is read off the UNTHROWN index, so one physical bed keeps its
+  // shade on both sides of a fault and the break reads as a known layer that
+  // has been displaced rather than as two unrelated stacks butted together.
+  // That is the cue the eye actually uses to see a fault at all.
+  float bi = floor(sy - bp.z * uKill3.z), bf = fract(sy);
   float bh  = hash11(bi * 1.37 + 0.5);      // bed albedo
   float chr = hash11(bi * 2.71 + 9.1);      // bed character: shale or sandstone
   float part = 1.0 - smoothstep(0.0, 0.030 + 0.055 * chr, bf);
   float cap  = smoothstep(0.66, 0.80, bf) * (1.0 - smoothstep(0.90, 1.00, bf));
   seam = max(part, cap * 0.85) * det;
-  float jnt = joints(w) * det;
+  // The fault plane itself: a zone of crushed rock a few tens of units wide.
+  // Folded into the joint channel rather than given its own, because a fault
+  // interrupts the rim, the seams and the grain in exactly the way a joint
+  // does, and every consumer of that channel already knows how to be broken.
+  float fw = 0.0055 + 0.0105 * bp.w;
+  float flt = exp(-(fd * fd) / (fw * fw)) * uKill3.z;
+  float jnt = max(joints(w), flt * 0.92) * det;
   bedf = vec2(cap * det - part * det, jnt);
   float g = grain(w) * det;
   fine = sat(0.5 + g * 0.42);
@@ -411,7 +478,30 @@ float blocks(float wx, float cell, float amp, float sd){
   // measured the silhouette relief alone at 1.2 points of a frame's blacks.
   // The mean and the maximum now match the distribution this replaced exactly;
   // only the shape of the step is new, which is the part that was the defect.
-  return amp * 0.763 * mix(q0, q1, smoothstep(e - ew, e + ew, f));
+  float tread = mix(q0, q1, smoothstep(e - ew, e + ew, f));
+  // NO RIGHT ANGLES LEFT. A vertical drop that ends in a square corner is the
+  // tell of a drawn shape: real rock sheds, the debris piles against the foot
+  // of the face at its angle of repose, and the brow above is left overhanging
+  // where the joint behind it has opened. Two wedges, both strictly one-signed
+  // and both dying inside the cell - a feature wider than its own cell is how
+  // this file once filled a frame with axis-aligned rectangles.
+  //
+  // The talus is tangent at its toe (exponent > 1) and at full height where it
+  // meets the riser, so it converts the corner into a concave ramp without
+  // deleting the drop: at 0.52 of the step, half the riser survives as a face
+  // with a pile of rubble under it, which is the read.
+  float dh = q1 - q0;
+  float lo = dh > 0.0 ? (e - f) : (f - e);          // > 0 on the low side
+  float lw = min(0.34, (dh > 0.0 ? e : 1.0 - e) * 0.92);
+  float hw = min(0.13, (dh > 0.0 ? 1.0 - e : e) * 0.92);
+  float wedge = 0.52 * pow(sat(1.0 - max(lo, 0.0) / lw), 1.7)
+              + 0.20 * pow(sat(1.0 - max(-lo, 0.0) / hw), 2.2);
+  // Renormalised, as the step itself was: the mean of the step alone is 1.31 of
+  // amp and the two wedges add 4.9% of that. Relief is one-signed, so an
+  // unrenormalised talus is 5% more rock in every frame, and a kill-switch
+  // bisect once measured the silhouette relief alone at 1.2 points of a frame's
+  // blacks. The shape of the corner is new; the amount of rock is not.
+  return amp * 0.727 * (tread + abs(dh) * wedge * uKill3.w);
 }
 
 // A dome with tangential edges: exponent > 1 sends the slope to zero where the
@@ -502,6 +592,59 @@ float reliefFloor(float wx, float det){
   return 84.0 * (1.0 - exp(-r / 84.0));
 }
 
+// ------------------------------------------------------------- top surfaces --
+// A BENCH IS A TOP SURFACE, and nothing in this frame had one. Of the three
+// things a blind review asked the rock for - 'no top surface, no dip angle, no
+// fault break' - this is the one that decides whether a mass reads as a solid
+// or as a plane with texture on it, because it is the only one that says the
+// object has a second face at all.
+//
+// So stretches of the drawn floor are snapped DEAD FLAT: a resistant bed
+// outcrops, the softer rock above it is stripped, and what is left is a tread
+// with a riser at each end. 'flat' is exported because a flat stretch shaded
+// like its own face is still a cutout - the shading has to light it as a plane
+// that faces up. The riser is deliberately abrupt, about eighteen units of x,
+// which is the corner blocks() then sheds talus against.
+float benchFlat(float wx, out float treadH){
+  float u = wx / 545.0;
+  float i = floor(u), f = fract(u);
+  float h = hash11(i * 5.113 + 21.7);
+  treadH = 16.0 + 58.0 * fract(h * 7.771);
+  if(h < 0.46) return 0.0;
+  float c  = 0.20 + fract(h * 13.71) * 0.34;
+  float e1 = min(c + 0.18 + fract(h * 51.31) * 0.32, 0.96);
+  return smoothstep(c - 0.033, c + 0.033, f)
+       * (1.0 - smoothstep(e1 - 0.033, e1 + 0.033, f));
+}
+
+// The drawn floor. One function, because the silt that hugs the floor and the
+// rock that IS the floor have to agree about where it is.
+//
+// Snapping the RELIEF flat is not enough and was the first attempt: the
+// collision line underneath still swings, so a 'flat' tread inherited its
+// curve. An absolute height read off the bench cell's own centre was the second,
+// and it was worse in a more interesting way - it invented 300-unit plateaus
+// wherever the collision line swung inside a cell, and the ledges it did draw
+// came out dead level with ruler-straight leading edges. That is a trade of one
+// regularity for another: the complaint being answered here is that everything
+// in the frame was horizontal and parallel, and horizontal parallel LEDGES are
+// no better than horizontal parallel bands.
+//
+// A BENCH LIES ALONG A BED. Snapping to the bedding grid makes the tread dip
+// with the block it belongs to, which is the whole point, and it bounds the
+// deviation to half a bed so no plateau can appear. Then clamped against the
+// collision line, because relief here is strictly one-signed: drawn rock may be
+// thicker than the rock the physics uses, never thinner. A frame that draws
+// rock as water hands the player an invisible wall, and that is the one lie
+// this file must not tell.
+float drawnBot(float wx, float bandY, float det, out float fl, out float th){
+  fl = benchFlat(wx, th) * det * uKill3.y;
+  float bro = bandY - reliefFloor(wx, det);
+  vec4 bp; float tilt, fd;
+  bedFrame(vec2(wx, bro), pxWorld(), bp, tilt, fd);
+  return min(mix(bro, snapBedB(bro, tilt, bp) - th * 0.35, fl * 0.90), bandY);
+}
+
 // The mote and the nearest anchors, as light landing on a surface rather than
 // as haze in front of one. They were only ever in-scattering into the water, so
 // an anchor bulb at linear 2.4 could sit sixty units off a wall and leave that
@@ -522,10 +665,26 @@ vec3 lampLight(vec2 w, float nrm){
     float r2 = dot(dl, dl);
     float nd = mix(1.0, sat(dl.y * nrm * inversesqrt(max(r2, 1.0))), abs(nrm));
     float core = mix(2600.0, 26000.0, Lg.w);
+    // TWO LOBES, AND THE WIDE ONE IS THE WHOLE FIX. Measured with bgNoLamp on
+    // the frame this replaces: the mote's light on the rock beside it was 0.00
+    // code values at three of the four capture distances, and the only nonzero
+    // deltas anywhere in frame came from ANCHOR lamps, which get a ten times
+    // wider core out of the same mix. The reason is geometric and was invisible
+    // from the code: this pool's half-value radius is 51 world units, and the
+    // nearest rock to a swimming mote measures 272-450. It never arrived. A
+    // bioluminescent creature that illuminates nothing is not a light source.
+    //
+    // The tight lobe stays exactly as it was, because it is what makes the near
+    // field a POOL rather than a wash and it is the only term with any shape in
+    // it. The wide lobe carries the same light as far as the wall: squared, so
+    // it falls off faster than inverse square - absorption, not just spreading -
+    // which keeps it from becoming an ambient lift on the far side of the trench
+    // where it measures 0.004 of peak and can be ignored.
+    float wide = 92000.0 / (r2 + 92000.0);
     s += mix(vec3(0.30, 0.72, 1.00), vec3(1.00, 0.56, 0.20), Lg.w)
-       * Lg.z * nd * core / (r2 + core);
+       * Lg.z * nd * (core / (r2 + core) + 0.46 * wide * wide);
   }
-  return s;
+  return s * uKill3.x;
 }
 
 // ---------------------------------------------------------------- lighting --
@@ -587,7 +746,8 @@ vec3 medium(float wy, float sky){
 vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float caus, vec4 kill2){
   vec2 bd = bandAt(w.x);
   float top = bd.x + reliefRoof(w.x, kill2.w);
-  float bot = bd.y - reliefFloor(w.x, kill2.w);
+  float fl, th;
+  float bot = drawnBot(w.x, bd.y, kill2.w, fl, th);
   float soft = uViewSize.y * 0.0028;
   float dTop = top - w.y, dBot = w.y - bot;
   float cTop = sat(dTop / soft), cBot = sat(dBot / soft);
@@ -599,6 +759,19 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
 
   float fine, seam; vec2 bedf;
   float alb = strata(w, kill2.z, fine, seam, bedf);
+
+  // How deep the top surface reads before it turns into the face. A taller
+  // bench supports a deeper tread, and the depth is modulated by the rock's own
+  // grain so the break of slope WANDERS: a constant depth draws a second
+  // perfectly horizontal line under every ledge, which is the same defect one
+  // step down. Computed after strata() only because that is where 'fine' is.
+  float treadT = (14.0 + 0.30 * th) * (0.62 + 0.76 * fine);
+  float tr   = roof ? 0.0 : fl * (1.0 - smoothstep(treadT * 0.58, treadT, into));
+  // The break of slope. The corner where a plane turns into a face is a line of
+  // contact occlusion, and it is what makes the tread the TOP OF SOMETHING
+  // rather than merely a brighter band across it.
+  float bd2  = into - treadT * 1.30;
+  float brow = roof ? 0.0 : fl * exp(-(bd2 * bd2) / (treadT * treadT * 0.26));
 
   // Local shape of the profile, from one pair of samples: the slope for the rim
   // and the curvature for where sediment can rest.
@@ -640,6 +813,10 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
     float driftN = sat(0.5 + dev(N1(vec2(w.x * 0.00043, 21.7), 0.00043)) * 1.9);
     drape = sat(0.24 + dip * 1.6) * driftN * (1.0 - sat(abs(slope) * 1.5)) * kill2.y;
     drape *= 1.0 - sat(into / (55.0 + 240.0 * driftN));
+    // Sediment settles on what faces up, and a tread is the flattest thing on
+    // the floor - so a bench top is where the drift is, whatever the curvature
+    // of the collision line underneath it happens to say.
+    drape = max(drape, tr * 0.52 * driftN * kill2.y);
     // Mean factor 0.98, so the drape's average albedo does not move; the swing
     // either side of it is what the eye reads a grain size from.
     alb  = mix(alb, (0.92 + 0.30 * fine) * (0.70 + 0.56 * sat(rpp * 0.5 + 0.5)),
@@ -685,6 +862,10 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   // this rock gets at all. Small, and it rides the cloud field, so it models
   // the mass rather than lifting it: rock is still the frame's black.
   irr += 0.15 * amb;
+  // A TOP SURFACE FACES THE LIGHT; A FACE ONLY GRAZES IT. One field, two
+  // orientations, and that ratio is the whole read: a tread lit at the same
+  // value as the face under it is not a tread, it is a stripe.
+  irr *= 1.0 + 1.40 * tr;
   vec3 lamp = lampLight(w, roof ? 1.0 : -1.0);
   vec3 c = body * V_ROCK * alb * exp(-into / 205.0) * irr;
   // A ROOF SEEN FROM UNDER IT IS A SURFACE, NOT A SOLID. 'into' is distance
@@ -723,7 +904,7 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
             * (1.0 + 0.95 * bedf.x) * (1.0 - 0.62 * bedf.y);
   // The edge nearest a lamp is the brightest rock in the frame, and it is what
   // reads the silhouette out of the dark for the player.
-  c += body * V_RIM * rim * lamp * 0.40;
+  c += body * V_RIM * rim * lamp * 0.52;
 
   if(roof){
     // Backlit underside. What light it has is bounced up off the water plus the
@@ -767,7 +948,21 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
     c += (uCSurf * pow(sat(sky * 2.4), 1.1) * (0.40 + 0.80 * caus) * 1.80
           + lamp * 3.20 + body * (0.06 + 0.94 * seam) * 0.55)
        * V_SILT * 3.00 * crest * (0.45 + 0.90 * fine);
+    // THE TREAD ITSELF. Silt-toned, so it separates from the face in hue as
+    // well as in value, and lit by three things on purpose: the downwelling
+    // where there is any, the water's own glow where there is not, and the
+    // lamp - because a bench top is the largest upward-facing surface a mote
+    // ever swims over, and it is the natural place for its light to land.
+    c += (uCSurf * pow(sat(sky * 2.3), 1.1) * 1.55
+          + lamp * 2.60
+          + uCSilt * (0.10 + 0.90 * amb) * 0.34)
+       * V_SILT * 0.82 * tr * (0.50 + 0.85 * fine) * (0.55 + 0.80 * caus)
+       * (0.45 + 0.85 * sat(rpp * 0.5 + 0.5));
   }
+  // The break of slope, applied last so it darkens the top of the FACE and
+  // everything the floor branch put there - a corner occludes the drift and the
+  // ripple crests exactly as it occludes the rock.
+  c *= 1.0 - 0.55 * brow;
   return vec4(c, cov);
 }
 
@@ -813,9 +1008,15 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // riser on a far wall lines up with a bed on the near wall. That shared
   // horizon is the whole difference between four parallax layers and one
   // geological formation seen at four distances.
-  float tiltF = bedTilt(w.x, pxL);
-  top = mix(top, snapBed(top, tiltF), 0.55);
-  bot = mix(bot, snapBed(bot, tiltF), 0.55);
+  // Same fault blocks as the near rock, so a plane four layers back dips the
+  // way its own block dips and breaks where its own fault breaks. Four walls
+  // that all bed level while the foreground dips would be worse than four that
+  // all bed level: the eye reads a formation, and a formation cannot disagree
+  // with itself about which way its layers go.
+  vec4 bpF; float tiltF, fdF;
+  float syF = bedFrame(w, pxL, bpF, tiltF, fdF);
+  top = mix(top, snapBedB(top, tiltF, bpF), 0.55);
+  bot = mix(bot, snapBedB(bot, tiltF, bpF), 0.55);
 
   // The broken edge. Three things have to vary or a module forms: tooth width,
   // tooth depth, and the baseline the teeth stand on. Two ragged fields at
@@ -877,8 +1078,7 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   float sky = (0.055 + 0.360 * openL + 0.075 * nT) * exp(-belowS / 1400.0);
   // Same bed index and the same hash as strata(), so bed N is the same shade of
   // rock at every distance.
-  float syF = bedFrom(w.y + tiltF);
-  float alb = 0.55 + 1.00 * hash11(floor(syF) * 1.37 + 0.5);
+  float alb = 0.55 + 1.00 * hash11(floor(syF - bpF.z * uKill3.z) * 1.37 + 0.5);
   // VERTICAL STRIATION, and it is the one kind of structure that costs the
   // frame no level: a joint is a shadow, so a wall that gains legibility this
   // way gains blacks with it rather than spending them. Same sheared level-set
@@ -893,6 +1093,12 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
     float jt = 0.020 + jh * 0.032;
     jnt = exp(-(jd * jd) / (jt * jt));
   }
+  // ...and the fault plane, which is the one break that must appear on every
+  // plane at once. A fault that stops at the foreground is a scratch on the
+  // lens; a fault that runs through all five planes is a structure the trench
+  // was cut along, and it is free here because fdF is already in hand.
+  float fwF = 0.0055 + 0.0105 * bpF.w;
+  jnt = max(jnt, exp(-(fdF * fdF) / (fwF * fwF)) * 0.90 * uKill3.z);
   alb *= 1.0 - 0.88 * jnt;
   vec3 rk = mix(ROCK_COOL, ROCK_WARM, 0.30);
   // Same response curve as the near rock and the medium - see irr in
@@ -1002,8 +1208,18 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // under sealed roof - which is what stops it reading as a stroked outline
   // round a cutout. Its mean multiplier is BELOW the flat 1.0 it replaces, so
   // the extra contrast is paid for out of the sealed stretches, not out of p90.
+  // A BENCH HAS A TREAD, and that is the difference between a receding plane
+  // and a cutout with strata printed on it. The profile above is snapped to the
+  // bedding, so the flat stretches of an upward-facing skyline ARE bed tops -
+  // planes that face the downwelling squarely - and lighting the first forty
+  // units below them at a plainly higher value than the face is what makes the
+  // mass read as solid. Flat-topped and crisply terminated on purpose: a smooth
+  // exponential skirt is a glow round an edge, and a glow round an edge is the
+  // stroked outline this file keeps having to remove. Paid for out of the old
+  // wide skirt, so the mean rim energy on a floor edge barely moves.
+  float tread = (roof ? 0.0 : 0.30 * uKill3.y) * (1.0 - smoothstep(24.0, 42.0, intoS));
   o += uCHigh * V_FARRIM * sky * (roof ? 0.30 : 1.00) * (0.50 + 0.95 * openL)
-     * (1.0 - fog) * (exp(-intoS / 18.0) + 0.22 * exp(-intoS / 44.0));
+     * (1.0 - fog) * (exp(-intoS / 18.0) + 0.15 * exp(-intoS / 44.0) + tread);
   return vec4(o, cov);
 }
 
@@ -1336,6 +1552,12 @@ void main(){
   // superlinear gate on sky: as a broad blanket with a sqrt gate this was the
   // single largest contributor to the frame's missing blacks, and it read as
   // fog rather than as sediment.
+  // Measured from the un-benched floor on purpose. drawnBot costs a noise fetch
+  // for the bedding frame it snaps the tread to, and paying it twice a pixel
+  // measured at a fifth of a millisecond; the silt is a billowing haze with a
+  // 26-181 unit scale height that is killed inside rock by (1 - r0.a) anyway,
+  // so all a bench can do to it is offset the layer slightly. The rock cares
+  // where its own top surface is; the haze above it does not.
   float above = (bdN.y - reliefFloor(w.x, brk)) - w.y;
   vec4 sn = N(vec2(w.x * 0.00022 - uTime * 0.0035, w.y * 0.00052 + uTime * 0.0018), 0.00052);
   float billow = sat(0.5 + (dev(sn.r) * 1.00 + dev(sn.g) * 0.50 + dev(sn.b) * 0.28) * 2.1);
@@ -1656,6 +1878,7 @@ function killMasks() {
   return [
     new Float32Array([on('bgNoSnow'), on('bgNoRays'), on('bgNoVents'), on('bgNoHush')]),
     new Float32Array([on('bgNoFar'), on('bgNoSilt'), on('bgNoGrain'), on('bgNoBreak')]),
+    new Float32Array([on('bgNoLamp'), on('bgNoLedge'), on('bgNoDip'), on('bgNoTalus')]),
   ];
 }
 
@@ -1670,8 +1893,8 @@ export class Background {
     });
     this.bandMap = new Float32Array(2);
     this.lights = new Float32Array(MAXL * 4);
-    const [k1, k2] = killMasks();
-    this.kill = k1; this.kill2 = k2;
+    const [k1, k2, k3] = killMasks();
+    this.kill = k1; this.kill2 = k2; this.kill3 = k3;
     this.c = {
       vd: chroma(PAL.voidDeep), dp: chroma(PAL.waterDeep), md: chroma(PAL.waterMid),
       hi: chroma(PAL.waterHigh), sf: chroma(PAL.surface), st: chroma(PAL.silt),
@@ -1752,6 +1975,7 @@ export class Background {
     gl.uniform1f(u.uDiff, ctx.difficulty || 0);
     gl.uniform4fv(u.uKill, this.kill);
     gl.uniform4fv(u.uKill2, this.kill2);
+    gl.uniform4fv(u.uKill3, this.kill3);
     gl.uniform4fv(u.uLights, this.lights);
 
     gl.uniform3fv(u.uCVoid, c.vd);
