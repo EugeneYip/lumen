@@ -205,6 +205,29 @@ const vec3 BIO_ICE   = vec3(0.34, 0.82, 1.00);
 // anchor: 'a rock face goes cyan when the mote swings past it' is the read the
 // premise is judged on, and it only reads if the hue is unambiguous.
 const vec3 MOTE_LIGHT = vec3(0.22, 0.78, 1.00);
+// ...and the hue it lands in out at the DIM EDGE of the same pool.
+//
+// Modulating albedo honestly is what makes the lit patch read as rock, and it is
+// also why on warm silt the lift comes out cool GREY rather than cyan: the
+// surface is (1.00, 0.62, 0.30) and multiplying it by a cyan light leaves a
+// third of the red in. The bright core has to keep that, or the material read
+// goes with it. The outer pool does not: it carries the least material
+// information in the frame, and it is where the eye most readily reads
+// 'coloured light' instead of 'brighter rock'.
+//
+// Same Rec.709 luminance as MOTE_LIGHT to three figures - 0.678 against 0.677,
+// which is the weighting tools/check.mjs measures with - so this is a PURE
+// CHROMA move. It cannot spend p90, it cannot spend a p99 that clears its floor
+// by 0.0026, and it cannot touch the focal contrast around the hero, because the
+// blend is keyed to the light's own strength and the core is left exactly as it
+// was. Measured by isolating the term with bgNoMoteKey and differencing, at 450m
+// and 1000m, bucketed by how strong the lift is: the outer pool's red content
+// falls 16% and the bright core moves 2-4%, while the mean blue lift per bucket
+// and the lifted area both hold. In LINEAR terms the light's red on warm silt
+// goes from 30% of blue to 5%; the graded frame only shows a sixth of that,
+// because the grade's toe is steep and most of this lift lands on it. That gap
+// is the ceiling on how far a hue push can be taken without spending level.
+const vec3 MOTE_DEEP = vec3(0.04, 0.835, 1.00);
 const float SUN_SLANT = 0.215;   // world x the light drifts per unit of descent
 const float BEDY = 135.135;      // nominal world units per sedimentary bed
 
@@ -336,26 +359,73 @@ float bedTilt(float wx, float px){ return (N1z(vec2(wx * 0.0000745, 0.41), 0.000
 // world units over a 3400-unit wavelength, which is two and a half degrees.
 // Two and a half degrees is level.
 //
-// So x is partitioned into fault blocks and each block gets its own dip, its
-// own bed thickness sequence and its own throw. The partition is a level set of
-// a SHEARED and wandering x - the same construction joints() uses - so the
-// fault planes lean about eighty degrees and are irregularly spaced instead of
-// being a picket fence of verticals.
+// So x is partitioned into fault blocks, the beds are offset across each one,
+// and the partition is a level set of a SHEARED and wandering x - the same
+// construction joints() uses - so the planes are irregularly spaced instead of
+// being a picket fence.
 const float FAULTW = 1180.0;   // mean fault block width: ~1.6 blocks a screen
+// THE PLANE MUST NEVER BE VERTICAL, AND IT WAS. A block boundary sits where
+// (x + y * FAULT_LEAN) / FAULTW + faultShear(y) is an integer, so its slope in
+// world space is -(FAULT_LEAN + FAULTW * faultShear'(y)) and the shear term
+// alone swings +-0.253. Against the old lean of 0.19 that slope PASSES THROUGH
+// ZERO, and where it does the fault draws a dead-straight vertical line down the
+// whole frame. Measured on seed 7 / hazardNear with the sprite and ribbon passes
+// off: the boundary at fu=12 stood at screen x=915 and moved seven world units
+// across 330 pixels of height - 1.2 degrees off vertical - and it was the
+// largest column-to-column step in the image at 22-31x the median. A reviewer
+// reading that backdrop called it a hard vertical seam, not a fault, and was
+// right to.
+//
+// 0.58 is chosen so the slope is bounded away from zero by more than the camera
+// roll can cancel: it runs 0.33-0.83, a plane dipping 50-72 degrees, which is
+// also the range a normal fault actually dips in.
+const float FAULT_LEAN = 0.58;
 float faultShear(float wy){ return wave(wy, 0.00042, 1.1) * 0.34; }
 
-// Per-block character, off one hash: x = dip tangent (tan 5-20 degrees, either
-// way), y = bed thickness multiplier, z = throw in beds, w = the block's own
-// warp phase, which is what makes its thickness SEQUENCE differ from its
-// neighbour's rather than only its mean. The throw is never near zero: layers
-// that happen to line up across a break are the one thing a fault must not do.
-vec4 bodyOf(float fi){
-  float h = hash11(fi * 1.731 + 8.3);
-  float sg = fract(h * 41.17) < 0.5 ? -1.0 : 1.0;
-  return vec4(sg * (0.087 + 0.277 * fract(h * 7.913)),
-              0.86 + 0.34 * h,
-              sg * (0.17 + 0.42 * fract(h * 17.31)),
-              fract(h * 3.137));
+// A FAULT OFFSETS BEDS; IT DOES NOT RELABEL THEM. Everything about the rock mass
+// except the throw is now a CONTINUOUS lateral field, and that is the other half
+// of the seam fix. Dip, bed thickness and warp phase used to be hashed per
+// block, so at every plane the bedding COORDINATE jumped three separate ways at
+// once: the centre-anchored dip was worth up to 430 world units - three beds -
+// the thickness multiplier another 1.7 beds at the bottom of frame, and the
+// intended throw only 0.17-0.59 on top. Three unrelated jumps at one x is not a
+// displaced layer, it is two unrelated stacks butted together, and every
+// consumer of the grid inherited it: snapBedB stepped the far walls' and the
+// benches' SILHOUETTE, and the far wall's per-bed albedo stepped the value of a
+// whole plane. Killing the dip with bgNoDip left the seam exactly where it was,
+// which is what proved the dip was never the only thing stepping.
+//
+// So the mass folds and fans laterally instead of being cut into rigid decks.
+// The local dip still reaches fifteen degrees and the bed thickness still varies
+// along the trench - which is all the review's 'perfectly horizontal, perfectly
+// parallel, constant band thickness' complaint ever asked for - but now the only
+// discontinuity anywhere in the frame is on the fault plane itself.
+//
+// wave(), not a noise fetch: these need a CALIBRATED slope and the tile's
+// per-channel variance is written down nowhere. Max slope here is 0.270, so the
+// steepest local dip is 15.1 degrees, and the amplitude is bounded at 120 units
+// so the fold can never run away with x the way a global tilt term does.
+float dipAt(float wx){ return wave(wx, 0.00150, 0.6) * 120.0; }
+
+// x = unused, y = bed thickness multiplier, z = throw in beds, w = warp phase.
+// One wave drives both thickness and phase: they co-vary, which is what a basin
+// that subsided faster on one side actually does, and it costs two sines rather
+// than four in a function every pixel of rock evaluates.
+//
+// THE THROW ALTERNATES IN SIGN WITH THE BLOCK INDEX, and that is not decoration.
+// With an independent sign per block two neighbours can draw the same one and
+// the RELATIVE throw - the only part of it the eye can see - goes to zero, which
+// is layers lining up across a break, the one thing a fault must not do. It hid
+// until now because the dip jump was three times larger and masked it.
+// Alternating, the offset is 0.48-1.08 beds at every plane: horst and graben,
+// with the magnitude hashed so no two breaks are worth the same.
+vec4 bodyAt(float wx, float fi){
+  float lat = wave(wx, 0.00041, 4.7);
+  float sg = mod(fi, 2.0) < 0.5 ? -1.0 : 1.0;
+  return vec4(0.0,
+              1.03 + 0.17 * lat,
+              sg * (0.24 + 0.30 * fract(hash11(fi * 1.731 + 8.3) * 17.31)),
+              0.5 + 0.5 * lat);
 }
 
 // The bedding coordinate inside a block. Beds are NOT of constant thickness: a
@@ -377,17 +447,16 @@ float bedSlopeU(float y, vec4 bp){
 
 // The bedding frame at a point: which block it is in, what its beds are doing,
 // and how far it is from the fault plane bounding it - in block units, so
-// x FAULTW for world units. The dip is anchored on the block's OWN axis, so
-// twenty degrees is worth at most half a block width of offset; a global tilt
-// term cannot be given a real angle because its offset runs away with x.
+// x FAULTW for world units. The tilt is a pure function of x and carries no
+// block identity at all, so bedU, and therefore snapBedB and every bed index
+// read off it, are continuous across a plane; the throw added at the end is the
+// only term that steps, which is exactly the one a fault is made of.
 float bedFrame(vec2 w, float px, out vec4 bp, out float tilt, out float fd){
-  float sh = faultShear(w.y);
-  float fu = (w.x + w.y * 0.19) / FAULTW + sh;
+  float fu = (w.x + w.y * FAULT_LEAN) / FAULTW + faultShear(w.y);
   float fi = floor(fu);
-  bp = bodyOf(fi);
+  bp = bodyAt(w.x, fi);
   fd = min(fract(fu), 1.0 - fract(fu));
-  float xc = (fi + 0.5 - sh) * FAULTW - w.y * 0.19;
-  tilt = bp.x * (w.x - xc) * uKill3.z + bedTilt(w.x, px);
+  tilt = dipAt(w.x) * uKill3.z + bedTilt(w.x, px);
   return bedU(w.y + tilt, bp) + bp.z * uKill3.z;
 }
 
@@ -930,6 +999,13 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   irr *= 1.0 + 1.40 * tr;
   vec3 lamp = lampLight(w, roof ? 1.0 : -1.0);
   float key = moteKey(w, roof ? 1.0 : -1.0);
+  // Cool with distance from the hero, not with position on screen. key is the
+  // pool's own falloff, so the honest hue holds inside about 470 units - which
+  // is the whole bright core, and the measured range of the nearest rock to a
+  // swimming mote - and the deep one takes over past roughly 1100, where the
+  // pool is fading out anyway. One rule, used everywhere the key lights
+  // anything, so the hue cannot step across a silhouette.
+  vec3 moteHue = mix(MOTE_DEEP, MOTE_LIGHT, sat(key * 2.1));
   vec3 c = body * V_ROCK * alb * exp(-into / 205.0) * irr;
   // A ROOF SEEN FROM UNDER IT IS A SURFACE, NOT A SOLID. 'into' is distance
   // behind the drawn silhouette, and at the top of frame that is a thousand
@@ -963,7 +1039,16 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   // wash, and alb swings 0.05 to 2.4, so the lit patch has 3-5:1 of internal
   // contrast in it. Buying detail with contrast rather than with level is the
   // rule the rest of this file is built on; it applies to the hero's light too.
-  vec3 keyC = mix(body, vec3(1.0), 0.62) * MOTE_LIGHT;
+  // The whitening stays at a flat 0.62, and that is a MEASURED negative result
+  // worth not repeating. Pushing it to 0.88 in the tail - suppressing the warm
+  // surface as well as cooling the light - looked like the obvious other half of
+  // this and is not: measured on the isolated lift at 450m and 1000m it moved
+  // the outer pool's red content by under 2%, in one band the wrong way, while
+  // costing 13% of level. Whitening only helps where the surface is warm. Where
+  // it is ROCK_COOL, whose red is 0.46, mixing toward white RAISES red as fast
+  // as it lowers it on silt, and the two cancel across a frame. Only the light's
+  // own chromaticity moves the answer.
+  vec3 keyC = mix(body, vec3(1.0), 0.62) * moteHue;
   // A SURFACE, NOT A SOLID - the same argument the receding ceiling and the far
   // walls are shaded on. 'into' is distance behind the drawn silhouette, and on
   // a floor filling the lower third of frame that runs to 500 units of rock the
@@ -1005,7 +1090,7 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   // out of the top of the distribution rather than the bulk. Highlights spent
   // on a shadow, bought back on an edge: the same energy, in the place a
   // reviewer actually reads the hero's light from.
-  c += body * V_RIM * rim * (lamp * 0.52 + MOTE_LIGHT * key * 0.34);
+  c += body * V_RIM * rim * (lamp * 0.52 + moteHue * key * 0.34);
 
   if(roof){
     // Backlit underside. What light it has is bounced up off the water plus the
@@ -1047,7 +1132,7 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
     // A raking lamp across a rippled surface is also the strongest texture cue
     // available at this depth, and it comes for free - lamp is already in hand.
     c += (uCSurf * pow(sat(sky * 2.4), 1.1) * (0.40 + 0.80 * caus) * 1.80
-          + lamp * 3.20 + MOTE_LIGHT * key * 2.40
+          + lamp * 3.20 + moteHue * key * 2.40
           + body * (0.06 + 0.94 * seam) * 0.55)
        * V_SILT * 3.00 * crest * (0.45 + 0.90 * fine);
     // THE TREAD ITSELF. Silt-toned, so it separates from the face in hue as
@@ -1056,7 +1141,7 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
     // lamp - because a bench top is the largest upward-facing surface a mote
     // ever swims over, and it is the natural place for its light to land.
     c += (uCSurf * pow(sat(sky * 2.3), 1.1) * 1.55
-          + lamp * 2.60 + MOTE_LIGHT * key * 2.00
+          + lamp * 2.60 + moteHue * key * 2.00
           + uCSilt * (0.10 + 0.90 * amb) * 0.34)
        * V_SILT * 0.82 * tr * (0.50 + 0.85 * fine) * (0.55 + 0.80 * caus)
        * (0.45 + 0.85 * sat(rpp * 0.5 + 0.5));
@@ -1279,9 +1364,14 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // frame that ignores him, which is the same defect one step back. Added
   // BEFORE the fog, so aerial perspective veils the mote's light on a far wall
   // exactly as it veils the wall's own.
-  float keyF = moteKey(toWorld(uv), roof ? 1.0 : -1.0) * pow(s, 2.2);
-  c += mix(rk, vec3(1.0), 0.62) * MOTE_LIGHT * V_MOTEKEY * alb * keyF
-     * (0.45 + 0.55 * exp(-intoS / 300.0));
+  float keyN = moteKey(toWorld(uv), roof ? 1.0 : -1.0);
+  float keyF = keyN * pow(s, 2.2);
+  // Blended on the UNSCALED key, so the hue is a function of distance from the
+  // hero and nothing else: keyed to keyF instead, every far plane would jump
+  // straight to the deep hue and the pool would change colour across every
+  // silhouette it crossed.
+  c += mix(rk, vec3(1.0), 0.62) * mix(MOTE_DEEP, MOTE_LIGHT, sat(keyN * 2.1))
+     * V_MOTEKEY * alb * keyF * (0.45 + 0.55 * exp(-intoS / 300.0));
   // The break of slope, which is what makes a tread the top OF something. The
   // near rock has had one for two rounds - see 'brow' in trenchRock - and its
   // absence out here is the other half of why a far bench read as a stripe: a
@@ -1882,7 +1972,17 @@ void main(){
     col += uCHushGlow * V_HUSH * 0.0029 * lead * (0.45 + 0.55 * sat(rip + 0.5));
   }
 
-  if(dxh < 3000.0 && uKill.w > 0.5){
+  // GATED ON THE FRONT, NOT ON A FIXED WORLD X. This was dxh < 3000, and every
+  // term inside is a function of the distance to the drain front, whose reach
+  // runs 1905-3215 units - so the bound sat INSIDE the range the front itself
+  // can occupy. Where reach approached 3000 the rim on the front, worth up to
+  // 0.44 linear, was cut in half by a dead-straight vertical line at exactly the
+  // world x the branch tested. That is the same defect class as the fault seam
+  // this round fixed and it was found looking for it. On ed it is provably
+  // outside everything: the front rim is exp(-ed^2/15000), dead by ed=620, and
+  // the interior crush is zero past ed=25. It is also no more pixels than the
+  // old bound took at a typical reach, so it costs nothing.
+  if(ed < 620.0 && uKill.w > 0.5){
     // A torn frontier, not a gradient: three scales of writhe along y, plus
     // tongues of nothing licking forward.
     vec4 fr = N(vec2(w.y * 0.00072, uTime * 0.019), 0.00072);
@@ -1946,7 +2046,12 @@ void main(){
     // read as "a flat violet field" and is the opposite of a wall of dark. At
     // 360 units, and a third of the level, it is a halo on a front again.
     float gd = e >= 0.0 ? e / 360.0 : -e / 190.0;
-    col += uCHushGlow * V_HUSH * 0.0072 * rv / (1.0 + gd * gd);
+    // The one term with a tail long enough to still be worth something at the
+    // gate: a Lorentzian is at 5% four half-widths out, and 5% of this is a code
+    // value or two of violet with a hard edge on it. Windowed to zero at the
+    // bound, so the branch cannot draw its own boundary whatever the reach does.
+    col += uCHushGlow * V_HUSH * 0.0072 * rv
+         * (1.0 - smoothstep(180.0, 620.0, ed)) / (1.0 + gd * gd);
 
     // A RIM OF DYING BIOLUMINESCENCE. What the front is actually doing is
     // consuming the life in the water, so the honest way to draw its edge is
