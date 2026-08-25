@@ -56,10 +56,17 @@ const BUDGET = {
   // Focal contrast is local: it only asks whether the mote beats its own
   // immediate surround. An art director measured the mote as the 10th and then
   // the 43rd most salient bright cluster in its own frame -- locally fine,
-  // globally lost. This ranks the hero's block against every other block in the
-  // frame by highlight energy, which is the question a player scanning a still
-  // actually asks.
+  // globally lost. This ranks the hero against every other HIGHLIGHT in the
+  // frame, which is the question a player scanning a still actually asks. Read
+  // the note at the measurement site before touching either number: the rank is
+  // now over distinct highlight peaks (16-79 per frame), not over 336 fixed
+  // cells, so `3` is a different and much stricter demand than it used to be.
   moteRankMax: 3,
+  // What counts as a highlight, in display luminance. Measured across all ten
+  // gate frames the 99.9th percentile lands at 0.597-0.749, so this is "the
+  // brightest tenth of a percent of the image" in every scene, and it sits
+  // clear above the brightest flat background in any of them (peak 0.44).
+  highlightLum: 0.60,
   // NOTE: there is deliberately no detail threshold. See the `detail` column,
   // which is reported as a trend line only -- and read the note in AI_HANDOFF
   // section 8 about why a frame-wide statistic cannot gate craft.
@@ -149,7 +156,7 @@ for (const seed of SEEDS) {
         // Sample the GL canvas in the same task as a fresh render: the context
         // has preserveDrawingBuffer:false, so the pixels are only readable
         // before the frame is presented.
-        const lum = await page.evaluate(() => {
+        const lum = await page.evaluate((HL) => {
           window.game.render(1 / 120);
           const src = document.getElementById('gl');
           const t = document.createElement('canvas');
@@ -195,39 +202,123 @@ for (const seed of SEEDS) {
             }
           } catch { /* mote off-screen */ }
 
-          // Global salience: rank the mote's block among all blocks by highlight
-          // energy (luminance squared, so bright things dominate over broad dim
-          // ones, which is what the eye does).
-          let moteRank = null, blockCount = 0;
+          // NATIVE-resolution luminance. Two measurements below need it and the
+          // 192x108 sample above is wrong for both: see each for why.
+          const f = document.createElement('canvas');
+          f.width = src.width; f.height = src.height;
+          const fx = f.getContext('2d', { willReadFrequently: true });
+          fx.drawImage(src, 0, 0);
+          const fd = fx.getImageData(0, 0, f.width, f.height).data;
+          const W2 = f.width, H2 = f.height;
+          const lum = new Float32Array(W2 * H2);
+          for (let i = 0, j = 0; i < fd.length; i += 4, j++) {
+            lum[j] = (fd[i] * 0.2126 + fd[i + 1] * 0.7152 + fd[i + 2] * 0.0722) / 255;
+          }
+
+          // Global salience: where does the hero sit among the frame's
+          // HIGHLIGHTS? A hero-sized window centred on the mote, scored by the
+          // energy it carries above `highlightLum`, ranked against windows of
+          // the same size taken at every offset across the frame, with
+          // overlapping windows collapsed so one bright object counts once.
+          //
+          // This replaces a fixed 24x14 grid of blocks ranked by sum(L^2), and
+          // it is the fifth measurement on this project to have been wrong in a
+          // way that cost art rounds. Two independent defects, both measured on
+          // the ten gate frames:
+          //
+          // GRID PHASE. The mote is small and hot and its glow spills across
+          // cell boundaries, so which cell it lands in decided the answer.
+          // Re-measuring the SAME IMAGE with the grid origin shifted by a
+          // fraction of a cell moved seed 7 / title from rank 1 to rank 29, and
+          // seed 3 / title from 6 to 40. Across all ten frames the phase swing
+          // was 2x to 6x. The published ranks (2 to 13 for a hero that looks
+          // much the same frame to frame) were mostly reporting where the mote
+          // happened to land relative to an arbitrary lattice. A dense stride is
+          // the fix and it is free: the answer is identical at stride 4, 8, 16
+          // and 24, because collapsing overlaps removes the offset entirely.
+          //
+          // "HIGHLIGHT ENERGY" WAS NOT MEASURING HIGHLIGHTS. sum(L^2) over a
+          // fixed area is an area integral, and squaring does not rescue it. On
+          // seed 7 / title the lit rock wall at (169,232) -- peak 0.43, p90
+          // 0.40, flat enough to have no highlight anywhere in it -- outscored
+          // the mote's block, whose peak is 0.96. Same on seed 3 / title, and
+          // the Hush wall did it twice on seed 7 / hushNear. A patch that is
+          // uniformly half-lit cannot be a highlight rival to a white-hot core,
+          // and a metric named for highlight energy must not say it is.
+          // Thresholding at `highlightLum` removes that population by
+          // construction and leaves the real rivals -- the anchor bulbs and the
+          // seabed colonies -- exactly where they were.
+          //
+          // Also: the mote is the single brightest PIXEL in the frame in all ten
+          // gate frames. A metric that then places it 13th needed explaining,
+          // and the explanation was not the art.
+          //
+          // Teeth, because the risk with any replacement is that it passes
+          // trivially. Re-scoring the hero's own window with its pixels scaled
+          // down (i.e. simulating a dimmer mote) moves it from rank 1-2 to rank
+          // 2-10 at 0.85x, 8-30 at 0.70x, and below every peak in frame at
+          // 0.55x. Arbitrary non-hero windows rank at or near last. It is a
+          // steeper response than the grid version had.
+          //
+          // `peaks` is reported alongside the rank on purpose. A build that wins
+          // this by deleting rivals rather than by leading the eye shows up as
+          // the peak count collapsing, in the same column.
+          let moteRank = null, motePeaks = 0;
           try {
             const g = window.game;
-            const BX = 24, BY = 14;
-            const energy = new Float64Array(BX * BY);
-            for (let yy = 0; yy < t.height; yy++) {
-              const by = Math.min(BY - 1, Math.floor(yy * BY / t.height));
-              for (let xx = 0; xx < t.width; xx++) {
-                const bx = Math.min(BX - 1, Math.floor(xx * BX / t.width));
-                const l = vals2[yy * t.width + xx];
-                energy[by * BX + bx] += l * l;
+            const winW = Math.round(W2 / 24), winH = Math.round(H2 / 14);
+            const ii = new Float64Array((W2 + 1) * (H2 + 1));
+            for (let yy = 0; yy < H2; yy++) {
+              let rs = 0;
+              for (let xx = 0; xx < W2; xx++) {
+                const d = lum[yy * W2 + xx] - HL;
+                if (d > 0) rs += d * d;
+                ii[(yy + 1) * (W2 + 1) + xx + 1] = ii[yy * (W2 + 1) + xx + 1] + rs;
               }
             }
+            const score = (x0, y0) => ii[(y0 + winH) * (W2 + 1) + x0 + winW]
+              - ii[y0 * (W2 + 1) + x0 + winW] - ii[(y0 + winH) * (W2 + 1) + x0]
+              + ii[y0 * (W2 + 1) + x0];
+
+            const cands = [];
+            for (let y0 = 0; y0 + winH <= H2; y0 += 8)
+              for (let x0 = 0; x0 + winW <= W2; x0 += 8) {
+                const s = score(x0, y0);
+                if (s > 0) cands.push({ x0, y0, s });
+              }
+            cands.sort((a, b) => b.s - a.s);
+            // Non-maximum suppression: two peaks must be at least one hero-width
+            // apart to count as two things. Without this the "rank" counts
+            // window offsets rather than objects.
+            const peaks = [];
+            for (const c of cands) {
+              if (peaks.some(k => Math.abs(k.x0 - c.x0) < winW && Math.abs(k.y0 - c.y0) < winH)) continue;
+              peaks.push(c);
+            }
+
             const uv = g.cam.worldToUv(g.player.x, g.player.y);
-            const mx = Math.floor(uv[0] * BX), my = Math.floor((1 - uv[1]) * BY);
-            if (mx >= 0 && my >= 0 && mx < BX && my < BY) {
-              const mine = energy[my * BX + mx];
+            // worldToUv is GL convention (v from the bottom); see the flip note
+            // on the focal measurement above.
+            const mx = uv[0] * W2, my = (1 - uv[1]) * H2;
+            if (mx >= 0 && my >= 0 && mx < W2 && my < H2) {
+              const hx = Math.max(0, Math.min(W2 - winW, Math.round(mx - winW / 2)));
+              const hy = Math.max(0, Math.min(H2 - winH, Math.round(my - winH / 2)));
+              const mine = score(hx, hy);
               let better = 0;
-              for (let i = 0; i < energy.length; i++) if (energy[i] > mine) better++;
+              for (const k of peaks) {
+                if (Math.abs(k.x0 - hx) < winW && Math.abs(k.y0 - hy) < winH) continue;
+                if (k.s > mine) better++;
+              }
               moteRank = better + 1;
-              blockCount = energy.length;
+              motePeaks = peaks.length;
             }
           } catch { /* mote off-screen */ }
 
-          // Local structure, measured at NATIVE resolution. The 192x108 sample
-          // above is right for distribution and rank but useless here: at a
-          // 6.7x downsample a prop's beaded filaments are sub-pixel, and a
-          // frame-wide mean over that sample was measured to be identical
-          // across a build where a reviewer could plainly see one prop go from
-          // filaments to airbrush. So this takes its own full-size pass.
+          // Local structure. The 192x108 sample is useless here: at a 6.7x
+          // downsample a prop's beaded filaments are sub-pixel, and a frame-wide
+          // mean over that sample was measured to be identical across a build
+          // where a reviewer could plainly see one prop go from filaments to
+          // airbrush.
           //
           // It reports the 90th percentile rather than the mean, because the
           // defect is localised — a handful of props smoothed out barely moves
@@ -235,16 +326,6 @@ for (const seed of SEEDS) {
           // the distribution, which is where crisp structure lives.
           let detail = 0;
           {
-            const f = document.createElement('canvas');
-            f.width = src.width; f.height = src.height;
-            const fx = f.getContext('2d', { willReadFrequently: true });
-            fx.drawImage(src, 0, 0);
-            const fd = fx.getImageData(0, 0, f.width, f.height).data;
-            const W2 = f.width, H2 = f.height;
-            const lum = new Float32Array(W2 * H2);
-            for (let i = 0, j = 0; i < fd.length; i += 4, j++) {
-              lum[j] = (fd[i] * 0.2126 + fd[i + 1] * 0.7152 + fd[i + 2] * 0.0722) / 255;
-            }
             const laps = [];
             for (let yy = 1; yy < H2 - 1; yy += 2) {
               for (let xx = 1; xx < W2 - 1; xx += 2) {
@@ -263,9 +344,9 @@ for (const seed of SEEDS) {
           vals.sort();
           const q = (p) => vals[Math.min(n - 1, Math.floor(p * n))];
           return { mean: sum / n, max, clipped: clipped / n, black: black / n,
-            shadowFrac, contrast, moteRank, blockCount, detail,
+            shadowFrac, contrast, moteRank, motePeaks, detail,
             p20: q(0.2), p50: q(0.5), p90: q(0.9), p95: q(0.95), p99: q(0.99) };
-        });
+        }, BUDGET.highlightLum);
 
         S.scenes[sc] = { ...lum, depth: info?.depth, speed: info?.speed, mode: info?.mode };
 
@@ -276,7 +357,7 @@ for (const seed of SEEDS) {
         if (lum.black > BUDGET.blackMax) warns.push(`${tag}: ${(lum.black * 100).toFixed(1)}% of pixels are near-black`);
         if (lum.shadowFrac < BUDGET.shadowFracMin) warns.push(`${tag}: no real blacks — only ${(lum.shadowFrac * 100).toFixed(1)}% of pixels below L8 (want > ${BUDGET.shadowFracMin * 100}%); the abyss never reaches black`);
         else if (lum.shadowFrac > BUDGET.shadowFracMax) warns.push(`${tag}: crushed — ${(lum.shadowFrac * 100).toFixed(1)}% of pixels below L8 (want < ${BUDGET.shadowFracMax * 100}%); geometry is being deleted rather than darkened`);
-        if (lum.moteRank != null && lum.moteRank > BUDGET.moteRankMax) warns.push(`${tag}: hero is not salient — the mote's block ranks ${lum.moteRank} of ${lum.blockCount} by highlight energy (want top ${BUDGET.moteRankMax}); a player scanning the still cannot find their character`);
+        if (lum.moteRank != null && lum.moteRank > BUDGET.moteRankMax) warns.push(`${tag}: hero is not salient — the mote is the ${lum.moteRank}th of ${lum.motePeaks} highlight peaks in the frame (want top ${BUDGET.moteRankMax}); a player scanning the still cannot find their character`);
         if (lum.contrast != null && lum.contrast < BUDGET.moteContrastMin) warns.push(`${tag}: weak focal point — mote core only ${lum.contrast.toFixed(1)}:1 over its surround (want > ${BUDGET.moteContrastMin}:1)`);
         const spread = lum.p95 - lum.p20;
         if (spread < BUDGET.minSpread) fails.push(`${tag}: flat image — p95-p20 luminance spread only ${spread.toFixed(3)} (want > ${BUDGET.minSpread})`);
@@ -463,7 +544,7 @@ if (JSON_OUT) {
       if (v.hdr) console.log(`  ${(sc + ' hdr').padEnd(11)} p50 ${v.hdr.p50}  p90 ${v.hdr.p90}  p99 ${v.hdr.p99}  max ${v.hdr.max}   (linear, pre-tonemap)`);
       console.log(`  ${sc.padEnd(11)} mean ${v.mean.toFixed(4)}  p50 ${v.p50.toFixed(3)}  spread ${(v.p95 - v.p20).toFixed(3)}` +
         `  shadow ${((v.shadowFrac || 0) * 100).toFixed(1)}%  focal ${v.contrast ? v.contrast.toFixed(1) + ':1' : '--'}` +
-        `  rank ${v.moteRank != null ? v.moteRank + '/' + v.blockCount : '--'}  detail ${(v.detail || 0).toFixed(4)}` +
+        `  rank ${v.moteRank != null ? v.moteRank + '/' + v.motePeaks : '--'}  detail ${(v.detail || 0).toFixed(4)}` +
         `  clipped ${(v.clipped * 100).toFixed(2)}%  black ${(v.black * 100).toFixed(1)}%  (${v.depth}m)`);
     }
   }

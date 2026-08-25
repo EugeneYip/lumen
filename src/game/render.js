@@ -1867,8 +1867,38 @@ export class Scene {
     const warm = (f) => Math.pow(1 - f, 1.7);
     const cool = (f) => Math.pow(f, 2.4);
     // Ends are covered by the bulb's flare and the mote's corona, so fade into
-    // them instead of butting against them.
-    const cap = (f) => clamp01(f * 9) * clamp01((1 - f) * 7);
+    // them instead of butting against them. A ribbon's ends are butt caps and
+    // no tuning gives it a soft one, so the fade is not optional - but its
+    // LENGTH was a fraction of the line, and that was the defect.
+    //
+    // The mote-end fade ran over the last 14% of the tether, which at a 280px
+    // tether is 40 screen pixels of nothing between the strand and the hero it
+    // is pointing at. Seen at 4x on seed 7 / 400m: the line stops in open water
+    // and the eye has to jump the gap. That matters more than its share of the
+    // frame suggests, because the tether is the only structure in the image
+    // that converges on the protagonist - two lines that point at the hero lead
+    // the eye home only if they arrive. It also cancelled `cool`, the mote's own
+    // light on the line, at exactly the end where that light comes from.
+    //
+    // So the fade is an absolute screen distance instead: it ends inside the
+    // nucleus's own corona at every tether length, which is where a butt cap is
+    // invisible.
+    //
+    // Measured on seed 7 / 400m, peak luminance in a 13px band across the
+    // strand, walking in from 50px out to the nucleus:
+    //
+    //   before   0.463  0.471  0.441  0.419  0.481   0.96
+    //   after    0.464  0.478  0.492  0.501  0.530   0.96
+    //
+    // The old profile DIPS on approach - the line got dimmer the closer it came
+    // to the thing it was pointing at - and the new one is monotonic into the
+    // core. Nothing else moved: the mote's peak is 0.96 in both and the anchor's
+    // is 0.919 in both. Note also that a strand at 0.5 is below the gate's
+    // highlight threshold, so this is worth about +0.2 of highlight-peak score
+    // and is very nearly invisible to that number. It is a convergence fix, and
+    // convergence is not a quantity any frame-wide statistic here can see.
+    const tailF = Math.min(0.30, CORE_PX * 1.5 / (this._ppu * L));
+    const cap = (f) => clamp01(f * 9) * clamp01((1 - f) / tailF);
 
     // Warm scatter sheath, thick at the root.
     this.rGlow.stroke(pts, {
