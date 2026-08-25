@@ -490,6 +490,30 @@ Longer-standing items:
   at 1280x720 with `gl.finish()`.
   Someone should still confirm real pacing on a machine with a screen; nothing
   here can. **Do not re-gate it without evidence that the number discriminates.**
+- **The null policy scores as well as the bot that plays. UNRESOLVED, and it is
+  a pillar-one question.** `node tools/_feel.mjs --mode policy --seeds 7,3 --live`
+  runs five policies in the real world — hazards, plankton and the Hush all on.
+  `nofly` never presses the button and never even attaches, and it reaches
+  1377m / 1533m while surviving 59.5s / 65.8s. The `good` release heuristic
+  reaches 1379m / 1073m and dies at 22.6s / 21.9s. Doing nothing survives about
+  three times longer than playing, and travels as far.
+  Two caveats that a successor must weigh before acting:
+  1. `good` is a pendulum-timing heuristic with **no hazard avoidance at all**,
+     so its deaths may say nothing about a human. It also stalls 13-23% of
+     frames, and on seed 3 it was caught by a Hush moving at a third of its mean
+     speed — a swing that loses ground can be overtaken.
+  2. `sloppy` reached 2026m on seed 7, 1.47x the null run, so a better ceiling
+     demonstrably exists. The open question is not "does skill pay" but "does it
+     pay ENOUGH", and no bot here is good enough to answer it.
+  What is objective and needs no bot to interpret: the floor is high. The mote
+  drifts forward at ~270 u/s with no input, the Hush starts 2600-3200 units
+  behind and advances at `lerp(196, 470, difficulty)`, and difficulty is keyed to
+  `x / 31000` — so the front does not out-pace a drifter until about a minute in.
+  Whether that floor is correct for an endless runner is a design decision
+  nobody has made deliberately.
+  **Do not "fix" this by nerfing the drift without first establishing the
+  ceiling.** Find the best policy that actually exists before changing the floor.
+
 - **The salience rank measures peak population, and deliberately not extent.**
   After the metric was rebuilt (see the commit that replaced the 24x14 grid), the
   hero ranks 1st or 2nd of 16-79 highlight peaks in every gate frame, because it

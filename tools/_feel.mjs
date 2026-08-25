@@ -4,13 +4,16 @@
  *
  *   node tools/_feel.mjs --mode run    --seeds 3,7,11,19 --secs 60
  *   node tools/_feel.mjs --mode skill  --seeds 7
- *   node tools/_feel.mjs --mode policy --seeds 7,3
+ *   node tools/_feel.mjs --mode policy --seeds 7,3 [--live]
  *   node tools/_feel.mjs --mode pump
  *   node tools/_feel.mjs --mode rescue
  *
  * run    : deterministic autopilot; distance/speed/attach/deaths/stalls.
  * skill  : release-angle sweep -> does release TIMING pay off, and how much?
  * policy : good vs sloppy vs mashing vs clinging over a long run.
+ *          --live keeps hazards, plankton and the Hush. WITHOUT it the world is
+ *          sterile and the numbers answer a different question - see the note
+ *          at the policy reporting block before quoting any of them.
  * pump   : does holding + reeling add energy, and can it be sustained?
  * rescue : dropped on the trench floor at zero speed - can it get back to play?
  */
@@ -25,6 +28,7 @@ const arg = (k, d) => { const i = argv.indexOf('--' + k); return i < 0 ? d : arg
 const MODE = arg('mode', 'run');
 const SEEDS = String(arg('seeds', '3,7,11,19')).split(',').map(Number);
 const SECS = Number(arg('secs', 60));
+const LIVE = argv.includes('--live');   // policy mode: run the real world, not the sterile rig
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png' };
 const server = createServer(async (req, res) => {
@@ -65,6 +69,20 @@ const RIG_SRC = `({
   },
   // clear the world so only the pendulum is under test
   clear: (w) => { w.plankton.length = 0; w.hazards.length = 0; w.hushX = -1e9; },
+  // ...and the opposite: the world as the game actually presents it. The Hush
+  // advance lives in main.js's step, which this harness deliberately does not
+  // run, so a policy loop that only calls player.update and world.update gets a
+  // Hush frozen wherever it started even if nothing clears it. Replicated here
+  // from main.js: speed lerp(196,470,difficulty), and the rubber band that stops
+  // it falling more than lerp(2900,1750) behind, which is what stops distance
+  // banking into permanent safety.
+  live: (w, p, dt, grace) => {
+    if (grace > 0) return;
+    const d = w.difficultyAt(p.x);
+    w.hushX += (196 + (470 - 196) * d) * dt;
+    const maxLag = 2900 + (1750 - 2900) * d;
+    if (p.x - w.hushX > maxLag) w.hushX = p.x - maxLag;
+  },
 })`;
 
 async function newPage(seed) {
@@ -218,18 +236,19 @@ async function runSkill(seed) {
  */
 async function runPolicy(seed, secs) {
   const page = await newPage(seed);
-  const r = await page.evaluate(async (fxSrc, rigSrc, secs) => {
+  const r = await page.evaluate(async (fxSrc, rigSrc, secs, LIVE) => {
     const g = window.game, FIXED = 1 / 120;
     const fx = eval(fxSrc), RIG = eval(rigSrc);
 
     const play = (kind) => {
       g.startPlay();
       const w = g.world;
-      RIG.clear(w);
+      if (!LIVE) RIG.clear(w);
       const p = g.player;
       const reach = 620;
       const speeds = [];
-      let holdWhen = 0, releases = 0, stall = 0;
+      let holdWhen = 0, releases = 0, stall = 0, grace = 1.4;
+      const i0 = { n: 0 };
       const steps = Math.round(secs / FIXED);
       for (let i = 0; i < steps; i++) {
         let want;
@@ -247,22 +266,28 @@ async function runPolicy(seed, secs) {
         }
         const was = p.attached;
         p.update(FIXED, w, { held: want }, fx, i * FIXED);
-        w.update(FIXED, i * FIXED, Math.max(p.x, 0));
+        if (LIVE) { RIG.live(w, p, FIXED, grace); grace = Math.max(0, grace - FIXED); }
+        w.update(FIXED, i * FIXED, Math.max(p.x, LIVE ? w.hushX : 0));
         if (was && !p.attached) releases++;
         speeds.push(p.speed);
         if (p.speed < 220) stall++;
+        i0.n = i + 1;
         if (!p.alive) break;
       }
       return {
         kind, dist: Math.round(p.maxX / 10), releases,
         alive: p.alive, cause: p.deathCause || '-',
+        // The chain multiplier is half the real score and the sterile lab
+        // cannot see it at all, because RIG.clear() deletes every plankton.
+        mult: +(p.mult || 1).toFixed(1), chain: Math.round(p.chain || 0),
+        secs: +((i0.n) / 120).toFixed(1),
         vMean: Math.round(speeds.reduce((s, x) => s + x, 0) / Math.max(1, speeds.length)),
         vP90: Math.round([...speeds].sort((a, b) => a - b)[Math.round(0.9 * (speeds.length - 1))] || 0),
         stallFrac: stall / Math.max(1, speeds.length),
       };
     };
     return ['good', 'sloppy', 'mash', 'cling', 'nofly'].map(play);
-  }, FX_SRC, RIG_SRC, secs);
+  }, FX_SRC, RIG_SRC, secs, LIVE);
   await page.close();
   return r;
 }
@@ -606,14 +631,28 @@ try {
       console.log(`sweet spot (>=92% of best): ${within} samples = ${within * 5}deg wide`);
     }
   } else if (MODE === 'policy') {
-    console.log(`policy comparison, ${SECS}s, no hazards, no Hush\n`);
+    // READ THIS BEFORE BELIEVING A POLICY NUMBER. Without --live the world is
+    // sterile: RIG.clear() deletes every plankton and hazard and pushes the Hush
+    // out of the universe. That is the right lab for asking whether the PENDULUM
+    // rewards timing, and the wrong one for asking whether the GAME does, because
+    // it removes both the punishment for being slow and the reward for routing.
+    // It produced a genuinely alarming and completely false headline: `nofly` --
+    // a policy that never presses the button at all, and reports 0 releases
+    // because it never even attaches -- matched a good player over 60s on one
+    // seed and beat it by 31% on another. In the real game the Hush advances at
+    // lerp(196,470,difficulty) and nofly's mean speed is 266-310, so it is
+    // outrun by the front as soon as difficulty passes about 0.27. The lab had
+    // deleted the one system whose entire job is to punish drifting.
+    console.log(`policy comparison, ${SECS}s, ${LIVE ? 'LIVE world - hazards, plankton and the Hush all on' : 'no hazards, no Hush (pendulum only - see the note in the source)'}\n`);
     for (const s of SEEDS) {
       const rows = await runPolicy(s, SECS);
       console.log(`seed ${s}`);
-      console.log('  policy   dist(m)  rel  vMean  vP90  stall%  end');
+      console.log(`  policy   dist(m)  rel  vMean  vP90  stall%${LIVE ? '  mult  lived' : ''}  end`);
       const good = rows.find(r => r.kind === 'good');
       for (const r of rows) {
-        console.log(`  ${r.kind.padEnd(8)} ${pad(r.dist, 7)} ${pad(r.releases, 4)} ${pad(r.vMean, 6)} ${pad(r.vP90, 5)} ${pad(f1(r.stallFrac * 100), 6)}  ${r.alive ? 'alive' : 'died:' + r.cause}`);
+        console.log(`  ${r.kind.padEnd(8)} ${pad(r.dist, 7)} ${pad(r.releases, 4)} ${pad(r.vMean, 6)} ${pad(r.vP90, 5)} ${pad(f1(r.stallFrac * 100), 6)}` +
+          (LIVE ? ` ${pad('x' + r.mult, 5)} ${pad(r.secs + 's', 6)}` : '') +
+          `  ${r.alive ? 'alive' : 'died:' + r.cause}`);
       }
       const sl = rows.find(r => r.kind === 'sloppy');
       console.log(`  good/sloppy = ${f1(good.dist / Math.max(1, sl.dist))}x   good/mash = ${f1(good.dist / Math.max(1, rows.find(r => r.kind === 'mash').dist))}x   good/cling = ${f1(good.dist / Math.max(1, rows.find(r => r.kind === 'cling').dist))}x\n`);
