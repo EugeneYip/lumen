@@ -214,9 +214,19 @@ invariant unverified. The frozen-render check lives inside the determinism
 probe's own `try`, so one throw silently disabled both. Verified by sabotage —
 break the probe from the inside and the run must exit 1 naming it.
 
-Note the gate captures **five** of the eight named scenes: `title, tethered,
-launch, fast, hushNear`. `hazardNear`, `deep` and `dead` are never gated, so no
-defect that only appears in those is visible to it.
+The gate captures **six** of the eight named scenes: `title, tethered, launch,
+fast, hushNear, hazardNear`. `deep` and `dead` are still never gated, so no defect
+that appears only in those is visible to it.
+
+**Scene order in `SCENES` is load-bearing — append, never insert.** The list is
+sought in order *without restarting*, so every scene's frame depends on where the
+previous seeks left the run. Adding `hazardNear` before `hushNear` moved hushNear
+on seed 3 from 472m to 877m and surfaced a crushed-shadows warning at a moment
+the gate had never sampled: a one-line change that silently altered what four
+other numbers meant. Appended, every pre-existing scene is byte-identical. The
+same principle bit the particle work in the same week, where carving a new
+species out of the selector reshuffled the RNG stream and made an A/B compare two
+different fields.
 
 ## 5. Capture and review workflow
 

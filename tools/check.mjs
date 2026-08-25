@@ -27,7 +27,26 @@ const SEEDS = String(arg('seeds', '7,3')).split(',').map(Number);
 const W = Number(arg('w', 1600)), H = Number(arg('h', 900));
 const JSON_OUT = argv.includes('--json');
 
-const SCENES = ['title', 'tethered', 'launch', 'fast', 'hushNear'];
+// `hazardNear` was missing for a long time, so the one scene built around the
+// thing that kills you was never visually gated at all -- no exposure check, no
+// salience check, no focal check on any frame containing a hazard.
+//
+// It is safe to add on these seeds and that was measured, not assumed:
+// `hazardNear` and `hushNear` are two independent "danger is close" tests with
+// nothing making them mutually exclusive, and on seeds 4 and 5 they resolve ONE
+// SIM STEP apart (see AI_HANDOFF §8). On the gate's own seeds they are 12.3s and
+// 5.4s apart at different depths, so the gate gets two genuinely different
+// moments. If you change SEEDS, re-run
+//   node tools/_collide.mjs <seeds> title,tethered,launch,fast,hazardNear,hushNear
+// and check this pair, or the gate will silently double-count one frame's
+// warnings and report them as if two moments had been sampled.
+// APPENDED, NOT INSERTED, and that is not cosmetic. The list is sought in order
+// WITHOUT restarting, so every scene's frame depends on where the previous seeks
+// left the run. Inserting `hazardNear` before `hushNear` moved hushNear on seed 3
+// from 472m to 877m and surfaced a crushed-shadows warning at a moment the gate
+// had never sampled -- a one-line change silently altering what four other
+// numbers mean. Appending leaves every pre-existing scene byte-identical.
+const SCENES = ['title', 'tethered', 'launch', 'fast', 'hushNear', 'hazardNear'];
 
 const BUDGET = {
   bootMs: 5000,
