@@ -113,8 +113,9 @@ if (!dirty.length) console.log('  clean');
 else {
   for (const d of dirty) console.log(`  ${d}`);
   console.log('\n  Agents may own some of these files and still be editing them.');
-  console.log('  The ownership table is in AGENTS.md ("File ownership"); AI_HANDOFF.md');
-  console.log('  section 9 explains how to tell live work from abandoned work.');
+  console.log('  The ownership table is in AGENTS.md ("Architecture and file');
+  console.log('  ownership"); AI_HANDOFF.md section 9 explains how to tell live');
+  console.log('  work from abandoned work.');
 }
 
 console.log(H('Recent commits'));

@@ -80,7 +80,11 @@ different world. Use several seeds — art that only works on seed 7 is not done
 `shoot.mjs` boots its own server on a random port, so it is safe to run
 concurrently with other agents.
 
-## Architecture
+## Architecture and file ownership
+
+This table IS the ownership table. `tools/state.mjs` and `DESIGN.md` both point
+here; the `[OWNER: ...]` tag on each line is the whole of it.
+
 ```
 index.html                 shell + boot error trap
 src/main.js                loop, state machine, frameCtx, capture API   [OWNER: lead]
