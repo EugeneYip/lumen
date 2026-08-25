@@ -106,6 +106,39 @@ class Game {
       }
       if (e.code === 'KeyR' && this.mode !== 'title') this.startPlay();
     });
+
+    // TABBING AWAY MUST NOT LEAVE THE GAME PLAYING TO NOBODY. Checked in a real
+    // browser: with the tab hidden the AudioContext stays `running` with the
+    // master at 0.92, so the whole soundscape keeps playing to a player who is
+    // looking at something else. rAF is throttled to about 1Hz while hidden, so
+    // the run does not advance far and dtRaw is clamped to 0.25s -- there is no
+    // spiral and nothing dies -- but the drone carries on regardless, and the
+    // audio clock (wall-clock driven, by invariant 4) keeps running while the
+    // frame clock crawls.
+    //
+    // Pausing is the honest fix and the machinery already exists: `paused` is a
+    // real mode, `step` returns early on it, and hud.js draws the overlay. The
+    // run is deliberately LEFT paused on return rather than resumed, because
+    // dropping someone back into a moving game is worse than making them press
+    // a key.
+    //
+    // Guarded on `headless` even though headless Chrome reports `visible` (I
+    // measured it) -- the capture harness must never be at the mercy of browser
+    // chrome behaviour, and that is AGENTS.md's first absolute rule.
+    //
+    // `_hiddenMute` is separate from `this.muted` so that auto-muting cannot
+    // overwrite, or be overwritten by, the player's own M preference.
+    document.addEventListener('visibilitychange', () => {
+      if (this.headless) return;
+      if (document.hidden) {
+        if (this.mode === 'play') this.mode = 'paused';
+        this._hiddenMute = true;
+        this.audio.setMuted(true);
+      } else if (this._hiddenMute) {
+        this._hiddenMute = false;
+        this.audio.setMuted(this.muted);
+      }
+    });
   }
 
   _resize() {
