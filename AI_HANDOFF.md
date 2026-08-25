@@ -252,6 +252,34 @@ whether to keep iterating.
 - **No auto-exposure**, deliberately. It would mask exactly the contract
   violations `check.mjs` exists to catch.
 
+### Two shape traps that have each bitten three times
+
+**A ribbon cannot draw a soft edge at any tuning.** Its cross-section is
+`exp(-x^2 * falloff)`, so at the low falloff that reads as "solid" the value at
+the ribbon's own edge is still ~0.2-0.37 of peak, and its ends are butt caps.
+A short low-falloff stroke is therefore a filled quadrilateral with hard steps,
+not a body. This produced the mote's rim reading as a selection bracket, the
+spire's "machined rectangle", and the trapezoids under every anemone colony.
+For anything that must fade to nothing, use a sprite — it reaches zero inside
+its own quad. `S.VOLUME` is the profile that is opaque through the middle *and*
+reaches exactly zero, which is what a ribbon cannot do.
+
+**A stretched quad is a straight line.** Its medial axis *is* a segment, and
+whatever the profile does across the width is compressed by the aspect, so no
+choice of sprite saves a high-aspect quad. The four-review "ruled diagonal" was
+one `S.SHARD` quad at 13.5:1 — and `S.SHARD` was chosen precisely because it
+tapers at both ends and "cannot have a straight side however far it is
+stretched". True, and beside the point: it has no straight side because it is
+nothing but a straight line. If a thing must not read as ruled, build it from
+several offset pieces, so no straight line passes through more than one.
+
+### There is no depth buffer, so you cannot hide anything behind geometry
+
+The scene paints over whatever the background shader already drew. Burying a
+cap below `world.bandBot` does **not** conceal it — a technique several places
+relied on, and the reason a buried butt cap was as visible as an exposed one.
+Fade across the band instead.
+
 ### Determinism has a specific GPU trap
 
 Implicit-derivative mip LOD selection in non-uniform control flow will make the
