@@ -72,16 +72,22 @@
 //    hard rectangle with a stair-stepped edge. See quad().
 //  - A HIGHLIGHT IS AN AREA, NOT A BRIGHTNESS. The exposure contract's "there
 //    must be real highlights" is hdrStats().p99, and that is a COUNT, not a
-//    level: the percentiles come from a 96x54 grid over the frame, so at
-//    1600x900 one sample stands for 278 pixels and p99 is literally the 52nd
-//    brightest of 5184 samples. A 5px pip at 3.0 linear is invisible to it
-//    however hot it is, because the grid steps 17px and steps over it; a 20px
-//    patch at 0.4 is worth a whole sample. Measured on seed 7 / launch by
-//    differencing the frame against itself with one family filtered out of the
-//    batch: this entire file put 480 pixels above 0.25 linear, i.e. under two
-//    samples of the 59 that frame has, so its whole p99 contribution was
-//    0.011 - and the frame sat 1.2% above a hard floor. Both fixes below are
-//    therefore about AREA. See the WAKE envelope and Ambient's flash.
+//    level: p99 is the level 1% of the frame's pixels exceed, so what buys it is
+//    how many pixels a family puts over 0.25 linear, and a 5px pip at 3.0 has
+//    almost none however hot it is while a 20px patch at 0.4 has hundreds.
+//    Measured on seed 7 / launch by differencing the frame against itself with
+//    one family filtered out of the batch: this file's whole p99 contribution
+//    was 0.011 while the frame sat 1.2% above a hard floor. The fixes below are
+//    therefore about AREA. See the WAKE envelope, Ambient's flash, and the
+//    payback in emit().
+//    NOTE, because the argument above was originally written against a
+//    different estimator and the conclusion is the only part that survived
+//    unchanged: hdrStats used to sample a 96x54 grid, which made p99 "the 52nd
+//    brightest of 5184 samples" and let a narrow lobe hide between samples.
+//    main.js now builds a log-spaced histogram over EVERY pixel, so p99 is an
+//    exact percentile and nothing steps over a pip any more. Do not reason from
+//    a 17px sampling step; the reason to prefer area is the percentile itself,
+//    which has not moved.
 //  - AND SMALL AND HOT IS THE ONE COMBINATION THE MIP CHAIN EATS. A profile
 //    drawn far below its tile size delivers its own tile MEAN, not its peak,
 //    because that is what a box filter leaves. Measured means: GLOW 0.085,
@@ -89,6 +95,30 @@
 //    the kit says to draw small WITH GAIN - loses a factor of eight to GLOW at
 //    the same small size. Two flashes in Ambient were CORE at 5px and both
 //    measured 0.023 linear peak, which is to say they were not there at all.
+//  - THE HERO OWNS A CHANNEL AND THIS FILE MAY NOT ENTER IT. A blind review's
+//    words were that the mote "has no reserved channel of its own", and it was
+//    spending three of them here at once:
+//      VALUE  nothing bounded how bright anything in this file could get. A
+//             ceiling now does, applied as a CLASS at the one place light
+//             leaves the file. See CEIL and emit().
+//      HUE    `surface` (0x2f8fa3) is a pale teal one step off moteOuter, and a
+//             third of the drifters, the bubble glint and a fifth of the
+//             striations were all painted in it. The mote owns cyan through
+//             white; ambient life gets mint, violet, silt and deep water.
+//      SHAPE  the drifters were soft ROUND dots - the hero's own vocabulary at
+//             the hero's own size. Everything in Ambient is elongated now,
+//             each individual at its own aspect and its own angle, and every
+//             elongation goes through aniso(), which is AREA-PRESERVING: the
+//             layer's contribution to the frame's mean, p50 and p99 is
+//             identical to the round-dot build it replaces. Only the
+//             silhouette moved.
+//    And the honest half, measured by elimination on the 1000m frame rather
+//    than argued. Of the fourteen local maxima at or above the mote's own
+//    tonemapped peak, ZERO are drawn by this file: suppressing everything in it
+//    leaves the count at fourteen, and suppressing the world's plankton field
+//    takes it to zero. This file was never the thing outshining the hero. It
+//    was the thing dressed like it, which is a different defect and is the one
+//    fixed here.
 import { makeRng } from '../engine/rng.js';
 import { clamp, clamp01, lerp, TAU, smoothstep } from '../engine/math.js';
 import { S } from '../engine/textures.js';
@@ -175,12 +205,13 @@ const TRAIL_BACK = 152;
 // So the floor stays at the smallest value that keeps a wide profile's falloff
 // alive, and the fill it would have cost everywhere else is not spent.
 //
-// Residue, for whoever picks this up next: the mint blocks are gone and the
-// white chain is gone, but FOUR faint neutral specks survive in that same crop.
-// They are not from either emitter fixed here. The remaining pale sources close
-// to the mote are the bubble glint - N_SURF, pulled further toward N_ANCH by
-// `lit` - and sparks('attach'), whose hot colour is N_ANCHC. Both are
-// legitimately pale, so the remedy there is a hue floor and not a size one.
+// Residue, now CLOSED. That note ended with four faint neutral specks still
+// surviving in the same crop, named the two remaining pale sources - the bubble
+// glint and the hot end of sparks('attach') - and prescribed "a hue floor and
+// not a size one". Both have it: the glint's base is `silt` rather than
+// `surface`, and the attach spark's hot colour is N_ANCHH, halfway from
+// `anchorCore` to `anchorMid` and therefore amber rather than warm white. There
+// is nothing left in this file within reach of neutral.
 const MIN_QUAD_PX = 5.5;
 // ...and a quad may not be small AND hot at the same time. Measured on the
 // tethered frame at 16x: the mint blocks beside the mote were 3.3-5.5px wide
@@ -222,6 +253,125 @@ function quad(w, h, fl) {
   let k = 1;
   if (qw < fl) { k = qw / fl; qw = fl; }
   if (qh < fl) { k *= qh / fl; qh = fl; }
+  return k < 1 ? Math.sqrt(k) : 1;
+}
+
+// ------------------------------------------------ the hero's reserved value ---
+// A ceiling on the peak of everything this file draws, applied as a CLASS at
+// the single point where light leaves the file. It is not a per-emitter tuning
+// value and no per-emitter retune can breach it, because emit() is the only
+// path to the batch: an emitter can ask for anything it likes and this is what
+// arrives.
+//
+// The numbers are INVERTED FROM THE SHIPPED TONE CURVE, not picked. postfx
+// applies Hable with WHITE_REF 12.3 over a white point of 11, so linear surface
+// brightness lands on display white as:
+//
+//     linear    1.23    2.40    6.0     30
+//     display   0.50    0.67    0.84    0.96
+//
+// The last two are not arbitrary either: 6 is the minimum emitter core the
+// exposure contract demands, and 30 is what the mote's own core measures (its
+// tonemapped peak reads 0.955-0.965 on every scene probed, which is the same
+// number from the other end). So:
+//
+//   CEIL_AMB  ambient life gets the bottom HALF of the tonemapped range,
+//             unconditionally. It is never the subject of a frame.
+//   CEIL      everything else this file draws stops at two thirds. The top
+//             third belongs to the hero and to the world's own emitter cores,
+//             by construction rather than by convention.
+//   CEIL_HERO the one exemption, and it is the same rule rather than a hole in
+//             it: a death flash IS the animal, not something standing beside
+//             it. Only burst('death') sets it - see `_noHero`.
+//
+// A reserved band needs a visible GAP in it, not merely an ordering, which is
+// why CEIL sits a stop and a half below the hero rather than at the literal top
+// 5% of the range - at 21.7 linear the rule would have been satisfied by every
+// frame this file has ever drawn and would have meant nothing.
+//
+// The ceiling is PAID BACK AS AREA, which is what makes it free. Light over the
+// ceiling is spread, not deleted: the quad grows by f and the tint falls by
+// f^2, so the frame's total energy is unchanged to the last photon. That matters
+// because this file carries "there must be real highlights" on the tightest
+// frames - seed 7 / fast measures p99 0.2434 without it against a floor of
+// 0.25 - and p99 is a COUNT of pixels above 0.25 linear, not a level. For a
+// falloff of peak P the area above threshold T goes as w^2 ln(P/T), so holding
+// energy while lowering the peak by f multiplies that area by
+// f(1 - ln f / ln(P/T)), which is greater than 1 for every f > 1 in range.
+// Clamping the peak this way RAISES p99 while lowering salience. That is the
+// trade the finding asks for, and it is the only reason a ceiling can be
+// imposed on a file that is load-bearing for the highlight contract.
+const CEIL = 2.4, CEIL_AMB = 1.23, CEIL_HERO = 24;
+// Capped, because a spread quad puts light further out than the keep-out that
+// was evaluated on its unspread reach.
+const CEIL_SPREAD = 2.3;
+
+/**
+ * The ONE path from this file into the frame.
+ *
+ * Clamps the peak channel to `ceil`, paying the shortfall back as area so no
+ * light is destroyed, and hard-trimming whatever the spread cap could not
+ * absorb - a ceiling that yields is not a ceiling.
+ */
+function emit(batch, x, y, w, h, rot, r, g, b, layer, ceil) {
+  const pk = r > g ? (r > b ? r : b) : (g > b ? g : b);
+  if (pk > ceil) {
+    let f = Math.sqrt(pk / ceil);
+    if (f > CEIL_SPREAD) f = CEIL_SPREAD;
+    const k = 1 / (f * f);
+    w *= f; h *= f; r *= k; g *= k; b *= k;
+    const over = pk * k;
+    if (over > ceil) { const c = ceil / over; r *= c; g *= c; b *= c; }
+  }
+  batch.push(x, y, w, h, rot, r, g, b, 1, layer);
+}
+
+/**
+ * Anisotropic and AREA-PRESERVING. `ax` is the ASPECT RATIO wanted, so the
+ * stretch applied along the quad's own x and the narrowing applied across it
+ * are each its SQUARE ROOT. Written into qw/qh; returns the tint multiplier that
+ * leaves the light exactly where it was, which - when nothing is floored - is 1.
+ *
+ * The square root is not a detail. Stretching by ax and narrowing by ax gives an
+ * aspect of ax SQUARED, and the first version of this did exactly that: FAT
+ * asked for 11:1 at the cruise and was measured drawing 95:1, a 620px by 7px
+ * needle. Which is not a sheared drifter, it is the "anamorphic streak reads as
+ * a filter, not light" finding reproduced by accident in a second file.
+ *
+ * Every elongation in Ambient goes through here, and that is what makes the
+ * shape rule affordable. Area constant and tint constant means TOTAL LIGHT
+ * constant AND PEAK constant, so:
+ *
+ *  - a flake at 3:1 costs the exposure contract nothing at all against the
+ *    round dot it replaces - not the mean, not p50, not p99;
+ *  - a speed cue cannot quietly become a brightness cue, in either direction.
+ *    The previous smear divided the tint by the full stretch, so at its
+ *    strongest the near layer was 4.8x DIMMER than at rest and the cue erased
+ *    itself exactly where it was meant to be loudest;
+ *  - and the fill cost is flat, which is why FAT is back in the smear. The
+ *    recorded reason it was pulled out was 216k pixels of soft overdraw at
+ *    4.4x of stretch. At constant area there is no overdraw to pay for.
+ *
+ * The aspect is CLAMPED by what the quad can hold rather than allowed to run
+ * into the pixel floor. Below about three screen pixels the mip chain has
+ * averaged the tile to one value, so there is no silhouette left to elongate
+ * (see quad()) - and the floor repays only the SQUARE ROOT of the shortfall, so
+ * leaning on it would launder light into the frame and a shape change has to be
+ * a shape change. The consequence is the right one, and it is measured: 59% of
+ * the ambient layer's QUADS come out of here still round, and they are 4.6% of
+ * its drawn AREA. The round remainder is sub-6px grain that has no silhouette to
+ * lose; the drifters a viewer can actually resolve - the bokeh, the organisms,
+ * the larvae, the flashes - carry all of the shape.
+ */
+function aniso(w, h, ax, fl) {
+  let s = ax > 1 ? Math.sqrt(ax) : 1;
+  const cap = h / fl;
+  if (s > cap) s = cap;
+  if (s < 1) s = 1;
+  qw = w * s; qh = h / s;
+  let k = 1;
+  if (qh < fl) { k = qh / fl; qh = fl; }
+  if (qw < fl) { k *= qw / fl; qw = fl; }
   return k < 1 ? Math.sqrt(k) : 1;
 }
 
@@ -332,8 +482,18 @@ const N_MOTEO = norm(PAL.moteOuter);
 const N_TRAIL = norm(PAL.moteTrail);
 const N_PLNK = norm(PAL.plankton);
 const N_PLNKC = norm(PAL.planktonCore);
+const N_PLNKD = norm(PAL.planktonDim);
 const N_ANCH = norm(PAL.anchorMid);
-const N_ANCHC = norm(PAL.anchorCore);
+// The hot end of an attach spark, and it closes the last item on this file's own
+// residue list. That note ended with four faint NEUTRAL specks still surviving
+// beside the mote, named the bubble glint and sparks('attach') as the two
+// remaining pale sources, and said the remedy for both was "a hue floor and not
+// a size one". `anchorCore` is 0xfff3d0 - a warm near-WHITE, and white is the
+// mote's. Halfway to `anchorMid` is unmistakably amber, still reads as the
+// hotter half of the same anchor light, and is nowhere near neutral.
+const N_ANCHH = norm([(PAL.anchorCore[0] + PAL.anchorMid[0]) * 0.5,
+  (PAL.anchorCore[1] + PAL.anchorMid[1]) * 0.5,
+  (PAL.anchorCore[2] + PAL.anchorMid[2]) * 0.5]);
 const N_HAZ = norm(PAL.hazardRim);
 const N_HAZC = norm(PAL.hazard);
 const N_HUSH = norm(PAL.hushEdge);
@@ -351,7 +511,7 @@ const dragFor = (base, size) => base * (12 / (size + 2));
 
 const CFG = {
   attach: {
-    spd: [70, 360], life: [0.24, 0.66], size: [4.5, 21], col: N_ANCH, hot: N_ANCHC,
+    spd: [70, 360], life: [0.24, 0.66], size: [4.5, 21], col: N_ANCH, hot: N_ANCHH,
     bright: 2.3, buoy: [-80, 45], drag: 3.4, cone: 2.5, flow: 0.9, cool: 0.55, str: 0.5, bub: 2, silt: 0,
   },
   release: {
@@ -395,6 +555,9 @@ export class Particles {
     this.wx = f(CAP); this.wy = f(CAP);
     this.kind = new Uint8Array(CAP);
     this.layer = new Uint8Array(CAP);
+    // Exempt from the value ceiling. See CEIL_HERO: the exemption is for an
+    // emission that IS the hero, not one standing next to it.
+    this.noHero = new Uint8Array(CAP);
     this.n = 0;
 
     this.rings = [];
@@ -436,6 +599,7 @@ export class Particles {
     this._aTrail = 0;       // distance-driven, unlike every other accumulator
     this._lane = 0;         // 0..lanes-1; the braid gains a strand at the cruise
     this._mix = [0, 0, 0];  // owned scratch: a tinted colour must not allocate
+    this._noHero = 0;       // set only for the duration of the death sequence
   }
 
   clear() {
@@ -456,6 +620,7 @@ export class Particles {
     this.rot[i] = this.rng() * TAU; this.spin[i] = spin;
     // defaults, because slots are recycled
     this.kind[i] = K.SPARK;
+    this.noHero[i] = this._noHero;
     this.flow[i] = 1; this.cool[i] = 0; this.str[i] = 0;
     this.wobA[i] = 0; this.delay[i] = 0; this.asp[i] = 1; this.lit[i] = 0;
     // Seed the cache now: a recycled slot's stale water could be from anywhere
@@ -630,6 +795,15 @@ export class Particles {
 
     if (flavour !== 'death') return;
 
+    // Everything from here to the end of this function is the mote coming
+    // apart, so all of it is exempt from the value ceiling - see CEIL_HERO.
+    // Carried as a spawn flag rather than read off `_gk` at draw time because
+    // _gk takes ~0.2s to release (it has to, or every wake and silt cloud
+    // already on screen pops to full brightness in one frame) and the flash is
+    // over in 0.09s: read at draw time the hardest event in the game would be
+    // clamped by a guard protecting a hero that no longer exists.
+    this._noHero = 1;
+
     // ------------------------------------------------------- a light going out ---
     // Timeline in seconds after death. The GAP matters as much as the events:
     // main.js damps envDim to 0.42 over ~1.4s, so anything still firing through
@@ -757,6 +931,7 @@ export class Particles {
 
     // 7. gas released by the collapse, arriving over the next half second
     this.bubbles(x, y, 16, this.pvx * 0.2, this.pvy * 0.2, 0.55);
+    this._noHero = 0;
   }
 
   /**
@@ -892,7 +1067,14 @@ export class Particles {
     const mx = this._mix;
     for (let i = 0; i < count; i++) {
       const s = lerp(9, 30, Math.pow(r(), 1.7));
-      const base = r() < 0.34 ? N_SURF : N_WATER;
+      // ...and `surface` is gone from it. This file's own residue note ended
+      // with four faint NEUTRAL specks surviving beside the mote, named this
+      // glint as one of the two remaining pale sources, and said the remedy
+      // there was "a hue floor and not a size one". This is that floor: `silt`
+      // is the same teal three stops down, so the glint still reads as a lens
+      // and no longer reads as the hero's colour. One draw, unchanged, so
+      // nothing downstream of it moves.
+      const base = r() < 0.34 ? N_SILT : N_WATER;
       const m = lit * 0.62;
       mx[0] = lerp(base[0], N_ANCH[0], m);
       mx[1] = lerp(base[1], N_ANCH[1], m);
@@ -1139,7 +1321,13 @@ export class Particles {
         this._mOut = vh * 0.104;
         this._mInv = 1 / (this._mOut - this._mIn);
       }
-      const live = (g.mode === 'play' && p.alive) ? 1 : 0;
+      // ALIVE, not "playing". The mote is on screen and lit on the title frame
+      // too, and the title frame is the one a store page uses - it measured the
+      // worst hero rank of any scene on both seeds (12/336 and 24/336) with the
+      // keep-out and the moat both switched off for no reason beyond a mode
+      // string. `_events` and `_disturb` stay gated on 'play', so nothing is
+      // emitted that was not emitted before; only the pocket opens.
+      const live = p.alive ? 1 : 0;
       this._gk = live + (this._gk - live) / (1 + 5 * dt);
       if (this._impSeq < 0) { this._impSeq = p.impactSeq | 0; this._lchSeq = p.launchSeq | 0; }
       if (dt > 0 && g.mode === 'play' && p.alive) {
@@ -1667,11 +1855,12 @@ export class Particles {
           tx * lerp(-40, 70, r()) + nx * (r() - 0.5) * 34,
           ty * lerp(-40, 70, r()) + ny * (r() - 0.5) * 34,
           lerp(0.5, 1.1, r()), s0, s0 * lerp(1.1, 1.5, r()),
-          // Barely any SURF. Pale is nearly neutral, and the first version of
-          // this drew four desaturated grey-blue slabs to the left of the mote
-          // at 3x - the "flat hard rectangle" this file already has a rule
-          // about, in a colour reserved for the hero.
-          r() < 0.18 ? N_SURF : N_WATER,
+          // No SURF at all now. "Barely any" was already the right direction -
+          // the first version of this drew four desaturated grey-blue slabs to
+          // the left of the mote at 3x, the "flat hard rectangle" this file has
+          // a rule about - and the hue rule in the header finishes the job:
+          // pale teal is one step off moteOuter, so it belongs to the mote.
+          r() < 0.18 ? N_SILT : N_WATER,
           lerp(0.13, 0.30, r()) / st, S.SHARD,
           dragFor(4.0, s0), lerp(-6, 10, r()), 0
         );
@@ -1838,6 +2027,7 @@ export class Particles {
     this.delay[b] = this.delay[a]; this.kind[b] = this.kind[a];
     this.asp[b] = this.asp[a]; this.lit[b] = this.lit[a];
     this.wx[b] = this.wx[a]; this.wy[b] = this.wy[a];
+    this.noHero[b] = this.noHero[a];
   }
 
   // ------------------------------------------------------------------- draw ---
@@ -1850,6 +2040,7 @@ export class Particles {
     for (let i = 0; i < this.n; i++) {
       if (this.delay[i] > 0) continue;
       const kd = this.kind[i];
+      const ceil = this.noHero[i] ? CEIL_HERO : CEIL;
       const t = 1 - this.life[i] / this.max[i];
 
       let a, s;
@@ -1984,15 +2175,15 @@ export class Particles {
         const body = bb * (0.26 + 0.34 * this.lit[i]) * this._clear(px, py, s * 0.75);
         if (body > 0.004) {
           const sw = s * 1.45;
-          batch.push(px, py, sw, sw, 0, cr * body, cg * body, cb * body, 1, S.VEIL);
+          emit(batch, px, py, sw, sw, 0, cr * body, cg * body, cb * body, S.VEIL, ceil);
         }
         // the glint. Floored in size because a sub-pixel hot point shimmers
         // under a moving camera, which is the same reason ribbons floor theirs.
         // Size floored, alpha untouched: a specular is a specular. See quad().
         quad(s * 0.34, s * 0.34, fl);
         const ga = bb * 0.8;
-        batch.push(px + ox, py + oy, qw, qh, this.rot[i],
-          cr * ga, cg * ga, cb * ga, 1, S.SPARK);
+        emit(batch, px + ox, py + oy, qw, qh, this.rot[i],
+          cr * ga, cg * ga, cb * ga, S.SPARK, ceil);
         continue;
       }
 
@@ -2058,7 +2249,7 @@ export class Particles {
         }
       }
       if (ba > 0.004) {
-        batch.push(px, py, qw, qh, drot, cr * ba, cg * ba, cb * ba, 1, dlay);
+        emit(batch, px, py, qw, qh, drot, cr * ba, cg * ba, cb * ba, dlay, ceil);
       }
 
       // A second, much wider scatter halo: one blur radius for everything reads
@@ -2076,7 +2267,7 @@ export class Particles {
         const va = bb * 0.13 * this._clear(px, py, s * 1.6);
         if (va > 0.004) {
           const sw = s * 3.2;
-          batch.push(px, py, sw, sw, 0, cr * va, cg * va, cb * va, 1, S.VEIL);
+          emit(batch, px, py, sw, sw, 0, cr * va, cg * va, cb * va, S.VEIL, ceil);
         }
       }
     }
@@ -2093,8 +2284,8 @@ export class Particles {
       if (a <= 0.004) continue;
       const d = (rad * 2) / g.fr;
       const c = g.col;
-      batch.push(g.x, g.y, d * (1 + g.ecc), d * (1 - g.ecc), g.ang,
-        c[0] * a, c[1] * a, c[2] * a, 1, g.layer);
+      emit(batch, g.x, g.y, d * (1 + g.ecc), d * (1 - g.ecc), g.ang,
+        c[0] * a, c[1] * a, c[2] * a, g.layer, CEIL);
     }
   }
 }
@@ -2118,9 +2309,26 @@ export class Particles {
 // Two further variance axes, because "five species" was still legible as five:
 // every individual carries its own flash SHAPE (the exponent on its envelope)
 // as well as its own rate, and the rates now span slow breathers to fast
-// twitchers within one species instead of clustering. And nothing here is a
-// circle: FAT and LARVA are ellipses, ORG is BLOB, whose silhouette is wobbled
-// by three angular harmonics and whose falloff has no rim.
+// twitchers within one species instead of clustering.
+//
+// AND NOTHING HERE IS A DOT. That claim used to be made about the profiles -
+// FAT and LARVA nominally ellipses, ORG a wobbled BLOB - and a blind review
+// took one look and said the mote "shares the same round-soft-dot vocabulary as
+// the ambient motes". It was right, because the aspects were 1.08-1.70, which
+// is a circle with an excuse. Every species now carries a real aspect and its
+// own angle, and every draw goes through aniso() so the elongation is
+// area-preserving and therefore free. Two consequences worth knowing before
+// retuning any of it:
+//
+//  - The work is done by the BIG drifters, necessarily. aniso() will not
+//    elongate a quad past the point where its narrow axis hits the pixel
+//    floor, because below three pixels there is no silhouette left to shape.
+//    So a 5px snowflake stays compact and a 64px bokeh goes to 11:1 - which is
+//    the right distribution anyway, since the round dots a reviewer can see are
+//    the near ones.
+//  - The frame statistics are UNCHANGED by all of it. Area constant and tint
+//    constant means total light and peak both constant, so this whole pass is
+//    invisible to the exposure contract and visible only to the eye.
 // ============================================================================
 const AK = { SNOW: 0, SPARK: 1, FAT: 2, ORG: 3, LARVA: 4 };
 
@@ -2162,13 +2370,24 @@ export class Ambient {
       if (k === AK.SNOW) {
         // Wide size spread on purpose: equal-sized dots is the single clearest
         // procgen tell there is, and snow is the most numerous species.
-        this.ps[i] = lerp(1.4, 6.4, Math.pow(r(), 2.0));
+        // Top of the range raised from 6.4, and that is not cosmetic: aniso()
+        // caps a flake's aspect at what its narrow axis can hold above the
+        // pixel floor, so SIZE is what buys shape here. The light is untouched
+        // - a bigger flake at the same surface brightness is exactly the "trade
+        // peak for area" the highlight contract likes anyway.
+        this.ps[i] = lerp(1.4, 8.2, Math.pow(r(), 2.0));
         this.pw[i] = lerp(0.10, 0.34, r());        // barely varies: it is debris
         this.dx[i] = lerp(-4, 11, r());
         this.dy[i] = lerp(8, 24, r());             // sinking, always
         this.br[i] = lerp(0.24, 0.58, r());
+        // A FLAKE, not a dot. Marine snow is aggregate - mucus strings, broken
+        // tests, faecal pellets - so it is elongated and irregular, which is
+        // both the honest read and the cheapest way to stop 194 of the 323
+        // drifters speaking the hero's own vocabulary.
+        this.el[i] = lerp(1.45, 2.90, r());
+        this.rs[i] = (r() - 0.5) * 1.15;           // tumbling, each at its own rate
       } else if (k === AK.SPARK) {
-        this.ps[i] = lerp(1.1, 3.2, r());
+        this.ps[i] = lerp(1.1, 3.6, r());
         // From slow breathers to fast twitchers within the one species, skewed
         // slow: a screen of dots all blinking at the same rate reads as a
         // string of fairy lights, whatever the phases are.
@@ -2177,13 +2396,26 @@ export class Ambient {
         this.dx[i] = lerp(-18, 28, r());
         this.dy[i] = lerp(-10, 15, r());
         this.br[i] = lerp(0.45, 1.15, r());
+        // The body is small enough that the floor will hold most of it near
+        // round; the FLASH is drawn at 4.2x and is where this aspect lands, so
+        // a twinkle is a sliver lighting up rather than a dot appearing. That
+        // is the visible half of this species and it is the half a review
+        // counted.
+        this.el[i] = lerp(2.10, 4.20, r());
+        this.rs[i] = (r() - 0.5) * 0.72;
       } else if (k === AK.FAT) {
         this.ps[i] = lerp(7, 18, r());
         this.pw[i] = lerp(0.14, 0.48, r());
         this.dx[i] = lerp(-16, 12, r());           // some drift against the flow
         this.dy[i] = lerp(2, 12, r());
         this.br[i] = lerp(0.10, 0.28, r());
-        this.el[i] = lerp(1.08, 1.55, r());        // never a perfect circle
+        // 1.08-1.55 was a circle with an excuse, and this is the class it
+        // mattered most for: 53 of the 323 drifters, drawn at 2.4x, the largest
+        // quads in the layer and therefore exactly what "green bokeh the mote
+        // is dimmer than a dozen of" is describing. It is also the class with
+        // the most room - a 64px quad can hold 11:1 without going near the
+        // pixel floor - so it is where the near-field shear reads.
+        this.el[i] = lerp(1.55, 2.60, r());
         this.rs[i] = (r() - 0.5) * 0.34;
       } else if (k === AK.ORG) {
         this.ps[i] = lerp(9, 23, r());
@@ -2192,7 +2424,7 @@ export class Ambient {
         this.dx[i] = lerp(-28, -6, r());           // swims across the drift
         this.dy[i] = lerp(-7, 7, r());
         this.br[i] = lerp(0.6, 1.5, r());
-        this.el[i] = lerp(1.10, 1.70, r());        // a body, not a ball
+        this.el[i] = lerp(1.55, 2.35, r());        // a body, not a ball
         this.rs[i] = (r() - 0.5) * 0.26;
       } else {
         this.ps[i] = lerp(11, 28, r());
@@ -2273,7 +2505,10 @@ export class Ambient {
     // through the one part of the frame that has to stay the hero's. Measured
     // cost to the hero's own block energy: 0.01 of 5.93. See _keep().
     const vh = cam.viewH || 1080;
-    this._kOn = (gm && gm.mode === 'play' && gm.player.alive) ? 1 : 0;
+    // Alive rather than "playing", for the reason Particles._gk now is: the
+    // title frame has a lit mote in it and measured the worst hero rank of any
+    // scene on either seed with the pocket switched off.
+    this._kOn = (gm && gm.player && gm.player.alive) ? 1 : 0;
     if (this._kOn) {
       this._kx = gm.player.x; this._ky = gm.player.y;
       this._kIn = vh * 0.125; this._kInv = 1 / (vh * 0.085);
@@ -2316,55 +2551,89 @@ export class Ambient {
       }
       const s = this.ps[i] * (0.5 + 0.42 * iz);
 
-      // Three accents with clear jobs: the mote owns white, plankton owns mint,
-      // the Hush owns violet. Nothing in the ambient layer is allowed white.
+      // Three accents with clear jobs: the mote owns white AND cyan, plankton
+      // owns mint, the Hush owns violet. `surface` has left this table and that
+      // is the whole point of it - it is a pale teal one step off moteOuter, so
+      // a third of the drifters and nearly half the sparks were being painted
+      // in the protagonist's own hue. A review's words for the result were
+      // "adjacent hue... no reserved channel of its own". What is left is mint
+      // for life, violet for the rare organism, and silt and deep water for
+      // debris: nothing in this layer is within reach of cyan any more.
       const c = k === AK.ORG ? (this.hue[i] < 0.2 ? N_HUSH : N_PLNK)
-        : k === AK.SPARK ? (this.hue[i] < 0.45 ? N_SURF : N_PLNK)
-          : this.hue[i] < 0.3 ? N_SURF : N_WATER;
+        : k === AK.SPARK ? (this.hue[i] < 0.42 ? N_PLNKD : N_PLNK)
+          : this.hue[i] < 0.26 ? N_SILT : (this.hue[i] > 0.88 ? N_PLNKD : N_WATER);
       // pull colour toward deep water with distance rather than just dimming it
       const cr = lerp(c[0], ABSORB[0], fade * 0.7) * amp;
       const cg = lerp(c[1], ABSORB[1], fade * 0.7) * amp;
       const cb = lerp(c[2], ABSORB[2], fade * 0.7) * amp;
 
+      // ------------------------------------------------ shape, and the shear ---
       // A drifting hair and a live organism keep their own orientation: a
-      // smeared body reads as a mistake, not as speed.
-      // FAT is excluded now, along with the two that always were. It is the fat
-      // low-contrast bokeh, so it is the only class here whose quads are big
-      // enough to matter: eight near ones at 4.4x of stretch is 216k pixels of
-      // soft overdraw, a seventh of the frame, on a 12ms budget that is already
-      // the gate's one failure. And it is the class with the weakest claim -
-      // bokeh is out of focus, which is to say already smeared, so motion adds
-      // the least contrast to it. What the review asked for by name was
-      // "drifting particulate", and that is SNOW: 194 of the 323 drifters, at
-      // 400 pixels each, where the same stretch costs a twentieth as much. So
-      // the cue moves onto the cheap numerous class and gets pushed further
-      // there - 4.8x - for less fill than before this pass.
-      const e = (smr > 0 && k !== AK.LARVA && k !== AK.ORG && k !== AK.FAT)
-        ? 1 + smr * clamp01((1.06 - z) / 0.62) * 4.8 : 1;
-      const ie = 1 / e;
-      const srot = e > 1.04 ? sang : 0;
+      // smeared body reads as a mistake, not as speed. Everything else is being
+      // sheared by the water the mote is dragging past it, which is a real
+      // velocity gradient and is why only the NEAR layer does it - the
+      // difference between the layers is the cue, and a uniform smear says
+      // nothing.
+      //
+      // FAT is back in it. The recorded reason it was pulled out was fill:
+      // 216k pixels of soft overdraw at 4.4x of stretch, a seventh of the
+      // frame, on a budget that is already the gate's tightest number. aniso()
+      // is area-preserving, so that cost is now identically zero - and FAT is
+      // the class with by far the most room to elongate, so it is where the cue
+      // actually lands.
+      //
+      // ...and the primary cue is ALIGNMENT, not length, for the reason this
+      // file keeps rediscovering: a magnitude needs a reference in frame and a
+      // still has none. Sixty flakes each pointing its own way against sixty
+      // combed along one axis can be ordered cold, and unlike a length it
+      // cannot be confused with a change of scale.
+      const moves = k !== AK.LARVA && k !== AK.ORG;
+      const sh = (smr > 0 && moves) ? smr * clamp01((1.12 - z) / 0.66) : 0;
+      let ax = this.el[i];
+      if (sh > 0) {
+        ax *= 1 + sh * (k === AK.FAT ? 3.4 : 5.2);
+        // 9:1, and the ceiling is on the SHAPE for once rather than on the
+        // light. Past about ten a soft ellipse stops reading as a sheared
+        // drifter and starts reading as a lens streak laid over the frame,
+        // which is a finding this review already has open against postfx and is
+        // not worth reproducing here to say the same thing twice.
+        if (ax > 9) ax = 9;
+      }
+      // Shortest-arc swing into the flow. An ellipse is symmetric under a half
+      // turn, so the difference is wrapped into +/-90 degrees before it is
+      // interpolated: without that a flake 170 degrees off the flow takes the
+      // long way round and reads as tumbling backwards the faster you go.
+      let rot = this.rt[i] + t * this.rs[i];
+      if (sh > 0) {
+        const al = sh * 2.1 < 1 ? sh * 2.1 : 1;
+        let dd = sang - rot;
+        dd = ((dd + HALF_PI) % Math.PI + Math.PI) % Math.PI - HALF_PI;
+        rot += dd * al;
+      }
 
       if (k === AK.LARVA) {
-        const rot = this.rt[i] + t * this.rs[i];
         const q = quad(s * this.el[i], s * 0.5, fl);
-        batch.push(x, y, qw, qh, rot, cr * q, cg * q, cb * q, 1, S.FILAMENT);
+        emit(batch, x, y, qw, qh, rot, cr * q, cg * q, cb * q, S.FILAMENT, CEIL_AMB);
         continue;
       }
       if (k === AK.FAT) {
         const sw = s * 2.4;
-        const q = quad(sw * this.el[i] * e, sw, fl) * ie;
-        batch.push(x, y, qw, qh, e > 1.04 ? sang : this.rt[i] + t * this.rs[i],
-          cr * q, cg * q, cb * q, 1, S.VEIL);
+        const q = aniso(sw, sw, ax, fl);
+        emit(batch, x, y, qw, qh, rot, cr * q, cg * q, cb * q, S.VEIL, CEIL_AMB);
         continue;
       }
       if (k === AK.ORG) {
-        const rot = this.rt[i] + t * this.rs[i];
-        batch.push(x, y, s * 3.4, s * 3.4, 0, cr * 0.30, cg * 0.30, cb * 0.30, 1, S.VEIL);
+        // The scatter halo follows the body instead of ringing it. A round wash
+        // under an elliptical animal puts the round dot straight back, and this
+        // is the widest quad in the whole layer - 3.4x of a body up to 44 units.
+        const hq = aniso(s * 3.4, s * 3.4, this.el[i], fl);
+        emit(batch, x, y, qw, qh, rot, cr * 0.30 * hq, cg * 0.30 * hq, cb * 0.30 * hq,
+          S.VEIL, CEIL_AMB);
         // BLOB, not VOLUME: same job - mass and an edge - but its radius is
         // wobbled by three angular harmonics and its falloff has no rim, so a
         // 20px organism is a small soft body instead of a small soft ring.
-        const q = quad(s * this.el[i], s, fl);
-        batch.push(x, y, qw, qh, rot, cr * q, cg * q, cb * q, 1, S.BLOB);
+        const q = aniso(s, s, this.el[i], fl);
+        emit(batch, x, y, qw, qh, rot, cr * q, cg * q, cb * q, S.BLOB, CEIL_AMB);
         // The pulse, on the beat. This was a CORE at 0.34x the body, which
         // measured 0.214 linear across the whole species and never once put a
         // pixel over the 0.25 the contract calls a highlight - a near-delta at
@@ -2374,14 +2643,13 @@ export class Ambient {
         // 17px sampling grid can see it. It is the body that lights up, which
         // is what a pulsing organism does.
         if (tw > 0.58) {
-          quad(s * 1.25, s * 1.25, fl);
-          const q2 = (tw - 0.58) * 2.38 * 1.9;
-          batch.push(x, y, qw, qh, rot, cr * q2, cg * q2, cb * q2, 1, S.PLANKTON);
+          const q2 = (tw - 0.58) * 2.38 * 1.9 * aniso(s * 1.25, s * 1.25, this.el[i], fl);
+          emit(batch, x, y, qw, qh, rot, cr * q2, cg * q2, cb * q2, S.PLANKTON, CEIL_AMB);
         }
         continue;
       }
-      const q = quad(s * e, s, fl) * ie;
-      batch.push(x, y, qw, qh, srot, cr * q, cg * q, cb * q, 1, S.GLOW);
+      const q = aniso(s, s, ax, fl);
+      emit(batch, x, y, qw, qh, rot, cr * q, cg * q, cb * q, S.GLOW, CEIL_AMB);
       if (k === AK.SPARK && tw > 0.74) {
         // The flash, and it is one now.
         //
@@ -2396,9 +2664,11 @@ export class Ambient {
         // a hundredth of the mote's surround and a tenth of the level the
         // contract calls a highlight. Two independent reasons, both measured:
         // CORE is a near-delta and delivers its tile mean (0.011) rather than
-        // its peak once the mip chain owns it, and 5px is smaller than the
-        // 17px step of the grid p99 is computed on, so it could not have been
-        // counted even at full brightness.
+        // its peak once the mip chain owns it, and 5px is too few pixels to
+        // register in a percentile taken over the whole frame however hot each
+        // of them is. (That second reason was originally written against a
+        // coarse sampling grid; it survives the exact estimator unchanged,
+        // because the quantity was always a count. See the header.)
         //
         // So it is bigger, not just hotter: 4.2x the body, on PLANKTON, whose
         // nucleus-in-a-halo survives being drawn at 6-30px and is the shape a
@@ -2407,9 +2677,14 @@ export class Ambient {
         // gate opens a little earlier as well, at 0.74 rather than 0.80, which
         // buys population without touching the envelope's shape - the flash is
         // still a brief snap, not a lamp.
-        quad(s * 4.2, s * 4.2, fl);
-        const q2 = (tw - 0.74) * 3.85 * 2.2;
-        batch.push(x, y, qw, qh, 0, cr * q2, cg * q2, cb * q2, 1, S.PLANKTON);
+        // ...and it is drawn on the body's own axis, at the individual's
+        // static aspect rather than the sheared one: a flash is a short
+        // exposure, so it is the one thing in the layer that should not
+        // lengthen with speed. Area-preserving, so this is the same light in
+        // the same profile as the round version it replaces - only the
+        // silhouette moved, from a dot to an organism flaring along itself.
+        const q2 = (tw - 0.74) * 3.85 * 2.2 * aniso(s * 4.2, s * 4.2, this.el[i], fl);
+        emit(batch, x, y, qw, qh, rot, cr * q2, cg * q2, cb * q2, S.PLANKTON, CEIL_AMB);
       }
     }
   }

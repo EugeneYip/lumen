@@ -7,7 +7,8 @@
 //     -> veil         progressive upsample 5..2     (wide, low amplitude)
 //     -> ridge+smear  2 passes along each source's OWN axis (short, oriented)
 //     -> field        local floor + local range in stops, 3 separable passes
-//     -> composite    spectral CA / astigmatic edge / speed smear, water medium,
+//     -> composite    spectral CA / astigmatic edge / edge-weighted speed smear
+//                     + chromatic stretch, water medium,
 //                     cos^4 vignette, hue-preserving filmic, split tone,
 //                     per-layer black point, tracking midtone ramp, grain, TPDF
 //
@@ -68,6 +69,7 @@ import { compile, RenderTarget, drawFullscreen, FS_VS, GLSL_COMMON, Blend, textu
 const clampN = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const clampR = (x, a, b) => (x < a ? a : x > b ? b : x);
 const lerpN = (a, b, t) => a + (b - a) * t;
+const sstep = (x) => { const t = clampN(x); return t * t * (3 - 2 * t); };
 const mix3 = (a, b, t) => [lerpN(a[0], b[0], t), lerpN(a[1], b[1], t), lerpN(a[2], b[2], t)];
 const scale3 = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
 
@@ -183,6 +185,23 @@ void main(){
 // Per-pixel axis of the light that is there, so the directional bloom layer can
 // be a property of the SOURCE instead of a property of the glass. A horizontal
 // bar across the frame is the one thing a bioluminescent organism cannot cast.
+//
+// This layer has now been blamed twice for the hard straight 'lavender streaks'
+// in the 450m frame, on the reasoning that a gaussian along a line's own axis
+// brightens the line without blurring across it - which is true, and is not
+// what draws them. Ablated on seed 7 at 450m, measuring the ruled-line ridge
+// energy (L minus the mean of its neighbours 3px either side, p99.9) over the
+// violet field: 43.60 at ship, 43.53 with uStreakAmt forced to zero, 43.68 with
+// it at 4x. That is 0.2%, which is nothing. Two reasons it cannot be this
+// layer, both worth keeping: the ridge field and the smear run at QUARTER res,
+// where a 1.5px full-res line is sub-texel and mostly gone; and those lines sit
+// far below uThreshold, so the only part of them that reaches the mip chain at
+// all is the uFloor veiling term at 1.8% amplitude. The artefact is in the
+// linear HDR scene BEFORE this file runs - read post.scene back and it is
+// already there, ?noSprites=1 removes it and ?noRibbons=1 does not, and
+// per-layer difference imaging puts it on atlas layer S.SHARD. Postfx's only
+// effect on it is that the soft layers partly HIDE it: ridge p99.9 rises from
+// 43.60 to 52.98 with veil, halo and grain ablated. Fix it where it is drawn.
 //
 // The operator is the Hessian of compressed luminance, not a structure tensor,
 // and that distinction is the whole design. A structure tensor measures edges,
@@ -442,6 +461,7 @@ uniform float uVeilAmt, uVeilWiden, uVeilCap, uHaloAmt, uHalation, uStreakAmt, u
 uniform vec3  uStreakTint, uHalationTint;
 uniform float uChroma, uDefocus, uSmear, uBarrel;
 uniform vec2  uSmearOrg;
+uniform float uSmearCore, uSmearFeather, uSmearEdge, uSmearChroma;
 uniform float uVignette, uVigFocal, uVigCorner;
 uniform float uWhite, uHueKeep, uSat, uContrast, uLift, uBlack;
 uniform float uShelf, uShelfCentre, uShelfWidth;
@@ -560,7 +580,30 @@ void main(){
   //     mote fringes instead of splitting into separated colour copies. ---
   float caK  = uChroma * (0.14 + rn2 * 1.25);
   float defK = uDefocus * rn2 * rn;
-  float smK  = uSmear * min(rlenS, 0.62);
+
+  // Speed, as a property of the frame's EDGES. The old profile was
+  // min(rlenS, 0.62) - a ramp that saturated about 60% of the way to the
+  // corner, so three quarters of the frame carried one identical excursion.
+  // There is no edge cue in a constant: it read as the whole image going
+  // slightly soft rather than as rush, which is why a review could rank 'the
+  // trench doesn't move' third while this term was already running.
+  //
+  // Three factors, each answering a different half of the note. mCore is an
+  // exactly-zero disc over the hero, feathered outward - a hard zero and not
+  // merely a small number, because an earlier build smeared everything and got
+  // measured as a flat desaturated ribbon that 'picks up no colour from either
+  // light and never attenuates'. min(rlenS, 1.0) keeps ramping past where the
+  // old curve gave up, and bounds the excursion if the mote is off-frame. The
+  // rn2 term weights the lens radius on top, so the corners get the most.
+  //
+  // Normalised so uSmear IS the corner excursion in uv. That is the only form
+  // of this number that can be reasoned about against the tap spacing below,
+  // and the old one could not be. Net against it at 1600 wide and full speed:
+  // the hero's 144px disc goes from nearly-zero to zero, the middle band loses
+  // about a third, and the extreme corner gains about 60%.
+  float mCore = smoothstep(uSmearCore, uSmearCore + uSmearFeather, rlenS);
+  float edgeW = (1.0 + uSmearEdge * rn2) / (1.0 + uSmearEdge);
+  float smK  = uSmear * mCore * min(rlenS, 1.0) * edgeW;
   float jit  = ign(fc + 13.0) - 0.5;
 
   // Three spectral bins, normalised so the trio sums to unity in every channel.
@@ -576,15 +619,33 @@ void main(){
   // Gaussian-weighted along the smear, so the outermost taps sit at a tenth of
   // the centre's weight and stop reading as discrete ghosts. Position is
   // jittered per pixel so what is left grains out instead of banding.
+  // Chromatic STRETCH, and its distinction from chromatic displacement is the
+  // whole reason it is safe to have at all. Pitfall 1 at the top of this file
+  // was the spectrum riding the smear's radial excursion: at speed a 20px
+  // displacement painted the fringe that a 2px one is for, and every small
+  // highlight came apart into separated colour copies. Here all three bins
+  // travel along the same dirS and differ only in HOW FAR, so the trail's tail
+  // runs cool while its head stays neutral - dispersion ALONG the trail, which
+  // is a thing a fast trail does - and no bin is ever displaced sideways from
+  // another. Gated to the top of the speed range, so at cruise it is
+  // identically zero rather than merely small.
+  float smO = smK * (1.0 - uSmearChroma);
+  float smI = smK * (1.0 + uSmearChroma);
+
+  // Eight taps, not six. The corner span grew and the binding constraint is
+  // SPACING, not length: past roughly 2.5px of screen spacing six taps stop
+  // reading as a smear and start reading as six ghosts. This samples uHalf, so
+  // one tap already covers about 2px of screen, and the per-pixel jitter
+  // carries what is left across the gaps instead of banding.
   vec3 acc = vec3(0.0);
   float wsum = 0.0;
-  for(int i=0;i<6;i++){
-    float d = ((float(i) + 0.5 + jit) / 3.0) - 1.0;      // -1 .. 1
+  for(int i=0;i<8;i++){
+    float d = ((float(i) + 0.5 + jit) / 4.0) - 1.0;      // -1 .. 1
     float w = exp(-d * d * 2.4);
-    vec2 base = uv + dirS * (d * smK) + perp * (d * defK);
-    acc += (texture(uHalf, base + dirR * caK).rgb * swO
-          + texture(uHalf, base).rgb              * swM
-          + texture(uHalf, base - dirR * caK).rgb * swI) * w;
+    vec2 off = perp * (d * defK);
+    acc += (texture(uHalf, uv + dirS * (d * smO) + off + dirR * caK).rgb * swO
+          + texture(uHalf, uv + dirS * (d * smK) + off).rgb              * swM
+          + texture(uHalf, uv + dirS * (d * smI) + off - dirR * caK).rgb * swI) * w;
     wsum += w;
   }
   acc /= max(wsum, 1e-4);
@@ -865,6 +926,16 @@ export const GRADE = {
   chroma: 0.0013,
   defocus: 0.0034,
   barrel: 0.030,
+  // The speed cue at the frame edges - see the smear profile in the composite.
+  // smearCore is a radius around the mote in half-frame-height units, so 0.16
+  // is ~144px at 900 tall: comfortably outside the hero's halo, which is what
+  // makes 'edge-weighted only, centre untouched' true by construction rather
+  // than by tuning.
+  smearCore: 0.16,
+  smearFeather: 0.24,
+  smearEdge: 1.00,        // extra weight on the lens radius; 0 = no edge ramp
+  smearChroma: 0.30,      // per-bin trail-length spread at the top of the range
+  smearChromaKnee: 0.62,  // ...below this fraction of top speed, exactly zero
   vignette: 0.68,
   vigFocal: 0.95,
   vigCorner: 0.28,
@@ -1108,10 +1179,20 @@ export class Post {
       // chroma stays at lens scale so a mote keeps a fringe, not a rainbow.
       chroma: G.chroma + sk * 0.0006 + hush * 0.0007 + slow * 0.0009 + lg * 0.0005,
       defocus: G.defocus + sk * 0.0026 + slow * 0.0018,
-      // Capped so the widest excursion stays inside ~2px of tap spacing at
-      // 1600 wide. Longer than that and six taps read as discrete ghosts.
-      smear: sk * 0.0060 + lg * 0.0050 + slow * 0.0020,
+      // uSmear is now the CORNER excursion in uv, so at 1600 wide with eight
+      // taps the spacing is 400*uSmear px. The cap keeps the worst case -
+      // speed, a launch and dilation all landing together - inside about 3px of
+      // spacing; past that the taps stop being a smear and read as ghosts.
+      smear: Math.min(0.0075, sk * 0.0060 + lg * 0.0042 + slow * 0.0020),
       smearOrg: this._smearOrigin(ctx),
+      smearCore: G.smearCore,
+      smearFeather: G.smearFeather,
+      smearEdge: G.smearEdge,
+      // The chromatic stretch is the top of the range only, and it is a knee
+      // rather than a ramp out of zero on purpose: dispersion that grows
+      // smoothly from nothing is a colour cast over the whole speed range,
+      // where this has to read as an event that arrives.
+      smearChroma: G.smearChroma * sstep((sk - G.smearChromaKnee) / (1 - G.smearChromaKnee)),
       barrel: G.barrel + sk * 0.014,
 
       vignette: Math.min(0.86, G.vignette + hush * 0.16 + slow * 0.10 + deadK * 0.22 + sk * 0.05),
@@ -1283,6 +1364,8 @@ export class Post {
     v3('uStreakTint', g.streakTint); v3('uHalationTint', g.halationTint);
     f('uChroma', g.chroma); f('uDefocus', g.defocus); f('uSmear', g.smear); f('uBarrel', g.barrel);
     if (U.uSmearOrg) gl.uniform2f(U.uSmearOrg, g.smearOrg[0], g.smearOrg[1]);
+    f('uSmearCore', g.smearCore); f('uSmearFeather', g.smearFeather);
+    f('uSmearEdge', g.smearEdge); f('uSmearChroma', g.smearChroma);
     f('uVignette', g.vignette); f('uVigFocal', g.vigFocal); f('uVigCorner', g.vigCorner);
     f('uWhite', g.white); f('uHueKeep', g.hueKeep);
     f('uSat', g.saturation); f('uContrast', g.contrast);
