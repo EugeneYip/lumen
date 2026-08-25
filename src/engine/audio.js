@@ -8,6 +8,22 @@
 // widener) puts events in a place, a 4.6s dark tail says how big that place is.
 // `dist` on any voice trades dry+bright for wet+dull, which is the only honest
 // way to get near/far out of a mono synth.
+//
+// Two negative results from the round that fixed mono compatibility, so nobody
+// re-derives them. Both are cases where the statistic named a defect that the
+// signal does not have:
+//   * Correlation near zero is not cancellation. `brush` was flagged at corr
+//     -0.013, but it folds to mono at -3.02 dB, which is exactly what two
+//     decorrelated sources do and the floor for anything genuinely wet. It
+//     needed nothing. What distinguishes a real defect is fold loss WORSE than
+//     -3, which only `start` (-4.86) and `death` (-4.01) had.
+//   * Time-to-peak is not attack time. `release` and `wall` were flagged at
+//     207 and 263 ms, but both are within 3.5 dB of their own peak 20 ms in --
+//     the 200 ms was a 4.6s reverb blooming, not a slow onset. Measured from
+//     first signal rather than from sample zero, because the master chain's
+//     compressor lookahead and 4x-oversampled shaper put 8-10 ms of true
+//     silence at the head of every render. Only `attach` was actually a press
+//     with no attack, at -12.8 dB for its whole first 50 ms.
 import { clamp, clamp01, lerp, damp } from './math.js';
 import { makeRng } from './rng.js';
 
@@ -35,6 +51,19 @@ const M_LEAD = [3, 0, 0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 2, 0, 0, 1,
                 0, 0, 3, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0, 1, 0, 2];
 const CONTOUR = [0, 2, 1, 3, 2, 4, 3, 5, 4, 2, 1, 0, 2, 3, 5, 4];
 
+// One-shot balance, as an amplitude multiplier applied to all three sends of
+// every voice in the event, so the wet/dry ratio each sound was authored with
+// survives the trim. It lives here rather than in the per-voice `gain:` values
+// because those encode the *shape* of a sound and this encodes its place in the
+// mix; mixing the two is how the balance drifted in the first place.
+// MEASURED before this existed (node tools/_audio.mjs oneshots, peak dBFS):
+//   attach -17.9  release -12.3  pickup -18.8  wall -12.9
+//   brush  -19.4  death   -1.9   start  -7.9   best -8.4
+// A 16 dB spread with the two sounds a player hears hundreds of times per run
+// at the quiet end of it, and a once-per-run death sitting 0.6 dB off the tanh
+// ceiling. The verbs come up, death comes down.
+const LEVEL = { attach: 3.0, release: 1.8, pickup: 1.55, wall: 1.35, brush: 1.5, death: 0.72, start: 1.35, best: 0.95 };
+
 export class Audio {
   constructor() {
     this.ctx = null;
@@ -54,6 +83,7 @@ export class Audio {
     this._step = 0;
     this._nextStep = 0;           // ctx-time of the next sequencer step
     this._side = 1;
+    this._suspended = false;      // tab hidden: the audio clock is stopped
     this.drones = [];             // kept: field existed before
   }
 
@@ -107,7 +137,7 @@ export class Audio {
 
     this.tailIn = c.createGain();
     const tail = c.createConvolver();
-    tail.buffer = this._ir(c, boot, { dur: 4.6, pre: 0.031, decay: 0.95, lp: 0.17, shape: 2.4, absorb: 0.8 });
+    tail.buffer = this._ir(c, boot, { dur: 4.6, pre: 0.031, decay: 0.95, lp: 0.17, shape: 2.4, absorb: 0.8, lfMono: 420 });
     const thp = c.createBiquadFilter(); thp.type = 'highpass'; thp.frequency.value = 95;
     const tlp = c.createBiquadFilter(); tlp.type = 'lowpass'; tlp.frequency.value = 1900;
     this.tailGain = c.createGain(); this.tailGain.gain.value = 0.95;
@@ -283,12 +313,35 @@ export class Audio {
     if (this.ctx) this.master.gain.setTargetAtTime(m ? 0 : 0.92, this.ctx.currentTime, 0.015);
   }
 
+  /** Tab hidden / shown. Call this instead of setMuted for visibility, and keep
+   *  it off `this.muted`, which is the player's M preference and must survive.
+   *
+   *  Muting is the weak version: it silences the output but leaves 30-odd
+   *  oscillators and 6 looping buffer sources running, and leaves the look-ahead
+   *  sequencer scheduling against a wall clock that keeps advancing while rAF is
+   *  throttled to ~1Hz. Suspending stops the audio clock itself, so on return
+   *  ctx.currentTime has not moved and `_nextStep` is still valid relative to it.
+   *
+   *  `_suspended` is tracked here rather than read from ctx.state because an
+   *  OfflineAudioContext reports 'suspended' during exactly the window in which
+   *  the offline rig drives update(), so gating on ctx.state would silence every
+   *  measurement in tools/_audio.mjs. */
+  setSuspended(s) {
+    this._suspended = !!s;
+    if (this.silent || !this.ctx) return;
+    if (s) { if (this.ctx.state === 'running') this.ctx.suspend(); return; }
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    this._nextStep = this.ctx.currentTime + 0.12;
+  }
+
   // ------------------------------------------------------------- buffer gen ---
 
   /** Decaying-noise impulse response. Channels are filled independently, so the
    *  tail is genuinely stereo instead of a doubled mono. `absorb` darkens the
-   *  filter as the tail ages, which is what water actually does to a reverb. */
-  _ir(c, rng, { dur, pre = 0, decay = 3, lp = 0.2, shape = 2.2, taps = 0, absorb = 0 }) {
+   *  filter as the tail ages, which is what water actually does to a reverb.
+   *  `lfMono` then puts the low band back in common between the two channels —
+   *  see below; without it the reverb is the game's entire mono problem. */
+  _ir(c, rng, { dur, pre = 0, decay = 3, lp = 0.2, shape = 2.2, taps = 0, absorb = 0, lfMono = 250 }) {
     const sr = c.sampleRate, n = Math.max(2, (sr * dur) | 0), p = (sr * pre) | 0;
     const buf = c.createBuffer(2, n, sr);
     for (let ch = 0; ch < 2; ch++) {
@@ -306,6 +359,36 @@ export class Audio {
       }
       const f = Math.min(n - p, (sr * 0.003) | 0);
       for (let i = 0; i < f; i++) d[p + i] *= i / f;   // no click on the pre-delay edge
+    }
+    // Below a few hundred Hz a wavelength is longer than a head, so a real
+    // room's low end arrives common-mode at both ears. Two independently
+    // generated channels do not, and that turned out to be the whole of this
+    // game's mono problem.
+    // MEASURED by `node tools/_audio.mjs mono`, which renders each event with
+    // each wet bus muted in turn: with the tail muted every one-shot folds to
+    // mono at -0.02..-0.32 dB and correlates at +0.89..+0.99. With it live,
+    // `start` folds at -4.86 dB (-5.1 in the 60-250Hz bands) and `death` at
+    // -4.01. Muting the early bus instead moves nothing at three significant
+    // figures, so the Haas cross-feed was never the culprit and neither was any
+    // panning: at 55-165Hz "decorrelated" is a single arbitrary phase relation
+    // held for the whole event, and a seeded RNG draws the same near-anti-phase
+    // one on every run. Sharing the low band costs no runtime nodes at all.
+    // The 1/sqrt(2) conserves per-channel power, so stereo level is unchanged
+    // and only the mono sum gains. 420Hz on the 4.6s tail rather than the 250
+    // default because the tail is already lowpassed at 1900 and carries most of
+    // the game's energy: at 250 it left `start` at -1.69 dB and `death` at
+    // -2.38, at 420 they are -0.99 and -1.60. The whole 2 ms of boot it costs
+    // is measured in the report; width still lives in the early bus, which is
+    // where the file's own signal-flow comment says it belongs.
+    if (lfMono) {
+      const d0 = buf.getChannelData(0), d1 = buf.getChannelData(1);
+      const a = 1 - Math.exp(-2 * Math.PI * lfMono / sr);
+      let z0 = 0, z1 = 0;
+      for (let i = 0; i < n; i++) {
+        z0 += (d0[i] - z0) * a; z1 += (d1[i] - z1) * a;
+        const m = (z0 + z1) * Math.SQRT1_2;
+        d0[i] += m - z0; d1[i] += m - z1;
+      }
     }
     return buf;
   }
@@ -329,8 +412,10 @@ export class Audio {
   // ----------------------------------------------------------------- voicing ---
 
   /** Place an event. `dist` 0..1 pushes it away: quieter, duller, far wetter.
+   *  `trim` scales all three sends together, which is the one place a whole
+   *  one-shot's level moves without changing what it sounds like.
    *  Returns the panner so callers can automate movement across the image. */
-  _out(pan = 0, { dry = 1, early = 0.3, tail = 0.3, dist = 0 } = {}) {
+  _out(pan = 0, { dry = 1, early = 0.3, tail = 0.3, dist = 0, trim = 1 } = {}) {
     const c = this.ctx, d = clamp01(dist);
     const p = c.createStereoPanner(); p.pan.value = clamp(pan, -1, 1);
     let n = p;
@@ -343,9 +428,9 @@ export class Audio {
       if (v <= 0.0008) return;
       const g = c.createGain(); g.gain.value = v; n.connect(g).connect(dest);
     };
-    send(dry * (1 - d * 0.82), this.dry);
-    send(early * (1 - d * 0.5), this.earlyIn);
-    send(tail * (1 + d * 2.4), this.tailIn);
+    send(trim * dry * (1 - d * 0.82), this.dry);
+    send(trim * early * (1 - d * 0.5), this.earlyIn);
+    send(trim * tail * (1 + d * 2.4), this.tailIn);
     return p;
   }
 
@@ -462,26 +547,42 @@ export class Audio {
     } else if (name === 'death') {
       this._liveT = 0.12; this._liveRate = 0.5; this._chainK = 0;
     }
-    if (this.muted) return;
+    // Same reason the mute check sits below the run state and not above it:
+    // while the tab is hidden the audio clock is frozen, so nothing may be
+    // scheduled, but the run still has to be told what happened to it.
+    if (this.muted || this._suspended) return;
 
     const ch = PROG[this._chord % PROG.length];
     const cf = (semi, mul) => ROOT * mul * Math.pow(2, (ch.r + semi) / 12);
     // a ramp with no preceding event has an ill-defined start; anchor it first
     const sweep = (p, from, to, at) => { p.pan.setValueAtTime(from, t); p.pan.linearRampToValueAtTime(to, at); };
+    const trim = LEVEL[name] || 1;
+    const out = (pan, o) => this._out(pan, { ...o, trim });
 
     switch (name) {
       // A light latching onto something alive: contact, then a small breath in.
       case 'attach': {
         const k = clamp01((opts.speed || 400) / 1600);
         const pan = clamp(-0.28 + this.rng() * 0.56 + (opts.pan || 0), -1, 1);
-        const near = this._out(pan, { dry: 1, early: 0.5, tail: 0.24 });
-        this._swish(t, near, { dur: 0.03, f0: 2300, f1: 900, q: 6, gain: 0.1, a: 0.0007, pink: false });
-        this._fm(t, 330 + k * 70, near, { ratio: 3.4, index: 260, dur: 0.15, gain: 0.075, decay: 0.035, a: 0.001 });
+        const near = out(pan, { dry: 1, early: 0.5, tail: 0.24 });
+        // The edge of the contact, and it has to be white and above the body.
+        // MEASURED: the old onset was one Q=6 bandpass falling 2300->900Hz, so
+        // 87.4% of the first 50ms sat in 500-1k, its 2-8k peak was -55.3 dBFS
+        // (19.6 dB under its own midrange), and the sound never came within
+        // 12.8 dB of its own peak in that window. That is a press with no
+        // attack, on the verb a player presses hundreds of times a run.
+        // Water absorbs treble over distance; a contact on your own body is at
+        // zero distance, so this does not argue for a brighter bed.
+        this._swish(t, near, { dur: 0.009, f0: 2800, f1: 7600, q: 0.7, gain: 0.12, a: 0.0004, pink: false, type: 'highpass' });
+        this._swish(t, near, { dur: 0.035, f0: 1900, f1: 700, q: 2.2, gain: 0.1, a: 0.0007, pink: false });
+        this._fm(t, 330 + k * 70, near, { ratio: 3.4, index: 260, dur: 0.15, gain: 0.085, decay: 0.035, a: 0.001 });
         // the breath: cutoff and level both rise, then it stops - an intake
-        this._swish(t + 0.012, this._out(pan * 0.6, { dry: 0.8, early: 0.4, tail: 0.5 }),
+        this._swish(t + 0.012, out(pan * 0.6, { dry: 0.8, early: 0.4, tail: 0.5 }),
           { dur: 0.1, f0: 250, f1: 1500, q: 1.5, gain: 0.05, a: 0.085 });
-        this._bell(t + 0.02, cf(7, 8), this._out(-pan * 0.5, { dry: 0.5, early: 0.3, tail: 0.9, dist: 0.25 }),
-          { gain: 0.045, dur: 0.55 });
+        // the bell is the *place*, not the event: it blooms into a 4.6s tail
+        // and was what the peak was actually measuring, 269ms after the press.
+        this._bell(t + 0.02, cf(7, 8), out(-pan * 0.5, { dry: 0.5, early: 0.3, tail: 0.66, dist: 0.25 }),
+          { gain: 0.04, dur: 0.55 });
         this._duck(0.13, 0.1);
         break;
       }
@@ -491,8 +592,10 @@ export class Audio {
       case 'release': {
         const k = clamp01((opts.speed || 400) / 2200);
         const side = (this._side = -this._side);
-        const near = this._out(side * 0.12, { dry: 1, early: 0.45, tail: 0.3 });
-        this._swish(t, near, { dur: 0.014, f0: 1400, f1: 5200, q: 0.7, gain: 0.075, a: 0.0005, pink: false, type: 'highpass' });
+        const near = out(side * 0.12, { dry: 1, early: 0.45, tail: 0.3 });
+        // the letting-go. It was there but 15 dB under the sub thump, which put
+        // 82.3% of the onset below 250Hz and its 2-8k peak at -45.5 dBFS.
+        this._swish(t, near, { dur: 0.016, f0: 2100, f1: 8200, q: 0.7, gain: 0.15, a: 0.0005, pink: false, type: 'highpass' });
         this._tone(t, lerp(96, 150, k), 42, near, { dur: 0.3, gain: 0.27, a: 0.004, type: 'sine' });
         this._tone(t + 0.002, lerp(150, 220, k), 34, near, { dur: 0.09, gain: 0.1, type: 'triangle' });
         // the zip: up hard, then away. Two ramps on one param, no glide macro.
@@ -510,10 +613,10 @@ export class Audio {
           o.start(t); o.stop(t + 0.48);
         }
         // displaced water, swept across the image
-        const wide = this._out(-side * 0.5, { dry: 0.85, early: 0.55, tail: 0.6 });
+        const wide = out(-side * 0.5, { dry: 0.85, early: 0.55, tail: 0.6 });
         sweep(wide, -side * 0.5, side * 0.55, t + 0.42);
         this._swish(t, wide, { dur: 0.34, f0: 320, f1: lerp(2100, 4700, k), f2: 460, q: 0.9, gain: 0.085 + k * 0.09, a: 0.05 });
-        this._bell(t + 0.05, cf(0, 8), this._out(side * 0.35, { dry: 0.4, early: 0.25, tail: 1.0, dist: 0.2 }),
+        this._bell(t + 0.05, cf(0, 8), out(side * 0.35, { dry: 0.4, early: 0.25, tail: 1.0, dist: 0.2 }),
           { gain: 0.04 + k * 0.03, dur: 0.7, bright: k });
         this._duck(0.26 + k * 0.1, 0.28);
         break;
@@ -527,7 +630,7 @@ export class Audio {
         const oct = ((semi / 12) % 2 + 2) % 2;
         const kk = clamp01(i / 14);
         const base = ROOT * 8;                      // A4
-        const out = this._out(clamp(-0.22 + this.rng() * 0.44, -1, 1),
+        const dest = out(clamp(-0.22 + this.rng() * 0.44, -1, 1),
           { dry: 1, early: 0.42, tail: 0.5 - kk * 0.18 });
         let sum = 0; const w = [];
         for (let j = -1; j <= 2; j++) {
@@ -540,17 +643,17 @@ export class Audio {
         for (let j = -1; j <= 2; j++) {
           const a = w[j + 1]; if (a < 0.02) continue;
           const f = base * Math.pow(2, oct + j);
-          this._bell(t, f, out, {
+          this._bell(t, f, dest, {
             gain: gain * a, dur: 0.42 + 0.2 * (1 - kk), a: 0.0018, bright: kk,
             parts: [[1, 1, 1], [2, 0.22 + kk * 0.2, 0.4], [2.76, 0.06 + kk * 0.08, 0.12]],
           });
         }
         if (i >= 3) {   // one in-tempo echo tap: the chain starts to groove
           const d = this._stepDur() * 0.5;
-          this._bell(t + d, base * Math.pow(2, oct), this._out(0.4, { dry: 0.3, early: 0.2, tail: 1.1, dist: 0.4 }),
+          this._bell(t + d, base * Math.pow(2, oct), out(0.4, { dry: 0.3, early: 0.2, tail: 1.1, dist: 0.4 }),
             { gain: gain * 0.3, dur: 0.4, parts: [[1, 1, 1], [2, 0.2, 0.4]] });
         }
-        if (i >= 8) this._tone(t, 78, 52, this._out(0, { dry: 0.9, early: 0.1, tail: 0.1 }), { dur: 0.11, gain: 0.09 });
+        if (i >= 8) this._tone(t, 78, 52, out(0, { dry: 0.9, early: 0.1, tail: 0.1 }), { dur: 0.11, gain: 0.09 });
         this._chainK = Math.max(this._chainK, clamp01(i / 12));
         this._duck(0.16 + kk * 0.08, 0.07);
         break;
@@ -559,11 +662,15 @@ export class Audio {
       // Mass and water. The thud is over in 150ms; the displaced water is not.
       case 'wall': {
         const k = clamp01((opts.speed || 300) / 1600);
-        const near = this._out(clamp(-0.2 + this.rng() * 0.4, -1, 1), { dry: 1, early: 0.5, tail: 0.35 });
+        const near = out(clamp(-0.2 + this.rng() * 0.4, -1, 1), { dry: 1, early: 0.5, tail: 0.35 });
+        // Rock is hard, and the hit had no edge at all: 0.1% of its onset was
+        // above 500Hz and its 2-8k peak sat at -57.1 dBFS, 26.7 dB under its
+        // own midrange. All mass, no contact.
+        this._swish(t, near, { dur: 0.011, f0: 1600, f1: 5600, q: 0.7, gain: 0.07 + k * 0.05, a: 0.0004, pink: false, type: 'highpass' });
         this._tone(t, lerp(120, 165, k), 44, near, { dur: 0.16, gain: 0.24 + k * 0.1, a: 0.003 });
         this._tone(t, lerp(230, 320, k), 90, near, { dur: 0.06, gain: 0.09, type: 'triangle' });
         this._swish(t, near, { dur: 0.12, f0: 320, f1: 110, q: 0.6, gain: 0.1 + k * 0.09, a: 0.002, type: 'lowpass' });
-        const far = this._out(this.rng() * 0.6 - 0.3, { dry: 0.6, early: 0.4, tail: 1.1, dist: 0.35 });
+        const far = out(this.rng() * 0.6 - 0.3, { dry: 0.6, early: 0.4, tail: 1.1, dist: 0.35 });
         this._swish(t + 0.01, far, { dur: 0.42 + k * 0.35, f0: 950, f1: 240, q: 0.8, gain: 0.06 + k * 0.08, a: 0.03 });
         for (let b = 0; b < 2; b++) {  // bubbles: displaced water has to have grain
           this._swish(t + 0.03 + this.rng() * 0.16, far,
@@ -577,11 +684,11 @@ export class Audio {
       // A near miss. It has to be over before you can think about it.
       case 'brush': {
         const side = (this._side = -this._side);
-        const out = this._out(side * 0.85, { dry: 1, early: 0.4, tail: 0.35 });
-        sweep(out, side * 0.85, -side * 0.5, t + 0.14);
-        this._swish(t, out, { dur: 0.075, f0: 1700, f1: 4400, f2: 1200, q: 2.6, gain: 0.1, a: 0.003, pink: false });
-        this._swish(t, out, { dur: 0.008, f0: 3000, f1: 6000, q: 0.7, gain: 0.045, a: 0.0005, pink: false, type: 'highpass' });
-        const fear = this._out(-side * 0.7, { dry: 0.35, early: 0.2, tail: 1.0, dist: 0.5 });
+        const past = out(side * 0.85, { dry: 1, early: 0.4, tail: 0.35 });
+        sweep(past, side * 0.85, -side * 0.5, t + 0.14);
+        this._swish(t, past, { dur: 0.075, f0: 1700, f1: 4400, f2: 1200, q: 2.6, gain: 0.1, a: 0.003, pink: false });
+        this._swish(t, past, { dur: 0.008, f0: 3000, f1: 6000, q: 0.7, gain: 0.06, a: 0.0005, pink: false, type: 'highpass' });
+        const fear = out(-side * 0.7, { dry: 0.35, early: 0.2, tail: 1.0, dist: 0.5 });
         this._tone(t + 0.01, cf(12, 8), 0, fear, { dur: 0.16, gain: 0.028 });
         this._tone(t + 0.01, cf(13, 8), 0, fear, { dur: 0.16, gain: 0.024 });
         break;
@@ -589,31 +696,35 @@ export class Audio {
 
       // The light goes out: filament snap, collapse, implosion, then space.
       case 'death': {
-        const near = this._out(0, { dry: 1, early: 0.35, tail: 0.6 });
+        const near = out(0, { dry: 1, early: 0.35, tail: 0.6 });
         this._swish(t, near, { dur: 0.05, f0: 3600, f1: 420, q: 1.2, gain: 0.12, a: 0.0006, pink: false });
         this._tone(t, 226, 27, near, { dur: 2.1, gain: 0.19, a: 0.006, curve: 0.06 });
-        this._tone(t + 0.01, 113, 25, this._out(-0.3, { dry: 0.8, early: 0.2, tail: 0.9 }),
+        this._tone(t + 0.01, 113, 25, out(-0.3, { dry: 0.8, early: 0.2, tail: 0.9 }),
           { dur: 2.9, gain: 0.12, a: 0.02, type: 'triangle' });
-        this._tone(t + 0.02, 55, 30, this._out(0, { dry: 1, early: 0, tail: 0.2 }), { dur: 3.4, gain: 0.2, a: 0.03 });
-        this._swish(t + 0.02, this._out(0.25, { dry: 0.7, early: 0.3, tail: 1.3 }),
+        this._tone(t + 0.02, 55, 30, out(0, { dry: 1, early: 0, tail: 0.2 }), { dur: 3.4, gain: 0.2, a: 0.03 });
+        this._swish(t + 0.02, out(0.25, { dry: 0.7, early: 0.3, tail: 1.3 }),
           { dur: 1.5, f0: 3000, f1: 80, q: 0.7, gain: 0.14, a: 0.05, type: 'lowpass' });
         // ...and then, once the room has finished ringing, one far full stop.
-        this._bell(t + 4.4, ROOT * 4, this._out(0.5, { dry: 0.2, early: 0.1, tail: 1.4, dist: 0.85 }),
+        this._bell(t + 4.4, ROOT * 4, out(0.5, { dry: 0.2, early: 0.1, tail: 1.4, dist: 0.85 }),
           { gain: 0.09, dur: 3.2, a: 0.01, parts: [[1, 1, 1], [2, 0.25, 0.5], [3.01, 0.08, 0.25]] });
         this.earlyGain.gain.setTargetAtTime(0.22, t, 0.8);
         break;
       }
 
       case 'start': {
-        const out = this._out(0, { dry: 1, early: 0.4, tail: 0.7 });
-        this._tone(t, 84, 52, out, { dur: 0.5, gain: 0.16, a: 0.004 });
-        this._tone(t + 0.02, ROOT * 2, 0, this._out(-0.35, { dry: 0.8, early: 0.3, tail: 0.9 }),
+        const low = out(0, { dry: 1, early: 0.4, tail: 0.7 });
+        this._tone(t, 84, 52, low, { dur: 0.5, gain: 0.16, a: 0.004 });
+        this._tone(t + 0.02, ROOT * 2, 0, out(-0.35, { dry: 0.8, early: 0.3, tail: 0.9 }),
           { dur: 1.7, gain: 0.15, a: 0.32 });
-        this._tone(t + 0.02, ROOT * 3, 0, this._out(0.4, { dry: 0.6, early: 0.3, tail: 1.0 }),
+        this._tone(t + 0.02, ROOT * 3, 0, out(0.4, { dry: 0.6, early: 0.3, tail: 1.0 }),
           { dur: 1.9, gain: 0.09, a: 0.5, type: 'triangle' });
-        this._swish(t, this._out(0.1, { dry: 0.7, early: 0.4, tail: 0.8 }),
-          { dur: 0.5, f0: 140, f1: 1300, q: 1.2, gain: 0.07, a: 0.55 });
-        this._bell(t + 0.5, ROOT * 8, this._out(0.2, { dry: 0.5, early: 0.3, tail: 1.1, dist: 0.3 }), { gain: 0.05, dur: 1.4 });
+        this._swish(t, out(0.1, { dry: 0.7, early: 0.4, tail: 0.8 }),
+          { dur: 0.5, f0: 140, f1: 1900, q: 1.2, gain: 0.095, a: 0.55 });
+        // MEASURED: start is 83% below 250Hz, so a laptop speaker reproduces
+        // almost none of it. The swell is the point and stays, but the bell and
+        // the top of the sweep are the only parts a small speaker can render at
+        // all, so they carry more of it than they used to.
+        this._bell(t + 0.5, ROOT * 8, out(0.2, { dry: 0.5, early: 0.3, tail: 1.1, dist: 0.3 }), { gain: 0.085, dur: 1.4 });
         this.earlyGain.gain.setTargetAtTime(0.58, t, 0.5);
         break;
       }
@@ -621,10 +732,10 @@ export class Audio {
       case 'best': {
         const T = [0, 0.13, 0.27, 0.46], PANS = [-0.4, 0.15, 0.5, -0.1];
         for (let i = 0; i < 4; i++) {
-          const o = this._out(PANS[i], { dry: 0.9, early: 0.4, tail: 0.85 });
+          const o = out(PANS[i], { dry: 0.9, early: 0.4, tail: 0.85 });
           this._bell(t + T[i], cf([0, 7, 12, 19][i], 8), o, { gain: 0.085, dur: 1.1 - i * 0.1, bright: 0.4 });
         }
-        this._swish(t, this._out(0, { dry: 0.4, early: 0.3, tail: 1.0, dist: 0.4 }),
+        this._swish(t, out(0, { dry: 0.4, early: 0.3, tail: 1.0, dist: 0.4 }),
           { dur: 0.7, f0: 900, f1: 3200, q: 1.0, gain: 0.035, a: 0.25 });
         this._duck(0.2, 0.4);
         break;
@@ -661,7 +772,19 @@ export class Audio {
   }
 
   /** Look-ahead sequencer on the audio clock. Musical timing that does not care
-   *  how often update() is called, and a hard cap on events per call. */
+   *  how often update() is called, and a hard cap on events per call.
+   *
+   *  main.js clamps its dt to 0.25s while the AudioContext keeps real time, so
+   *  the two clocks decouple under load. MEASURED (node tools/_audio.mjs stall,
+   *  same deterministic 40s script twice, once at a steady 60Hz and once with
+   *  0.4/1.2/3.0s freezes): the smallest gap between two scheduled steps is
+   *  380ms in BOTH runs -- exactly _stepDur() at intensity 1 -- and zero pairs
+   *  land on the same timestamp. The sequencer cannot bunch, because it reads
+   *  ctx.currentTime and never touches the passed-in dt. What a stall does cost
+   *  is steps: 59 fired against 92, the recovery line below discarding the
+   *  music that was missed rather than firing 33 notes at once. Since the chord
+   *  is keyed to the step counter, a stalled run walks the progression more
+   *  slowly in wall-clock terms; nothing else moved (peak -1.26 dBFS in both). */
   _seq(now) {
     const look = 0.3;
     if (this._nextStep < now - 1) this._nextStep = now + 0.05;   // recover from a stall
@@ -730,6 +853,10 @@ export class Audio {
    *  writes a second per param, and only when a target has actually moved. */
   update(dt, { intensity = 0, danger = 0 } = {}) {
     if (this.silent || !this.ready) return;
+    // While suspended ctx.currentTime is frozen, so _seq would schedule step
+    // after step into one timestamp -- the exact per-param pile-up that made
+    // the capture harness unusable (AI_HANDOFF invariant 4). Do nothing at all.
+    if (this._suspended) return;
     const c = this.ctx;
     dt = Math.min(0.1, Math.max(0, dt || 0));
     this._t += dt;
