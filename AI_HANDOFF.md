@@ -375,6 +375,14 @@ Longer-standing items:
 - **Audio has never been verified by ear** — only structurally, via offline
   render and spectrogram inspection. `tools/playtest.mjs` does confirm the
   autoplay path works: audio initialises from a real gesture in a real loop.
+- **Never run a performance investigation alongside a capture-heavy agent.**
+  Every agent here drives its own headless Chrome, and GPU contention has now
+  produced false readings three times: a render budget measuring 7.9ms and
+  22.8ms for the same build, a boot time varying 5x, and an HDR percentile
+  swinging past its own margin. `check.mjs` and `tools/_perf.mjs` both take a
+  best-of-N minimum, which is the right estimator because contention can only
+  slow things down — but a minimum over a contended window is still not the
+  same as an idle measurement. Sequence perf work alone.
 - **Frame pacing cannot be measured authoritatively without a display.**
   `playtest.mjs` drives the real rAF loop with real mouse events and reports a
   roughly 60/40 split between 16.7ms and 33.3ms frames, but headless Chrome has
