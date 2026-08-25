@@ -61,7 +61,12 @@ const G = {
   ':': { b: 20, a: 40, p: [['O', 10, 34, 0.4, 0.4], ['O', 10, 76, 0.4, 0.4]] },
   'x': { b: 56, a: 70, p: [['M', 9, 41], ['L', 47, 92], ['M', 47, 41], ['L', 9, 92]] },
   '/': { b: 46, a: 58, p: [['M', 38, 8], ['L', 8, 92]] },
-  ' ': { b: 30, a: 44, p: [] },
+  // Only ever used as the digit-group gap (see `group`). A figure's advance is
+  // 84 over a 62 box, so consecutive digits already sit 22 apart; at the old
+  // advance of 44 the group gap came to 66, three times that, and a five-figure
+  // score read as two numbers side by side. 24 puts it at 46 - twice the normal
+  // gap, which groups without separating.
+  ' ': { b: 10, a: 24, p: [] },
   // wordmark + unit caps
   'L': { b: 64, a: 82, p: [['M', 8, 8], ['L', 8, 92], ['L', 56, 92]] },
   'U': { b: 70, a: 88, p: [['M', 8, 8], ['L', 8, 64], ['A', 35, 64, 27, PI, 0, true], ['L', 62, 8]] },
@@ -77,6 +82,24 @@ const KERN = { LU: -8, UM: -3, ME: 0, EN: -4 };
 /** Deterministic 0..1 hash - the Hush edge needs variance, not randomness. */
 const hash = (i) => { const x = Math.sin(i * 12.9898 + 1.7) * 43758.5453; return x - Math.floor(x); };
 
+/**
+ * 12512 -> '12 512'. The score reaches five and six figures where the distance
+ * it replaced reached four, and an ungrouped six-figure run has to be counted
+ * rather than read. The gap is a vector space glyph, tuned in `G` to twice the
+ * normal inter-figure gap. No locale separator: `toLocaleString` would put a
+ * comma on one machine and a point on another, and captures must not differ
+ * between machines.
+ */
+const group = (n) => {
+  const s = String(n);
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 === 0) out += ' ';
+    out += s[i];
+  }
+  return out;
+};
+
 export class Hud {
   constructor(canvas) {
     this.c = canvas;
@@ -85,8 +108,10 @@ export class Hud {
 
     this.deathT = 0;          // main.js zeroes this on newRun(); kept for that
     this.digits = '';
-    this.dfx = [0, 0, 0, 0, 0, 0, 0, 0];
-    this.liftBuf = [0, 0, 0, 0, 0, 0, 0, 0];
+    // Long enough for a grouped eight-figure score ('12 345 678'); the score is
+    // unbounded where the distance it replaced was four figures in practice.
+    this.dfx = new Array(12).fill(0);
+    this.liftBuf = new Array(12).fill(0);
     this.mile = 0;            // 100 m threshold tick
     this.mileN = -1;
     this.recordPop = 0;
@@ -392,7 +417,7 @@ export class Hud {
       ctx.save();
       ctx.globalAlpha = fade;
       this._strip(s, W, H, k);
-      this._distance(s, W, H, k);
+      this._score(s, W, H, k);
       this._chain(s, W, H, k);
       this._rail(s, W, H, k);
       ctx.restore();
@@ -407,23 +432,39 @@ export class Hud {
    * (or a fresh run) looks like.
    */
   _impulses(s, dt) {
-    const shown = Math.max(0, Math.floor(s.depth));
-    const str = String(shown);
+    // The headline is the banked score, and with a chain live it climbs by
+    // roughly speed x mult: measured at ~1350/s on seed 11 under the autopilot.
+    // So the last three digits change faster than a frame, and lifting every
+    // changed digit - which is what this did when the headline was metres -
+    // would be a permanent shimmer along the tail instead of an event. Each
+    // digit is gated on its OWN change rate (place value against the score's
+    // rate of climb), so only digits slow enough to be read get the impulse.
+    const shown = Math.max(0, Math.floor(s.score || 0));
+    const str = group(shown);
+    const rate = Math.max(0, (s.speed || 0) * 0.1 * (s.mult || 1));
     if (str !== this.digits) {
       const same = str.length === this.digits.length && this.digits.length > 0;
-      for (let i = 0; i < str.length; i++) {
-        if (same && str[i] !== this.digits[i]) this.dfx[i] = 1;
-        else if (!same) this.dfx[i] = 0;
+      if (!same) { for (let i = 0; i < this.dfx.length; i++) this.dfx[i] = 0; }
+      else {
+        let place = 1;
+        for (let i = str.length - 1; i >= 0; i--) {
+          if (str[i] === ' ') continue;
+          if (str[i] !== this.digits[i] && rate / place < 6) this.dfx[i] = 1;
+          place *= 10;
+        }
       }
       this.digits = str;
     }
     for (let i = 0; i < this.dfx.length; i++) this.dfx[i] = damp(this.dfx[i], 0, 11, dt);
 
-    const mn = Math.floor(shown / 100);
+    // Milestones stay on true distance travelled. A 100-unit tick on the score
+    // would fire several times a second at any live multiplier; 100 m of trench
+    // is still an event whatever the chain is doing.
+    const mn = Math.floor(Math.max(0, s.depth) / 100);
     if (mn !== this.mileN) { if (this.mileN >= 0 && mn > this.mileN) this.mile = 1; this.mileN = mn; }
     this.mile = damp(this.mile, 0, 3.4, dt);
 
-    const rec = s.best > 0 && s.depth > s.best + 0.001;
+    const rec = s.best > 0 && (s.score || 0) > s.best + 0.001;
     if (rec && !this.wasRecord) this.recordPop = 1;
     this.wasRecord = rec;
     this.recordPop = damp(this.recordPop, 0, 1.6, dt);
@@ -539,12 +580,14 @@ export class Hud {
     const mx = Math.round(48 * k), my = Math.round(H - 48 * k);
     if (s.best > 0.5) {
       this._plate(mx + 72 * k, my - 15 * k, 158 * k, 62 * k, 0.40);
-      this._label('BEST DEPTH', mx, my - 31 * k, 9.5 * k, 600, 5.2 * k, FAINT, 1);
-      const bw = this._vtext(String(Math.round(s.best)), mx, my, 31 * k, {
+      // Not 'BEST DEPTH' any more: the record is a banked score, and depth is
+      // only its floor. Labelling it in metres was the same broken promise the
+      // multiplier itself was making.
+      this._label('BEST SCORE', mx, my - 31 * k, 9.5 * k, 600, 5.2 * k, FAINT, 1);
+      this._vtext(group(Math.round(s.best)), mx, my, 31 * k, {
         body: rgba(WARM, 0.97), core: this._core(my, 31 * k, 0.30),
         shadow: 0.42, glow: 0.55, glowCol: WARM, weight: 0.15,
       });
-      this._vtext('M', mx + bw + 11 * k, my, 15 * k, { body: rgba(WARM, 0.55), shadow: 0.3, weight: 0.16 });
     }
     this._plate(cx, my - 4 * k, 168 * k, 30 * k, 0.5);
     this._label('M  MUTE   ·   P  PAUSE', cx, my, 9.5 * k, 500, 4.6 * k, DIM, 0.72, 'center');
@@ -574,8 +617,8 @@ export class Hud {
     const a = 1 - 0.85 * clamp01(s.hushProx || 0);
     if (a < 0.05) return;
     const h = Math.max(2, 3 * k);
-    const rec = s.depth > s.best + 0.001;
-    const f = rec ? 1 : clamp01(s.depth / s.best);
+    const rec = (s.score || 0) > s.best + 0.001;
+    const f = rec ? 1 : clamp01((s.score || 0) / s.best);
     ctx.fillStyle = rgba(FAINT, 0.26 * a);
     ctx.fillRect(0, 0, W, h);
     const acc = rec ? WARM : CYAN;
@@ -590,16 +633,29 @@ export class Hud {
     }
   }
 
-  // ============================================================== distance ===
-  _distance(s, W, H, k) {
+  // ================================================================= score ===
+  /**
+   * ONE headline number, and it is the one the chain multiplies. It used to be
+   * the distance, which nothing multiplied - so half the HUD's real estate
+   * reported a multiplier that could not affect the outcome. The score is banked
+   * forward per metre claimed (see `_bank` in main.js), which means it *is* the
+   * distance until a chain is live and then visibly outruns it. That is the
+   * whole tutorial: same number, climbing faster.
+   *
+   * The distance survives as the small figure under it rather than as a second
+   * headline. It is what "Deep Drift" names, it is what the Hush is measured in,
+   * and side by side with the score it shows the multiplier's work without a
+   * word of explanation. It is not competing for the eye: 9.5px against 54px.
+   */
+  _score(s, W, H, k) {
     const ctx = this.ctx;
-    const shown = Math.max(0, Math.floor(s.depth));
-    const str = String(shown);
+    const shown = Math.max(0, Math.floor(s.score || 0));
+    const str = group(shown);
     const cap = 54 * k;
     const cx = Math.round(W * 0.5);
     const labY = Math.round(32 * k);
     const base = Math.round(102 * k);
-    const rec = s.best > 0.5 && s.depth > s.best + 0.001;
+    const rec = s.best > 0.5 && ((s.score || 0) > s.best + 0.001 || s.newBest);
     const acc = rec ? WARM : ICE;
     const pop = easeOutCubic(this.recordPop) * 0.5 + this.mile * 0.4;
 
@@ -607,25 +663,21 @@ export class Hud {
     this._plate(cx, base - cap * 0.42, numW * 0.80 + 100 * k, cap * 1.5, 0.34);
     if (this.mile > 0.01) this._streak(cx, base - cap * 0.40, numW * 0.9 + 120 * k, cap * 0.38, acc, 0.32 * this.mile);
 
-    this._label(rec ? 'NEW BEST' : 'DISTANCE', cx, labY, 10 * k, 700, 5.8 * k,
+    this._label(rec ? 'NEW BEST' : 'SCORE', cx, labY, 10 * k, 700, 5.8 * k,
       rec ? WARM : DIM, rec ? 0.98 : 0.82, 'center');
 
     const numCap = cap * (1 + pop * 0.045);
     for (let i = 0; i < this.dfx.length; i++) this.liftBuf[i] = -this.dfx[i] * numCap * 0.15;
-    const nw = this._vtext(str, cx - 13 * k, base, numCap, {
+    this._vtext(str, cx, base, numCap, {
       align: 'center', weight: 0.15, dfx: this.liftBuf,
       body: this._grad(base, cap, rgba(INK, 0.99), rgba(acc, 0.98), rgba(rec ? [186, 118, 44] : STEEL, 0.97)),
       core: this._core(base, cap, 0.36),
       shadow: 0.52, glow: 0.55 + pop * 0.9, glowCol: acc,
     });
-    this._vtext('M', cx - 13 * k + nw / 2 + 10 * k, base, 17 * k, {
-      body: rgba(acc, 0.66), shadow: 0.34, weight: 0.16,
-    });
 
-    if (s.best > 0.5) {
-      this._label(rec ? 'PASSED ' + Math.round(s.best) : 'BEST ' + Math.round(s.best),
-        cx, base + 20 * k, 9.5 * k, 600, 5 * k, rec ? WARM : FAINT, rec ? 0.85 : 1, 'center');
-    }
+    const dm = Math.round(Math.max(0, s.depth || 0)) + ' M';
+    this._label(s.best > 0.5 ? dm + '   ·   ' + (rec ? 'PASSED ' : 'BEST ') + group(Math.round(s.best)) : dm,
+      cx, base + 20 * k, 9.5 * k, 600, 5 * k, rec ? WARM : FAINT, rec ? 0.85 : 1, 'center');
     ctx.textAlign = 'left';
   }
 
@@ -932,7 +984,11 @@ export class Hud {
     const scrim = st(0, 0.34);
     if (scrim <= 0.002) return;
 
-    const isRec = s.depth > 0 && Math.abs((s.best || 0) - s.depth) < 0.06;
+    // main.js sets this when the run actually took the record. Inferring it by
+    // comparing `best` to the run's number no longer works and was always a
+    // trick: `best` is rounded on the way into localStorage now, so the two are
+    // up to half a unit apart at the moment the record is taken.
+    const isRec = !!s.newBest;
     const acc = isRec ? WARM : ICE;
     const cap = 104 * k;
     const cx = Math.round(W * 0.5);
@@ -961,7 +1017,7 @@ export class Hud {
 
     // the number lands
     const land = st(0.10, 0.44);
-    const str = String(Math.round(s.depth));
+    const str = group(Math.round(s.score || 0));
     if (land > 0.004) {
       const numCap = cap * lerp(1.26, 1.0, land);
       const numW = this._measure(str, numCap);
@@ -977,14 +1033,11 @@ export class Hud {
       this._streak(cx, cy - cap * 0.34, numW * 0.85 + 160 * k, cap * 0.32, acc, 0.12 + 0.20 * (1 - land));
       ctx.save();
       ctx.globalAlpha = land;
-      const nw = this._vtext(str, cx - 16 * k, cy, numCap, {
+      this._vtext(str, cx, cy, numCap, {
         align: 'center', weight: 0.148,
         body: this._grad(cy, numCap, rgba(INK, 0.99), rgba(acc, 0.99), rgba(isRec ? [184, 116, 40] : STEEL, 0.98)),
         core: this._core(cy, numCap, 0.34),
         shadow: 0.55, glow: 0.7 + (1 - land) * 1.5, glowCol: acc,
-      });
-      this._vtext('M', cx - 16 * k + nw / 2 + 13 * k, cy, 28 * k, {
-        body: rgba(acc, 0.7), shadow: 0.36, weight: 0.16,
       });
       ctx.restore();
     }
@@ -998,7 +1051,9 @@ export class Hud {
         ctx.globalAlpha = a2;
         const bw = 250 * k * (0.6 + 0.4 * a2);
         this._rule(cx - bw / 2, cx + bw / 2, cy + 26 * k, Math.max(1, 1.5 * k), WARM, 0.8, 1.4);
-        this._label('DEEPEST DIVE YET', cx, cy + 50 * k, 11.5 * k, 700, 8.5 * k, WARM, 0.98, 'center');
+        // Not 'DEEPEST': a record is now the best banked score, and a shorter
+        // dive with a hotter chain can take it.
+        this._label('BEST DIVE YET', cx, cy + 50 * k, 11.5 * k, 700, 8.5 * k, WARM, 0.98, 'center');
         ctx.restore();
       }
       sy = cy + 84 * k;
@@ -1008,17 +1063,14 @@ export class Hud {
     sy = Math.round(sy);
     const colW = clamp(176 * k, 96, W * 0.29);
     this._rule(cx - colW * 1.45, cx + colW * 1.45, sy, hair, FAINT, 0.45 * st(0.28, 0.3), 1.5);
-    // On a record the best column would just repeat the hero number, so the
-    // slot goes to the run's length instead.
-    const rt = Math.max(0, (s.t || 0) - t);
-    const mm = Math.floor(rt / 60), ss = Math.floor(rt % 60);
-    const stats = isRec
-      ? [['DIVE TIME', mm + ':' + (ss < 10 ? '0' : '') + ss, '', false],
-        ['BEST CHAIN', 'x' + ((s.bestMult || 1) % 1 ? (s.bestMult).toFixed(1) : String(s.bestMult || 1)), '', false],
-        ['TOP SPEED', String(Math.round((s.topSpeed || 0) / 10)), 'M/S', false]]
-      : [['BEST', String(Math.round(s.best || 0)), 'M', true],
-        ['BEST CHAIN', 'x' + ((s.bestMult || 1) % 1 ? (s.bestMult).toFixed(1) : String(s.bestMult || 1)), '', false],
-        ['TOP SPEED', String(Math.round((s.topSpeed || 0) / 10)), 'M/S', false]];
+    // These three read as the factorisation of the hero number: the metres you
+    // travelled, the multiplier you travelled them at, and how fast. The best is
+    // not a column any more - on a record the banner says so, and off one the
+    // shortfall line below does, so the slot goes to something the run earned.
+    const stats = [
+      ['DEPTH', group(Math.round(Math.max(0, s.depth || 0))), 'M', false],
+      ['BEST CHAIN', 'x' + ((s.bestMult || 1) % 1 ? (s.bestMult).toFixed(1) : String(s.bestMult || 1)), '', false],
+      ['TOP SPEED', String(Math.round((s.topSpeed || 0) / 10)), 'M/S', false]];
     for (let i = 0; i < stats.length; i++) {
       const [lab, val, unit, warm] = stats[i];
       const a3 = st(0.32 + i * 0.09, 0.36);
@@ -1045,7 +1097,8 @@ export class Hud {
     if (!isRec && s.best > 0.5) {
       ctx.save();
       ctx.globalAlpha = st(0.5, 0.3) * 0.85;
-      this._label(Math.round(s.best - s.depth) + ' M SHORT', cx, sy + 92 * k, 10 * k, 600, 5.6 * k, DIM, 0.85, 'center');
+      this._label('BEST ' + group(Math.round(s.best)) + '   ·   ' + group(Math.max(0, Math.round(s.best - (s.score || 0)))) + ' SHORT',
+        cx, sy + 92 * k, 10 * k, 600, 5.6 * k, DIM, 0.85, 'center');
       ctx.restore();
     }
 

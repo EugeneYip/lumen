@@ -3,8 +3,14 @@
 A one-button browser game. You are a bioluminescent mote in an abyssal trench.
 **Hold** to cast a light-tether at the nearest good anchor and swing; **release**
 to launch. "The Hush" — an advancing wall of dark — erases the world from the
-left, so stopping is death. Score is distance in metres; collecting plankton
-builds a chain multiplier.
+left, so stopping is death.
+
+**Score** is metres of new ground, banked as you claim them at whatever chain
+multiplier is live at that moment. Collecting plankton raises the multiplier, so
+the same trench is worth more when you are running a chain — and because it is
+banked forward rather than applied to the total at the end, a chain cannot
+retroactively inflate ground you already covered. At ×1 the score *is* the
+distance; the two only diverge where you earned it.
 
 No build step. No runtime dependencies. No asset files: every texture, sound and
 piece of geometry is generated procedurally at boot, which is why it loads
@@ -27,15 +33,21 @@ from any static file server.
 ### Controls
 | | |
 |---|---|
-| Hold LMB / Space / touch | cast tether, then reel in |
+| Hold LMB / Space / `W` / `↑` / touch | cast tether, then reel in |
 | Release | launch |
 | `R` | restart |
 | `M` | mute |
 | `P` | pause |
 
 The whole game is *when* you let go. Reeling in while attached is the only way to
-add energy, and the distance-optimal release is a narrow window 10-25 degrees
-ahead of the anchor — so holding longer is not automatically better.
+add energy, and holding longer is not automatically better.
+
+There is no single correct release angle, and that is the point: the optimum is a
+function of the local trench geometry, so the skill is reading terrain rather
+than memorising a number. This file used to claim a "narrow window 10-25 degrees
+ahead of the anchor"; measurement does not support it, and the sweep that
+produced it was truncating flights against the trench walls. `AI_HANDOFF.md` §8
+has the numbers and why no replacement figure belongs here yet.
 
 ## Verify it
 

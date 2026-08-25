@@ -44,7 +44,13 @@ class Game {
     // frameCtx field the HUD renders, so reading a machine-persistent record
     // here would make captured pixels differ between machines and between runs
     // that happen to beat it.
-    this.best = opts.headless ? 0 : (Number(localStorage.getItem('lumen.best') || 0) || 0);
+    //
+    // The key is namespaced because the stored value changed meaning. It used to
+    // be a distance in metres; it is now a banked score, which equals the
+    // distance at x1 and is unbounded above it. Reusing `lumen.best` would have
+    // handed every existing player a record the first run of this build beats by
+    // construction, and put two incomparable numbers under one name.
+    this.best = opts.headless ? 0 : (Number(localStorage.getItem('lumen.best.score') || 0) || 0);
     this.muted = localStorage.getItem('lumen.muted') === '1';
 
     this.mode = 'title';        // title | play | dead | paused
@@ -58,6 +64,9 @@ class Game {
     this.waves = [{ x: 0, y: 0, t: 0, dur: 1, live: false }, { x: 0, y: 0, t: 0, dur: 1, live: false }];
     this.topSpeed = 0;
     this.bestMult = 1;
+    this.score = 0;             // banked forward, see _bank()
+    this._bankX = 0;            // world x already credited
+    this.newBest = false;
     this.envDim = 1;
 
     this.newRun(true);
@@ -79,6 +88,9 @@ class Game {
     this.acc = 0;
     this.topSpeed = 0;
     this.bestMult = 1;
+    this.score = 0;
+    this._bankX = this.player.maxX;
+    this.newBest = false;
     this.envDim = 1;
     this.flash = 0;
     this.fade = 1;
@@ -195,15 +207,20 @@ class Game {
 
     if (this.mode === 'play') {
       p.update(dt, w, this.input, this.fx, this.runT);
+      this._bank(p);
       this.topSpeed = Math.max(this.topSpeed, p.speed);
       this.bestMult = Math.max(this.bestMult, p.mult);
       if (!p.alive) {
         this.mode = 'dead';
         this.deadT = 0;
-        const d = p.maxX * METRES;
-        if (d > this.best) {
-          this.best = d;
-          if (!this.headless) localStorage.setItem('lumen.best', String(d));
+        // Round on the way in, not only on the way out: the old key stored
+        // values like 320.0967127983056, which compares fine, displays fine,
+        // and is still junk to persist.
+        const s = Math.round(this.score);
+        if (s > this.best) {
+          this.best = s;
+          this.newBest = true;
+          if (!this.headless) localStorage.setItem('lumen.best.score', String(s));
           this.audio.play('best');
         }
         this.envDim = 1;
@@ -235,6 +252,50 @@ class Game {
     this._decay(dt);
   }
 
+  /**
+   * Credit this step's new ground at the multiplier that is live right now.
+   *
+   * The chain used to multiply nothing. `mult` reached frameCtx, the HUD and the
+   * particle burst size and stopped there, so the entire collectible system -
+   * the plankton, the chain, the generation that places them, the global-sort
+   * invariant that once made 18 of them silently uncollectable - could not move
+   * the number the player was chasing. That was measured, not read. Ablating the
+   * ace planner's plankton routing (`tools/_feel.mjs --mode policy --live --ace
+   * pkW=0`, seeds 7,3, 180s) left its *distance* rate at 90.8 m/s against 88.5
+   * with routing on - i.e. routing cost 2.5% and bought nothing back. With the
+   * score wired in, the same ablation moves the score rate 2584/s -> 1530/s, a
+   * 69% swing, while distance still moves only a few percent. Note the stock
+   * `_feel.mjs` cannot show this: its policy loop calls `player.update` directly
+   * and reports `maxX/10`, so it never runs this function. Distance is distance;
+   * no scoring rule can change it, and that is the point of banking a second
+   * quantity rather than inflating the first.
+   *
+   * Ground is banked as it is claimed. NOT final distance x final multiplier:
+   * that would let a run farm plankton at the very end and retroactively inflate
+   * every metre behind it, which is degenerate for a player and the first thing
+   * a planner would find.
+   *
+   * Three properties fall out, and all three are load-bearing:
+   *  - it integrates `maxX`, not `x`, so only *new* ground pays, exactly as
+   *    depth does. Swinging back and forth over the same water banks nothing.
+   *  - at x1 the score IS the depth, to the metre. They diverge only where the
+   *    player earned it, which is how the multiplier teaches itself with no
+   *    tutorial: the same number, climbing faster.
+   *  - it accumulates in the fixed 120Hz step and never in render(), so it is
+   *    frame-rate independent and a pure function of the seed. Banking per
+   *    rendered frame would have made the score depend on the display.
+   *
+   * True depth is untouched: `p.maxX * METRES` still backs `stats().depth`,
+   * `frameCtx.depth`, `seekToDepth` and the `deep` predicate. The score is a new
+   * quantity beside it, not a replacement for it.
+   */
+  _bank(p) {
+    const gained = p.maxX - this._bankX;
+    if (gained <= 0) return;
+    this._bankX = p.maxX;
+    this.score += gained * METRES * p.mult;
+  }
+
   _decay(dt) {
     this.flash = damp(this.flash, 0, 7.5, dt);
     this.slow = damp(this.slow, 0, this.slowDur ? 1 / Math.max(0.05, this.slowDur) * 2.2 : 4, dt);
@@ -263,7 +324,12 @@ class Game {
       t: this.runT, simT: this.t, dt: frameDt, runT: this.runT, deadT: this.deadT,
       // state
       mode: this.mode, alive: p.alive,
+      // `depth` is true distance travelled in metres and is what the capture
+      // harness seeks against - it must never become the score. `score` is what
+      // the player chases and what the chain multiplies; the two are equal until
+      // a chain is banked. `best` is the persisted record and therefore a score.
       depth: Math.max(0, p.maxX * METRES), best: this.best,
+      score: this.score, bestScore: this.best, newBest: this.newBest,
       mult: p.mult, chain: p.chain, speed: p.speedSmooth, rawSpeed: p.speed,
       topSpeed: this.topSpeed, bestMult: this.bestMult,
       // derived signals every visual system wants
@@ -541,13 +607,18 @@ class Game {
     return {
       mode: this.mode,
       x: Math.round(p.x), y: Math.round(p.y),
+      // `depth` is true metres travelled. Every seek in the capture harness is
+      // anchored on it, so it stays exactly what it has always been; `score` is
+      // reported beside it, never in place of it.
       depth: Math.round(p.maxX * METRES),
+      score: Math.round(this.score),
+      mult: p.mult,
       speed: Math.round(p.speed),
       attached: p.attached,
       anchors: this.world.anchors.length,
       hazards: this.world.hazards.length,
       particles: this.particles.n,
-      summary: `${this.mode} d=${Math.round(p.maxX * METRES)}m v=${Math.round(p.speed)} ${p.attached ? 'tethered' : 'free'}`,
+      summary: `${this.mode} d=${Math.round(p.maxX * METRES)}m s=${Math.round(this.score)} x${p.mult} v=${Math.round(p.speed)} ${p.attached ? 'tethered' : 'free'}`,
     };
   }
 }
