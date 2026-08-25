@@ -252,7 +252,7 @@ whether to keep iterating.
 - **No auto-exposure**, deliberately. It would mask exactly the contract
   violations `check.mjs` exists to catch.
 
-### Two shape traps that have each bitten three times
+### Three shape traps that have each bitten more than once
 
 **A ribbon cannot draw a soft edge at any tuning.** Its cross-section is
 `exp(-x^2 * falloff)`, so at the low falloff that reads as "solid" the value at
@@ -272,6 +272,41 @@ tapers at both ends and "cannot have a straight side however far it is
 stretched". True, and beside the point: it has no straight side because it is
 nothing but a straight line. If a thing must not read as ruled, build it from
 several offset pieces, so no straight line passes through more than one.
+
+**A branch on a world coordinate has a locus, and that locus is a line.**
+Any `if` in a shader that tests a world position, and any level set of a
+world-space field, draws its own boundary wherever the value it separates is
+discontinuous across it — and if that boundary happens to be straight, it reads
+as a ruled seam through the frame. Two instances landed in a single round:
+
+- The fault-block partition sat at integer values of
+  `(x + y*LEAN)/FAULTW + faultShear(y)`, so the plane's world slope is
+  `-(LEAN + FAULTW * faultShear'(y))`. The shear term alone swings ±0.253, so
+  against a lean of `0.19` the slope **passes through zero** and the fault draws
+  a dead vertical line down the whole frame. The lean is now `0.58`, which
+  bounds the slope away from zero by more than the camera roll can cancel.
+- The Hush block was gated `if (dxh < 3000.0)` while every term inside keys off
+  a drain front whose reach runs 1905–3215 — so the bound sat *inside* the range
+  the front can occupy, and cut the front's rim in half along a vertical line.
+  It is now gated on distance to the front itself, provably outside every term.
+
+This is the same defect that produced the grey rectangles in §7 — a hard
+threshold on a cell-hashed god-ray mask, so a cell boundary became a visible
+axis-aligned edge. Three instances in this repository, each found by a different
+route, each initially attributed to something else. It is the single most
+productive thing to check when a reviewer reports a straight line nobody drew.
+
+The rule that falls out: **gate on the field, not on a coordinate.** If a branch
+must exist, place its bound where everything inside it is already zero, or
+window the longest-tailed term to zero at the bound so the branch cannot draw
+its own boundary. And if you own a level set, check what its slope does across
+the whole range of its parameters, not at the value you happened to test.
+
+A corollary worth having: when a kill switch fails to remove an artefact, that
+is information, not a dead end. `bgNoDip` left the seam exactly where it was,
+which is what proved the dip was never the only thing stepping — the bed
+thickness and the warp phase were hashed per block too, and neither was under
+that switch. Three unrelated jumps at one x is not a displaced layer.
 
 ### There is no depth buffer, so you cannot hide anything behind geometry
 
@@ -317,6 +352,13 @@ showed the same frame twice, because a filename-tagging regex collapsed five
 distinct frames to one key. It cost an entire review round, and the symptom was
 visible in the output filenames the whole time. `montage.mjs` now hard-fails on
 duplicate tags, partial coverage, and byte-identical frames within one build.
+
+**One straight edge in the frame is not a defect and you should not chase it.**
+The largest column-to-column step in every `hushNear` frame, on every seed, is at
+x=51 and x=2 — that is `hud.js`'s "THE HUSH" panel and its rule. HUD is composited
+into the captured frame, so it appears in any statistic taken over the image, it
+is identical across builds, and it does not move under `bgNoHush`. Verify a
+candidate seam is not HUD before you go looking for it in a shader.
 
 ## 8. Known weaknesses and active investigation
 
