@@ -130,6 +130,25 @@ if (MODE === 'pair') {
   // reproduced later from the same two directories.
   let seed = Number(arg('seed', [...`${A}|${B}`].reduce((h, c) => (Math.imul(h, 31) + c.charCodeAt(0)) | 0, 7) >>> 1)) | 0;
   const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+
+  /**
+   * Balanced assignment, not independent coin flips.
+   *
+   * Flipping each pair independently put the same build on the same side in all
+   * four pairs of one review -- a 1-in-8 outcome that duly happened. The critic
+   * noticed, and correctly warned that if the sides HAD been swapped its four
+   * verdicts would have been split across two builds and the aggregate score
+   * meaningless. With a handful of pairs, chance is not good enough: assign
+   * exactly half to each side and shuffle that assignment.
+   */
+  const balancedFlips = (n) => {
+    const f = Array.from({ length: n }, (_, i) => i < Math.floor(n / 2));
+    for (let i = n - 1; i > 0; i--) {            // Fisher-Yates, seeded
+      const j = Math.floor(rnd() * (i + 1));
+      [f[i], f[j]] = [f[j], f[i]];
+    }
+    return f;
+  };
   await mkdir(OUT, { recursive: true });
 
   const fa = await pngs(A), fb = await pngs(B);
@@ -198,10 +217,11 @@ if (MODE === 'pair') {
   }
 
   const key = [];
+  const flips = balancedFlips(n);
   for (let i = 0; i < n; i++) {
     const [af, bf] = pairs[i];
     const scene = tag(af);
-    const flip = rnd() < 0.5;
+    const flip = flips[i];
     const left = flip ? join(B, bf) : join(A, af);
     const right = flip ? join(A, af) : join(B, bf);
     // assume 16:9 sources; the cell keeps aspect via object-fit anyway

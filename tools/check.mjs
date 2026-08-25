@@ -45,6 +45,13 @@ const BUDGET = {
   // they are composition targets rather than defects, but they are the numbers
   // that axis is judged on.
   shadowFracMin: 0.08,   // fraction below L8; a real abyss wants 0.15-0.25
+  // ...and a ceiling, because a one-sided target gets optimised past the point
+  // of value. Chasing the floor drove the environment to 38-54% below L8, and a
+  // blind reviewer then preferred the OLDER build on all four pairs, describing
+  // the newer one as crushing "an entire wall plane and stalactite field to
+  // flat black" -- geometry the level artist had built and the tone curve was
+  // deleting. Blacks are a floor to reach, not a quantity to maximise.
+  shadowFracMax: 0.36,
   moteContrastMin: 4.0,  // focal core vs its local surround, at any speed
   // Focal contrast is local: it only asks whether the mote beats its own
   // immediate surround. An art director measured the mote as the 10th and then
@@ -231,6 +238,7 @@ for (const seed of SEEDS) {
         if (lum.clipped > BUDGET.clippedMax) fails.push(`${tag}: ${(lum.clipped * 100).toFixed(1)}% of pixels clipped to white (max ${(BUDGET.clippedMax * 100)}%)`);
         if (lum.black > BUDGET.blackMax) warns.push(`${tag}: ${(lum.black * 100).toFixed(1)}% of pixels are near-black`);
         if (lum.shadowFrac < BUDGET.shadowFracMin) warns.push(`${tag}: no real blacks — only ${(lum.shadowFrac * 100).toFixed(1)}% of pixels below L8 (want > ${BUDGET.shadowFracMin * 100}%); the abyss never reaches black`);
+        else if (lum.shadowFrac > BUDGET.shadowFracMax) warns.push(`${tag}: crushed — ${(lum.shadowFrac * 100).toFixed(1)}% of pixels below L8 (want < ${BUDGET.shadowFracMax * 100}%); geometry is being deleted rather than darkened`);
         if (lum.moteRank != null && lum.moteRank > BUDGET.moteRankMax) warns.push(`${tag}: hero is not salient — the mote's block ranks ${lum.moteRank} of ${lum.blockCount} by highlight energy (want top ${BUDGET.moteRankMax}); a player scanning the still cannot find their character`);
         if (lum.contrast != null && lum.contrast < BUDGET.moteContrastMin) warns.push(`${tag}: weak focal point — mote core only ${lum.contrast.toFixed(1)}:1 over its surround (want > ${BUDGET.moteContrastMin}:1)`);
         const spread = lum.p95 - lum.p20;
