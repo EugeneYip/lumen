@@ -6,16 +6,17 @@
 //     -> halation     3 cascaded gaussians of mip1  (tight, hugs sources)
 //     -> veil         progressive upsample 5..2     (wide, low amplitude)
 //     -> ridge+smear  2 passes along each source's OWN axis (short, oriented)
+//     -> field        local floor + local range in stops, 3 separable passes
 //     -> composite    spectral CA / astigmatic edge / speed smear, water medium,
 //                     cos^4 vignette, hue-preserving filmic, split tone,
-//                     black point, midtone shelf, clumped grain, TPDF dither
+//                     per-layer black point, tracking midtone ramp, grain, TPDF
 //
 // Two bloom characters with independent weights is the whole point: a single
 // blur radius for everything reads as a filter, not as light in a room. And the
 // tonemap runs on the peak channel, not per-channel, so a hot cyan core lands
 // on cyan-white and a hot amber core on amber-white instead of both on grey.
 //
-// Six things in here were wrong for a long time and are worth naming so they
+// Seven things in here were wrong for a long time and are worth naming so they
 // do not come back:
 //   1. Dispersion and the speed smear shared one radial excursion, so the
 //      spectral weights rode the smear. A 2px fringe is a lens; a 20px one is
@@ -45,23 +46,23 @@
 //      is a lens with anamorphic glass, so the bar was the one moment the
 //      image admitted it was a filter rather than light. The layer is now
 //      oriented per pixel to the ridge axis of whatever cast it, and gated so
-//      an isotropic source contributes nothing at all - see ORIENT_FS. There
-//      is no depth buffer to test against, but occlusion stops being the
-//      question once the smear is a property of the source instead of a bar
-//      across the frame; and at speed the scene's own velocity-stretched
-//      sprites orient it, so the motion cue is one the world motivates
-//      instead of one the glass asserts.
+//      an isotropic source contributes nothing at all - see ORIENT_FS.
 //   6. The black point gave the frame a floor and no ramp. Measured on the
-//      build before this one: 71% of a mid-run frame below L16 and 5.0%
+//      build before that one: 71% of a mid-run frame below L16 and 5.0%
 //      between L48 and L159, so the rock's strata, joints and sediment crust
 //      existed in the scene at linear 0.01-0.04 and arrived compressed into
 //      about 20 code values. The midtone shelf is a gain windowed on level -
 //      zero at black so the blacks survive, zero at white so the cores and
-//      the clipping fraction do not move, peaked on the low mids. It is still
-//      one monotone function of one variable, which is what a response curve
-//      is. A local operator would model the geology harder and would also be
-//      the same lie the streak was: an unsharp mask draws an edge the scene
-//      does not contain, and that is the complaint this round is answering.
+//      the clipping fraction do not move, peaked on the low mids.
+//   7. That shelf was windowed on a CONSTANT level, and one constant cannot be
+//      right at every distance. Measured on the four capture depths of seed 7:
+//      3.9% of the frame below L8 at 25m against 45.0% at 1000m, with three
+//      distinct parallax layers landing inside 1.4 code values of each other at
+//      1000m (12.1 / 11.6 / 10.7) and a near kelp frond landing inside 0.6 of a
+//      far wall plane at 25m (41.9 / 41.3). The same curve milked one frame and
+//      crushed the other. The window now follows the level of whatever layer it
+//      is sitting on, and the veil and the toe are driven by the same field -
+//      see FIELD_PRE_FS for what that field is and, importantly, what it is not.
 import { compile, RenderTarget, drawFullscreen, FS_VS, GLSL_COMMON, Blend, texture2D } from './gl.js';
 
 const clampN = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -288,6 +289,140 @@ void main(){
   outColor = vec4(c * (mix(1.0, k, uGate) / wsum), 1.0);
 }`;
 
+// ---------------------------------------------------------------------------
+// The depth-ordering field. Three separable passes producing two numbers per
+// pixel: the LOCAL FLOOR of a ~80px neighbourhood, and the LOCAL RANGE in
+// stops between that floor and the neighbourhood's mean level.
+//
+// What this is not: a depth buffer, and not a depth estimate either. Three
+// candidate absolute depth cues were measured on real frames and all three
+// fail on this scene, which is worth writing down so nobody spends the day
+// again:
+//
+//   * Low-frequency luminance pedestal - the classical dark-channel / airlight
+//     prior, which is the right tool for a participating medium. It fails here
+//     because the far planes are OCCLUDERS, not haze: measured on seed 7 at
+//     450m, the far dark wall sits at code 5.8 while the open water in front
+//     of it sits at 31.2, so the airlight estimate ranks the far wall as the
+//     NEAREST thing in frame. The environment's four far-wall planes span only
+//     1.10x in level across the whole stack, and non-monotonically, while the
+//     per-pixel albedo gate inside ONE layer spans 4.6x.
+//   * Chroma. The decor's depth fade mixes toward the deep-water colour, which
+//     is nearly the same hue as everything it fades, so saturation moves 0.5%
+//     for a 20x drop in level. Measured blue-minus-red per layer tracks level,
+//     not depth.
+//   * Spatial frequency. This one is actively inverted: the far wall planes
+//     are the SAME world geometry drawn at 0.135-0.580 scale, so they carry up
+//     to 7.4x HIGHER on-screen frequency than the near rock, while the decor
+//     is low-passed with depth. A frequency detector labels the farthest wall
+//     as the nearest object in the frame.
+//
+// What survives is local CONTRAST AMPLITUDE, and it survives for both families
+// at once and in the same direction: the far walls carry a (1 - fog) factor of
+// 0.825 / 0.700 / 0.560 / 0.440 from near to far, and decor carries an alpha of
+// (1 - 0.48*depth) with its high octave scaled 1.00 -> 0.18. So contrast is the
+// one cue that is monotone in depth for every family of geometry here.
+//
+// And that is enough, because the acceptance test is not an absolute-depth
+// test. It asks that layers be DISTINGUISHABLE, which is a local, pairwise
+// property - and local ORDERING is recoverable even where absolute depth is
+// not. Inside one neighbourhood the element sitting at the luminance floor is
+// the occluder nearest the camera along that ray, and everything above it is
+// medium or geometry behind. The composite drives the veil off that ordering,
+// the toe and the ramp off the range, and neither ever claims to know a metre.
+//
+// The failure mode is stated plainly: a smooth near surface - open water, a
+// light shaft, the mote's own halo - has no local range and is classified with
+// the far medium. That miss is benign by construction, because every operator
+// driven from this field is one that should do nothing to a smooth field.
+//
+// Precision matters here and dictated the algebra. These targets are half
+// float, so a variance computed as E[x^2] - E[x]^2 loses most of its
+// significant figures in the bright regions where the two terms nearly cancel.
+// Both accumulators below are instead well conditioned everywhere: a mean of
+// reciprocals inverts to a soft minimum with no cancellation, and the range
+// falls out as a sum of logs rather than a difference of squares.
+const FIELD_PRE_FS = `
+${GLSL_COMMON}
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+uniform float uC;
+in vec2 vUv; out vec4 outColor;
+
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+void main(){
+  // Four bilinear taps at three quarter-texel diagonals. Each lands between
+  // half-res texels, so each returns a 4x4 full-res box and the four together
+  // cover the whole quarter-res footprint with no gap. Complete coverage is
+  // the point: the later passes step several pixels at a time, and a soft
+  // minimum that steps over a thin dark stalactite does not see it at all.
+  vec2 t = uTexel * 0.75;
+  float a = 0.0, b = 0.0;
+  for(int i=0;i<4;i++){
+    vec2 o = vec2(i == 0 || i == 3 ? -1.0 : 1.0, i < 2 ? -1.0 : 1.0);
+    float l = max(dot(texture(uSrc, vUv + t*o).rgb, LUMA), 0.0) + uC;
+    a += 1.0 / l;
+    b += log2(l);
+  }
+  outColor = vec4(a * 0.25, b * 0.25, 0.0, 1.0);
+}`;
+
+// Separable gaussian over both accumulators. uDir picks the axis; the vertical
+// pass resolves, because the resolve is only valid on the finished 2D mean.
+const FIELD_BLUR_FS = `
+${GLSL_COMMON}
+uniform sampler2D uSrc;
+uniform vec2 uTexel, uDir;
+uniform float uStride;
+in vec2 vUv; out vec4 outColor;
+
+void main(){
+  vec2 stp = uTexel * uDir * uStride;
+  vec2 c = texture(uSrc, vUv).rg;
+  float wsum = 1.0;
+  for(int i=1;i<=6;i++){
+    float fi = float(i);
+    float w = exp(-fi*fi*0.055);
+    c += texture(uSrc, vUv + stp*fi).rg * w;
+    c += texture(uSrc, vUv - stp*fi).rg * w;
+    wsum += 2.0*w;
+  }
+  outColor = vec4(c / wsum, 0.0, 1.0);
+}`;
+
+const FIELD_RESOLVE_FS = `
+${GLSL_COMMON}
+uniform sampler2D uSrc;
+uniform vec2 uTexel, uDir;
+uniform float uStride, uC;
+in vec2 vUv; out vec4 outColor;
+
+void main(){
+  vec2 stp = uTexel * uDir * uStride;
+  vec2 c = texture(uSrc, vUv).rg;
+  float wsum = 1.0;
+  for(int i=1;i<=6;i++){
+    float fi = float(i);
+    float w = exp(-fi*fi*0.055);
+    c += texture(uSrc, vUv + stp*fi).rg * w;
+    c += texture(uSrc, vUv - stp*fi).rg * w;
+    wsum += 2.0*w;
+  }
+  c /= wsum;
+
+  // r: the harmonic-style mean of (luminance + uC) inverts to a soft minimum -
+  //    the neighbourhood's floor. uC bounds how far one black pixel can drag
+  //    it, which is what keeps this from cutting a dark halo around every
+  //    silhouette, and it also sets the level below which everything reads as
+  //    the same void.
+  float floorL = max(1.0 / max(c.r, 1e-6) - uC, 0.0);
+  // g: mean log level minus log floor = the local range in STOPS. Scale free,
+  //    so one pair of thresholds covers a lit wall and a black trench alike.
+  float range = max(c.g + log2(max(c.r, 1e-6)), 0.0);
+  outColor = vec4(floorL, range, 0.0, 1.0);
+}`;
+
 // A half-res copy of the scene. One bilinear tap lands exactly on a 2x2 box.
 // The wide-offset taps in the composite read this instead of the full-res
 // target: a 15px dispersion across 7 full-res HDR taps is pure bandwidth, and
@@ -300,7 +435,7 @@ void main(){ outColor = vec4(texture(uSrc, vUv).rgb, 1.0); }`;
 
 const COMPOSITE_FS = `
 ${GLSL_COMMON}
-uniform sampler2D uScene, uHalf, uVeil, uHaloB, uHaloC, uStreak, uDirt, uSpectrum;
+uniform sampler2D uScene, uHalf, uVeil, uHaloB, uHaloC, uStreak, uDirt, uSpectrum, uField;
 uniform vec2  uRes;
 uniform float uTime, uExposure;
 uniform float uVeilAmt, uVeilWiden, uVeilCap, uHaloAmt, uHalation, uStreakAmt, uDirtAmt;
@@ -310,10 +445,12 @@ uniform vec2  uSmearOrg;
 uniform float uVignette, uVigFocal, uVigCorner;
 uniform float uWhite, uHueKeep, uSat, uContrast, uLift, uBlack;
 uniform float uShelf, uShelfCentre, uShelfWidth;
+uniform float uFieldC, uRangeLo, uRangeHi, uOcclSpan, uOcclCut;
+uniform float uToeRange, uOcclToe, uShelfTrack, uShelfBias, uShelfLo, uShelfHi, uShelfGate, uShelfClean;
 uniform vec3  uShadowTint, uHighTint, uLiftCol;
 uniform vec3  uAbsorb, uScatterCol;
 uniform float uScatter, uScatterEdge, uScatterBase;
-uniform float uGrain, uGrainChroma;
+uniform float uGrain, uGrainChroma, uGrainCoarse;
 uniform float uFlash;  uniform vec3 uFlashCol;
 uniform float uFade, uDesat, uHush;  uniform vec3 uHushTint;
 uniform vec4  uWave0, uWave1;
@@ -325,11 +462,14 @@ const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 float ign(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 
 // Emulsion grain: one clumped octave plus per-pixel salt. Pure per-pixel noise
-// reads as a digital sensor; the clumping is what makes it read as film.
-float grain(vec2 p, float s){
-  float clump = vnoise(p * 0.55 + s);
+// reads as a digital sensor; the clumping is what makes it read as film. uSc
+// scales the clump only - the salt stays per-pixel, because a salt octave
+// sampled off the pixel grid stops being white noise and starts being texture.
+float grain(vec2 p, float s, float sc){
+  float clump = vnoise(p * (0.55 * sc) + s);
   float fine  = hash12(p + s * 7.31);
-  return (clump * 0.70 + fine * 0.30) - 0.5;
+  float cw = 0.70 + 0.13 * (1.0 - sc);
+  return (clump * cw + fine * (1.0 - cw)) - 0.5;
 }
 
 // Hable filmic. Applied to a scalar only - see tonemapHue. The coefficients are
@@ -361,6 +501,12 @@ vec3 tonemapHue(vec3 c, float white, float keep){
   vec3 ratio = c / pk;
   float y = min(hable(pk * (WHITE_REF / max(white, 1.0))) / HB_INF, 1.0);
   return mix(ratio, vec3(1.0), pow(y, keep)) * y;
+}
+
+// L*L/(L+k) is asymptotically L-k but goes into zero quadratically, so the
+// near-black water rolls off rather than clipping to a flat plate.
+float toe(float L, float k){
+  return (1.0 + k) * L * L / (L + k + 1e-6);
 }
 
 vec2 shockwave(vec2 uv, vec4 w){
@@ -448,8 +594,35 @@ void main(){
   // where the edge softness comes from - it is one effect, not two. With the
   // smear anchored on the mote this now stays near zero AT the mote at any
   // speed, which is the whole point: the protagonist keeps its full-res peak.
+  vec3 sceneTap = texture(uScene, uv).rgb;
   float soft = clamp((caK + smK + defK) * uRes.x / 2.2 - 0.35, 0.0, 1.0);
-  vec3 col = mix(texture(uScene, uv).rgb, acc, soft) * uExposure;
+  vec3 col = mix(sceneTap, acc, soft) * uExposure;
+
+  // --- the depth-ordering field. See FIELD_PRE_FS for what it is, what it is
+  //     not, and the three absolute depth cues that were measured and failed.
+  //     rangeK: 0 in a structureless fill, 1 in geology. This is the near/far
+  //     proxy, and the only one in this scene that is monotone in depth for
+  //     both the wall planes and the decor.
+  //     occlK: 1 where this pixel sits at the floor of a neighbourhood that
+  //     HAS a floor to sit at - the element nearest the camera along the ray.
+  //     Gating on rangeK is what stops flat open water, where every pixel is
+  //     trivially at its own floor, from claiming to be an occluder. ---
+  vec2 fld = texture(uField, uv).rg;
+  float fBase = max(fld.r, 0.0);
+  float rangeK = smoothstep(uRangeLo, uRangeHi, fld.g);
+  // 'At the floor' has to be measured as a FRACTION of the neighbourhood's own
+  // range, not as an absolute number of stops. An absolute threshold calls the
+  // lit half of a low-contrast far plane an occluder and the shaded half of a
+  // high-contrast near one open water.
+  float above = log2((dot(sceneTap, LUMA) + uFieldC) / (fBase + uFieldC));
+  float occlK = rangeK * (1.0 - smoothstep(0.0, uOcclSpan * max(fld.g, 0.06), above));
+  // The one number the toe and the ramp are both allowed to act on: there is
+  // structure here AND this pixel is part of it rather than the hole it is
+  // seen against. Without the second half both operators protect the
+  // silhouette too - measured, that alone cost 3-5 points of shadow fraction
+  // and put three scenes under the 8% floor, because a black stalactite
+  // sitting inside a modelled wall inherits the wall's protection.
+  float surfK = rangeK * (1.0 - occlK);
 
   // --- bloom, two characters. Wide veil first: low amplitude, long tail. ---
   // The veil is broad and smooth, so it can carry a much wider per-channel
@@ -479,6 +652,7 @@ void main(){
   vec3 halC = texture(uHaloC, uv).rgb;
   vec3 ring = max(halC - halB * 0.86, 0.0);
 
+  float Lclean = dot(col, LUMA);        // scene before any bloom is stacked on
   col += halB * uHaloAmt;
   col += veil * uVeilAmt;
   col += ring * uHalationTint * uHalation;
@@ -486,6 +660,10 @@ void main(){
   // which is right for anamorphic glass and wrong for an organism's own light.
   col += texture(uStreak, uv).rgb * uStreakTint * uStreakAmt;
   col += uFlashCol * uFlash;      // pre-tonemap, so a flash rolls off filmically
+  // How much of this pixel is the scene rather than a halo cast onto it. The
+  // midtone ramp models geology; a halo is not geology, and lifting one is how
+  // a hero loses its surround contrast.
+  float cleanK = clamp(Lclean / max(dot(col, LUMA), 1e-5), 0.0, 1.0);
 
   // --- the water you are inside. Absorption eats red first; inscatter lifts
   //     the frame toward its edges, where the sightline through water is
@@ -493,18 +671,30 @@ void main(){
   //     The edge term used to sit on a constant of 1.0, which is a haze floor
   //     on the middle of the frame - precisely where the deepest water is
   //     supposed to be, and where the eye is. It is nearly all path length
-  //     now, so the centre can go dark and the corners still breathe. ---
+  //     now, so the centre can go dark and the corners still breathe.
+  //
+  //     The inscatter is also the one place a real path length is available
+  //     without a depth buffer. Airlight is proportional to how much water is
+  //     in front of the thing you are looking at, and the element at the floor
+  //     of its own neighbourhood is the one with the least. So the nearest
+  //     occluder along each ray keeps a true black floor while the medium and
+  //     the geometry behind it keep their veil - which is the near/far half of
+  //     the per-layer fog, driven by an ordering that is actually measurable
+  //     rather than by a depth this file does not have. ---
   float path = 1.0 + 1.45 * rn2;
   vec3 kA = uAbsorb * path;
-  col *= 1.0 - kA + 0.5 * kA * kA;          // exp(-kA) to 2 terms; kA stays small
-  col += uScatterCol * (uScatter * (uScatterBase + uScatterEdge * rn2));
+  vec3 absF = 1.0 - kA + 0.5 * kA * kA;     // exp(-kA) to 2 terms; kA stays small
+  col *= absF;
+  float scaK = uScatter * (uScatterBase + uScatterEdge * rn2) * (1.0 - uOcclCut * occlK);
+  col += uScatterCol * scaK;
 
   // --- vignette as light loss, not as a dark disc pasted on the result.
   //     cos^4 of the field angle, plus a little mechanical corner cut. ---
   float cosT = uVigFocal * inversesqrt(uVigFocal * uVigFocal + rlen * rlen);
   float c2 = cosT * cosT;
   float vig = c2 * c2 * (1.0 - uVigCorner * smoothstep(0.58, 1.0, rn));
-  col *= mix(1.0, vig, uVignette);
+  float vigM = mix(1.0, vig, uVignette);
+  col *= vigM;
 
   // --- filmic ---
   col = tonemapHue(max(col, 0.0), uWhite, uHueKeep);
@@ -521,13 +711,27 @@ void main(){
   //     any seed reached L8, and 84% of the image lived in a 32-value band
   //     sitting on that pedestal - murk and bloom with no midtone between.
   //     Ablating this one term moved the shadow fraction from 0.0% to 29%.
-  //     A colourist subtracts here instead of adding. L*L/(L+k) is
-  //     asymptotically L-k but goes into zero quadratically, so the near-black
-  //     water rolls off rather than clipping to a flat plate; and doing it on
-  //     luminance and rescaling the chroma means the deep water keeps its own
-  //     colour all the way down instead of turning grey on the way to black. ---
+  //     A colourist subtracts here instead of adding, and doing it on
+  //     luminance while rescaling the chroma means the deep water keeps its
+  //     own colour all the way down instead of turning grey on the way to
+  //     black.
+  //
+  //     The depth is now per pixel, and this is the 'non-clipping toe' half of
+  //     the per-layer prescription. A structureless fill gets the full toe and
+  //     is free to reach black - that is the near plane's true black floor, and
+  //     it is also empty water, which should not be carrying detail it does not
+  //     have. Anything sitting at the floor of its own neighbourhood gets the
+  //     full toe and then some, which is what keeps a silhouette black instead
+  //     of letting it inherit the protection of the modelled plane it is seen
+  //     against - and, since that pixel is also the nearest thing along its
+  //     ray, running its toe deeper than what is behind it is the same
+  //     near-goes-black, far-stays-veiled statement the inscatter makes above.
+  //     Only surface that is above its own floor keeps a non-clipping toe under
+  //     it, so a wall plane's striation and a stalactite field survive as slope
+  //     rather than being subtracted into one flat plate. ---
   L = dot(col, LUMA);
-  float Lb = (1.0 + uBlack) * L * L / (L + uBlack + 1e-6);
+  float kb = uBlack * (1.0 - uToeRange * surfK) * (1.0 + uOcclToe * occlK);
+  float Lb = toe(L, kb);
   col *= Lb / max(L, 1e-5);
 
   // What is left of the lift: chroma, not level. A few thousandths of the
@@ -537,36 +741,41 @@ void main(){
   // cast and a pedestal.
   col += uLiftCol * uLift * (1.0 - smoothstep(0.0, 0.16, Lb));
 
-  // --- the midtone shelf. The black point fixed the floor and left no ramp:
+  // --- the midtone ramp. The black point fixed the floor and left no ramp:
   //     the geology arrived as silhouette rather than as modelled surface,
   //     with 71% of a frame under L16 and 5% between L48 and L159. A gain, not
   //     an add - an add here is a pedestal and this file has already paid for
   //     that lesson once. And a gain on luminance with the chroma riding along,
   //     so the newly-opened rock keeps the water's colour.
   //
-  //     The window is gaussian in log2 luminance, and it has to be, because the
-  //     two things it must not touch are only a factor of 11 apart. Below sits
-  //     the floor: code 12 is 4x under the centre and lifting it dissolves
-  //     every silhouette - measured, the 450m stalactites lost their width and
-  //     the frame went milky when an earlier rational window carried 42% of
-  //     its gain down there. Above sits the mote's own halo: the focal metric
-  //     averages an annulus 42-58px out, which lands at code 58, only 3x over
-  //     the centre, and every point of gain there is a point off the hero's
-  //     read. A window in L/(L+k) cannot be tight on both sides at once; one
-  //     in log L can. This one is 0.01% at L8, 5% at L16, full at L32, 28% at
-  //     L48 and 4% by L58 - so it expands code 16-40 by about 1.6x, which is
-  //     the falloff from a lit rock face into shadow, and leaves both ends
-  //     alone. Measured on the same scene at four depths: the 16-31 band drains
-  //     by 4-11 points into 32-47, and the fraction below L8 goes UP by 1.2-3.1
-  //     points rather than down.
+  //     The window is gaussian in log2 luminance, and it has to be: the two
+  //     things it must not touch are only a factor of 11 apart. Below sits the
+  //     floor, and lifting it dissolves every silhouette. Above sits the mote's
+  //     own halo at code 58, and every point of gain there is a point off the
+  //     hero's read. A window in L/(L+k) cannot be tight on both sides at once;
+  //     one in log L can.
   //
-  //     It also pays for the white point. The toe gain is WHITE_REF/white, so
-  //     the white point was doing midtone work at 0.2 of measured focal
-  //     contrast per 1.0 - the shelf buys the same midtone without touching
-  //     the top of the curve, so the white point went back up.
+  //     What is new is where the window SITS. It used to sit on a constant, and
+  //     one constant cannot be right at every distance: measured on seed 7, the
+  //     ramp landed on the rock at 450m and on nothing at all at 1000m, where
+  //     three parallax layers had collapsed into 1.4 code values. The centre now
+  //     tracks the local floor through the same exposure, absorption, vignette,
+  //     curve and toe the pixel itself took, so the ramp opens each layer at the
+  //     level that layer actually occupies. Three things keep that from becoming
+  //     a local operator that draws edges the scene does not contain: the floor
+  //     comes from a soft MINIMUM, which cannot overshoot the way an unsharp
+  //     mask's low-pass does; the field is a ~80px window, so anything it does
+  //     vary is a shading gradient rather than an edge; and the gain is gated to
+  //     retreat where there is no structure to open, which is exactly where an
+  //     invented edge would be visible. ---
+  float bl = fBase * uExposure * dot(absF, LUMA) * vigM + dot(uScatterCol, LUMA) * scaK;
+  float bd = min(hable(bl * (WHITE_REF / max(uWhite, 1.0))) / HB_INF, 1.0);
+  bd = toe(bd, kb);
+  float ctr = mix(uShelfCentre, clamp(bd * uShelfBias, uShelfLo, uShelfHi), uShelfTrack);
   L = dot(col, LUMA);
-  float sd = log2(max(L, 1e-6) / uShelfCentre) / uShelfWidth;
-  col *= 1.0 + uShelf * exp2(-sd * sd);
+  float sd = log2(max(L, 1e-6) / ctr) / uShelfWidth;
+  float shelfK = uShelf * mix(uShelfGate, 1.0, surfK) * mix(1.0, cleanK, uShelfClean);
+  col *= 1.0 + shelfK * exp2(-sd * sd);
 
   L = dot(col, LUMA);
   col = mix(vec3(L), col, uSat * (1.0 - uDesat));
@@ -590,12 +799,25 @@ void main(){
   //     than it used to: it sat above the old L14 floor and so never did
   //     anything, but a fifth of the frame now lives below L8, and at those
   //     levels the grain IS the dither that keeps a smooth gradient from
-  //     crawling under a moving camera. At L8 it is under half a code value. ---
+  //     crawling under a moving camera. At L8 it is under half a code value.
+  //
+  //     The clump size is no longer constant across the frame. One grain size
+  //     on every plane is a depth cue thrown away, and it is also what let the
+  //     grain pass quietly become the thing disguising flat fills. It rides the
+  //     same near/far proxy as everything else here: coarse where the proxy
+  //     says near geology, fine where it says far or medium. That is the honest
+  //     version of 'grain coarsens toward the viewer' - the proxy is contrast
+  //     amplitude, not distance, so it gets the wall planes and the decor right
+  //     and calls a smooth near surface far. Amplitude comes down as the clump
+  //     grows, because a lower-frequency clump at equal amplitude reads as more
+  //     grain, not as bigger grain. ---
   float gs = hash11(floor(uTime * 24.0) + 0.5) * 311.0;
-  float gn = grain(fc, gs);
+  float gsc = mix(1.0, uGrainCoarse, rangeK);
+  float gn = grain(fc, gs, gsc);
   float gc = hash12(fc + gs * 1.7 + 3.71) - 0.5;
   float gl = dot(col, LUMA);
   float gw = smoothstep(0.014, 0.12, gl) * (1.0 - 0.62 * smoothstep(0.52, 1.0, gl));
+  gw *= mix(1.0, 0.82, rangeK);
   col += (vec3(gn) + vec3(gc, 0.0, -gc) * uGrainChroma) * uGrain * gw;
 
   // Two uniforms make a triangular PDF, which unlike a single one does not
@@ -646,12 +868,10 @@ export const GRADE = {
   vignette: 0.68,
   vigFocal: 0.95,
   vigCorner: 0.28,
-  // Went to 10.6 to buy midtone, and back up now that the shelf buys it more
+  // Went to 10.6 to buy midtone, and back up now that the ramp buys it more
   // cheaply. The toe gain is WHITE_REF/white, so dropping the white point
   // lifts the whole low end - including the mote's own surround, at about 0.2
-  // of measured focal contrast per 1.0. The shelf does the same job with a
-  // window that dies before the surround, so this can go back to sitting where
-  // the shoulder belongs, which is also where the hot cores keep their ladder.
+  // of measured focal contrast per 1.0.
   white: 11.0,            // linear value the shoulder is built around
   hueKeep: 7.0,           // higher = hue survives further up the shoulder
   saturation: 1.06,
@@ -661,12 +881,34 @@ export const GRADE = {
   // the colour of the floor, at a luminance too low to be a pedestal.
   black: 0.0020,
   lift: 0.0045,
-  // The ramp. Gaussian in log2 luminance, centred on display-linear 0.0145 -
-  // code 32, the band the rock was compressed into - and 0.85 octaves wide,
-  // which is the widest that still dies before the mote's halo at code 58.
+  // The ramp. Gaussian in log2 luminance, 0.72 octaves wide. shelfCentre is
+  // now only the fallback the tracking blends away from - see the composite.
   shelf: 0.72,
   shelfCentre: 0.0145,
   shelfWidth: 0.72,
+
+  // --- the depth-ordering field. See FIELD_PRE_FS. ---
+  // Measured on the field itself, seed 7, all four capture depths: the range
+  // channel runs 0.02 stops in flat open water, 0.04-0.06 on an unmodelled far
+  // wall, 0.18-0.27 on striation and a stalactite field, 0.35 on near kelp.
+  // Frame-wide p25 is 0.034 and p90 is 0.30-0.48. The pair below sits under
+  // the flat fills and over the geology.
+  fieldC: 0.0018,         // resolution floor of the local minimum, scene linear
+  fieldStride: 1.55,      // quarter-res texels between taps; ~80px window
+  rangeLo: 0.030,         // local range below this is a structureless fill
+  rangeHi: 0.240,         // ...and above this is geology
+  occlSpan: 0.50,         // fraction of the local range that still counts as its floor
+  occlCut: 0.55,          // airlight the nearest element along a ray does not receive
+  occlToe: 0.55,          // ...and how much deeper its toe runs than what is behind it
+  toeRange: 0.62,         // how far the toe backs off where there is structure
+  shelfTrack: 0.85,       // how far the ramp's centre follows the local floor
+  shelfBias: 1.35,        // structure sits above the floor it stands on
+  shelfLo: 0.0026,        // ...but never below this, or the ramp lifts the void
+  shelfHi: 0.0170,        // ...nor above this, or it reaches the mote's halo
+  shelfGate: 0.13,        // ramp remaining in a structureless fill
+  shelfClean: 0.75,       // ...and how hard a pixel made of halo is excluded
+  grainCoarse: 0.66,      // clump scale on near geology (1 = same as far)
+
   grain: 0.048,
   grainChroma: 0.32,
   absorb: [0.070, 0.026, 0.016],
@@ -695,6 +937,9 @@ export class Post {
     this.veil = rt(2, 2);
     this.orient = rt(2, 2);
     this.streakA = rt(2, 2); this.streakB = rt(2, 2);
+    // Two targets ping-pong the three field passes; the pre-pass output is
+    // dead by the time the second blur needs somewhere to write.
+    this.fieldA = rt(2, 2); this.field = rt(2, 2);
 
     this.pBright = compile(gl, FS_VS, BRIGHT_FS, 'bright');
     this.pDown = compile(gl, FS_VS, DOWN_FS, 'down');
@@ -702,6 +947,9 @@ export class Post {
     this.pBlur = compile(gl, FS_VS, BLUR_FS, 'blur');
     this.pOrient = compile(gl, FS_VS, ORIENT_FS, 'orient');
     this.pStreak = compile(gl, FS_VS, STREAK_FS, 'streak');
+    this.pFieldPre = compile(gl, FS_VS, FIELD_PRE_FS, 'fieldPre');
+    this.pFieldBlur = compile(gl, FS_VS, FIELD_BLUR_FS, 'fieldBlur');
+    this.pFieldRes = compile(gl, FS_VS, FIELD_RESOLVE_FS, 'fieldResolve');
     this.pCopy = compile(gl, FS_VS, COPY_FS, 'copy');
     this.pComp = compile(gl, FS_VS, COMPOSITE_FS, 'composite');
     this.w = 0; this.h = 0;
@@ -720,7 +968,7 @@ export class Post {
     }
     const qw = Math.max(1, w >> 2), qh = Math.max(1, h >> 2);
     for (const t of [this.halA, this.halB, this.halC, this.veil,
-      this.orient, this.streakA, this.streakB]) t.resize(qw, qh);
+      this.orient, this.streakA, this.streakB, this.fieldA, this.field]) t.resize(qw, qh);
   }
 
   beginScene() { this.scene.bind(true); return this.scene; }
@@ -878,13 +1126,44 @@ export class Post {
       contrast: G.contrast + sk * 0.05 + deadK * 0.06 + diff * 0.03,
       // Deep water has less to bounce around in it, so the floor closes a
       // little with depth. Death closes it further - the frame is going out.
-      black: G.black * (1 + depthK * 0.30 + deadK * 0.45),
+      // This used to be the ONLY thing that moved with distance, and one
+      // global knob over four distances is what this round was about: at 25m
+      // it milked and at 1000m it crushed, and the same number did both. The
+      // depth term is smaller now because the per-pixel toe does the work.
+      black: G.black * (1 + depthK * 0.16 + deadK * 0.45),
       lift: G.lift,
       // The Hush already floods the frame and death is closing it; neither
       // moment wants the ramp opened as well.
       shelf: G.shelf * (1 - hush * 0.35) * (1 - deadK * 0.55),
       shelfCentre: G.shelfCentre,
       shelfWidth: G.shelfWidth,
+
+      fieldC: G.fieldC,
+      fieldStride: G.fieldStride,
+      rangeLo: G.rangeLo,
+      rangeHi: G.rangeHi,
+      occlSpan: G.occlSpan,
+      // The airlight cut buys back the blacks a modelled shadow costs, and the
+      // near frames are the ones that need it: measured across the four
+      // capture depths, the shadow fraction runs 3.5% at 25m and 45% at
+      // 1000m, so one setting is at the floor on one frame and at the ceiling
+      // on another. It eases off with depth for the same reason the ceiling
+      // exists - past a point, darkening stops being contrast and starts
+      // being deletion.
+      occlCut: G.occlCut * (1 - depthK * 0.35),
+      toeRange: G.toeRange,
+      occlToe: G.occlToe,
+      // The Hush flattens the image on purpose, so it also flattens the thing
+      // that models depth. Tracking a floor the Hush has already raised would
+      // fight it.
+      shelfTrack: G.shelfTrack * (1 - hush * 0.45),
+      shelfBias: G.shelfBias,
+      shelfLo: G.shelfLo,
+      shelfHi: G.shelfHi,
+      shelfGate: G.shelfGate,
+      shelfClean: G.shelfClean,
+      grainCoarse: G.grainCoarse,
+
       shadowTint: G.shadowTint,
       // Tethered, you are sitting in an anchor's light: highlights go warmer.
       highTint: mix3(G.highTint, [1.0, 0.905, 0.760], att * 0.35 + lg * 0.40),
@@ -955,6 +1234,15 @@ export class Post {
     this._pass(this.pStreak, this.streakB, this.streakA.tex,
       { uTexel: qt, uStride: g.streakStride[1], uGate: 0 }, false, { uOrient: this.orient.tex });
 
+    // --- the depth-ordering field. Reads the scene copy, not the brightpass:
+    //     the brightpass has already discarded everything below threshold,
+    //     which is the entire domain this field is about. ---
+    this._pass(this.pFieldPre, this.field, this.half.tex, { uTexel: qt, uC: g.fieldC });
+    this._pass(this.pFieldBlur, this.fieldA, this.field.tex,
+      { uTexel: qt, uDir: H, uStride: g.fieldStride });
+    this._pass(this.pFieldRes, this.field, this.fieldA.tex,
+      { uTexel: qt, uDir: V, uStride: g.fieldStride, uC: g.fieldC });
+
     // --- wide veil: progressive upsample, stopping at mip2 so the tight
     //     scales stay out of it. The halation owns those. ---
     for (let i = BLOOM_LEVELS - 1; i > 2; i--) {
@@ -983,6 +1271,7 @@ export class Post {
     bind(5, this.tex.dirt, 'uDirt');
     bind(6, this._spectrum(), 'uSpectrum');
     bind(7, this.half.tex, 'uHalf');
+    bind(8, this.field.tex, 'uField');
 
     const U = p.u, f = (n, v) => { if (U[n]) gl.uniform1f(U[n], v); };
     const v3 = (n, v) => { if (U[n]) gl.uniform3f(U[n], v[0], v[1], v[2]); };
@@ -999,6 +1288,13 @@ export class Post {
     f('uSat', g.saturation); f('uContrast', g.contrast);
     f('uLift', g.lift); f('uBlack', g.black);
     f('uShelf', g.shelf); f('uShelfCentre', g.shelfCentre); f('uShelfWidth', g.shelfWidth);
+    f('uFieldC', g.fieldC); f('uRangeLo', g.rangeLo); f('uRangeHi', g.rangeHi);
+    f('uOcclSpan', g.occlSpan); f('uOcclCut', g.occlCut); f('uToeRange', g.toeRange);
+    f('uOcclToe', g.occlToe);
+    f('uShelfTrack', g.shelfTrack); f('uShelfBias', g.shelfBias);
+    f('uShelfLo', g.shelfLo); f('uShelfHi', g.shelfHi);
+    f('uShelfGate', g.shelfGate); f('uShelfClean', g.shelfClean);
+    f('uGrainCoarse', g.grainCoarse);
     v3('uShadowTint', g.shadowTint); v3('uHighTint', g.highTint); v3('uLiftCol', g.liftCol);
     v3('uAbsorb', g.absorb); v3('uScatterCol', g.scatterCol);
     f('uScatter', g.scatter); f('uScatterBase', g.scatterBase); f('uScatterEdge', g.scatterEdge);
