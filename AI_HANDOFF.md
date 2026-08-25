@@ -513,29 +513,57 @@ Longer-standing items:
   at 1280x720 with `gl.finish()`.
   Someone should still confirm real pacing on a machine with a screen; nothing
   here can. **Do not re-gate it without evidence that the number discriminates.**
-- **The null policy scores as well as the bot that plays. UNRESOLVED, and it is
-  a pillar-one question.** `node tools/_feel.mjs --mode policy --seeds 7,3 --live`
-  runs five policies in the real world — hazards, plankton and the Hush all on.
-  `nofly` never presses the button and never even attaches, and it reaches
-  1377m / 1533m while surviving 59.5s / 65.8s. The `good` release heuristic
-  reaches 1379m / 1073m and dies at 22.6s / 21.9s. Doing nothing survives about
-  three times longer than playing, and travels as far.
-  Two caveats that a successor must weigh before acting:
-  1. `good` is a pendulum-timing heuristic with **no hazard avoidance at all**,
-     so its deaths may say nothing about a human. It also stalls 13-23% of
-     frames, and on seed 3 it was caught by a Hush moving at a third of its mean
-     speed — a swing that loses ground can be overtaken.
-  2. `sloppy` reached 2026m on seed 7, 1.47x the null run, so a better ceiling
-     demonstrably exists. The open question is not "does skill pay" but "does it
-     pay ENOUGH", and no bot here is good enough to answer it.
-  What is objective and needs no bot to interpret: the floor is high. The mote
-  drifts forward at ~270 u/s with no input, the Hush starts 2600-3200 units
-  behind and advances at `lerp(196, 470, difficulty)`, and difficulty is keyed to
-  `x / 31000` — so the front does not out-pace a drifter until about a minute in.
-  Whether that floor is correct for an endless runner is a design decision
-  nobody has made deliberately.
-  **Do not "fix" this by nerfing the drift without first establishing the
-  ceiling.** Find the best policy that actually exists before changing the floor.
+- **~~The null policy scores as well as the bot that plays.~~ RESOLVED, and the
+  alarming finding was an artefact of a weak bot.** The verb pays. It was never
+  measured against a player, only against four open-loop heuristics that fire on
+  a phase or a clock and cannot see a hazard, weigh an anchor they did not take,
+  or notice a swing that ended behind where it started.
+  `tools/_feel.mjs` now carries `ace`, a planner. Its action space is exactly a
+  human's — one boolean per step — and every signal it reads is on screen. Ten
+  seeds, 180s each, `--mode policy --live`:
+
+  | policy | dist | alive | **m/s** | vs null |
+  |---|---|---|---|---|
+  | `ace` (plans) | 87030m | 984s | **88.4** | 6.4x |
+  | `good` (release phase only) | 31719m | 547s | 58.0 | 2.3x |
+  | `nofly` (never presses) | 13587m | 574s | 23.7 | 1.0x |
+
+  Playing is worth **3.7x the null policy's rate**, and `ace` also outlives it
+  (98s mean against 57s), so drifting is not even the safe option. On five seeds
+  with the full field, `sloppy` (30.9 m/s), `mash` (15.5) and `cling` (10.7) all
+  score *below* doing nothing — the "sloppy reached 2026m, 1.47x the null run"
+  that motivated this investigation was a seed-7 accident; across five seeds
+  sloppy is 0.6x. `ace` ends 9 of 10 runs having never once lost ground on a
+  swing (net +360..410 units per swing); `sloppy` gives back 92-175m per run.
+
+  Three things made the original reading wrong, and each is a reusable trap:
+  1. **`good` has no hazard avoidance at all.** Ablating `ace`'s (`--ace hazW=0`)
+     leaves its *rate* untouched at 95.5 m/s but kills it in all three seeds
+     instead of one, halving total survival. Hazards cost survival, not speed —
+     so a bot without them reports a distance that is pure luck.
+  2. **A 60s window is the length that flatters drifting.** It ends within a few
+     seconds of where the front first catches a drifter. Use 180s.
+  3. **Total distance across seeds is a survival lottery, so quote m/s.** One
+     early hazard death on seed 3 moved a five-seed aggregate from 7.2x to 5.2x
+     while the other four seeds were unchanged within 1%.
+
+  **The chain multiplier is not part of the score.** `main.js` records
+  `p.maxX * METRES` and nothing multiplies it; `mult` reaches `frameCtx`, the HUD
+  and the particle burst size and stops there. `README.md` and this file both
+  said the chain multiplied the score. It does not, and `--ace pkW=0` confirms
+  it: deleting plankton routing entirely changes the rate by 0.7%. A pickup is
+  worth exactly the 16 u/s of forward assist in `Player._plankton`. Either wire
+  the multiplier into the score or stop describing it as one; right now half of
+  the HUD's real estate reports a number that cannot affect the outcome.
+
+  What is still open, but is now a design question rather than an alarm: the
+  floor is high in absolute terms. Zero input scores 23.7 m/s because the mote
+  falls into the vent, which holds `vx` near `ventFlowX`. Whether an endless
+  runner should pay 27% of a good player's rate for no input at all is a
+  deliberate choice nobody has made. **If it is ever changed, measure against
+  `ace`, not against `good`** — and note that the ceiling is flat in the
+  planner's horizon anywhere from 1.0s to 3.0s (84-94 m/s), so 3.7x is a
+  property of the game and not of that file's tuning.
 
 - **The salience rank measures peak population, and deliberately not extent.**
   After the metric was rebuilt (see the commit that replaced the 24x14 grid), the

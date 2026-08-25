@@ -4,16 +4,21 @@
  *
  *   node tools/_feel.mjs --mode run    --seeds 3,7,11,19 --secs 60
  *   node tools/_feel.mjs --mode skill  --seeds 7
- *   node tools/_feel.mjs --mode policy --seeds 7,3 [--live]
+ *   node tools/_feel.mjs --mode policy --seeds 7,3,11,19,42 --live --secs 180
+ *   node tools/_feel.mjs --mode policy --live --policies ace,nofly --ace "hazW=0"
  *   node tools/_feel.mjs --mode pump
  *   node tools/_feel.mjs --mode rescue
  *
  * run    : deterministic autopilot; distance/speed/attach/deaths/stalls.
  * skill  : release-angle sweep -> does release TIMING pay off, and how much?
- * policy : good vs sloppy vs mashing vs clinging over a long run.
+ * policy : ace (a planner) against four open-loop heuristics and the null run.
  *          --live keeps hazards, plankton and the Hush. WITHOUT it the world is
  *          sterile and the numbers answer a different question - see the note
  *          at the policy reporting block before quoting any of them.
+ *          --policies picks the field, --ace k=v,k=v ablates the planner.
+ *          USE 180s, NOT 60s. A 60s window ends within a few seconds of where
+ *          the Hush first catches a drifter, so it is exactly the length that
+ *          flatters doing nothing, and every earlier reading here used it.
  * pump   : does holding + reeling add energy, and can it be sustained?
  * rescue : dropped on the trench floor at zero speed - can it get back to play?
  */
@@ -29,6 +34,10 @@ const MODE = arg('mode', 'run');
 const SEEDS = String(arg('seeds', '3,7,11,19')).split(',').map(Number);
 const SECS = Number(arg('secs', 60));
 const LIVE = argv.includes('--live');   // policy mode: run the real world, not the sterile rig
+const KINDS = String(arg('policies', 'ace,good,sloppy,mash,cling,nofly')).split(',').map(s => s.trim()).filter(Boolean);
+// Ablate the planner without editing it: --ace "hazW=0,pkW=0,ahead=700"
+const ACE_OVER = Object.fromEntries(String(arg('ace', '')).split(',').filter(Boolean)
+  .map(kv => { const [k, v] = kv.split('='); return [k.trim(), Number(v)]; }));
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png' };
 const server = createServer(async (req, res) => {
@@ -83,6 +92,335 @@ const RIG_SRC = `({
     const maxLag = 2900 + (1750 - 2900) * d;
     if (p.x - w.hushX > maxLag) w.hushX = p.x - maxLag;
   },
+})`;
+
+/** ------------------------------------------------------------------ ace ----
+ * The strongest policy in this file, and the only one built to answer "what is
+ * the ceiling". The heuristics above are open loop: they fire on a phase or a
+ * clock, and none of them can see a hazard, weigh an anchor they did not take,
+ * or notice that a swing ended behind where it started.
+ *
+ * Its action space is exactly a human's - one boolean per step - and every
+ * signal it reads is on screen: the corridor walls, the hazards and plankton
+ * within a screen-width ahead, whatever anchor pickAnchor would actually hand
+ * it, and the Hush front's position plus the speed it is *observed* to be
+ * moving at. It mutates nothing and it never looks past its own horizon.
+ *
+ * Method: receding-horizon optimal stopping. Attached, it runs a twin of the
+ * tethered integrator from player.js forward along the arc it is already on and
+ * scores letting go at each moment by flying the resulting ballistic path to a
+ * FIXED absolute horizon. Because the horizon recedes while it hangs, waiting
+ * has to earn the time it costs - which is what "do not lose ground" is, as an
+ * equation instead of a rule of thumb. Free, it does the same over the next half
+ * second of fall, comparing "press now", "press in 0.1s..0.5s" and "never press"
+ * as three plans rather than by a distance gate. Choosing *when* to press is how
+ * a player chooses *which* anchor, because pickAnchor's answer moves with them.
+ *
+ * It replans at 20Hz free / 40Hz attached rather than every step, which is both
+ * six times cheaper and closer to what a hand can do.
+ *
+ * Honesty, itemised, because a ceiling measured by a cheat is not a ceiling.
+ * Of the player fields it reads, `rope` is the drawn line, `holdTime` and
+ * `sinceRelease` are its own button, `spin` is visible rotation, and `windUp` is
+ * already rendered as the anticipation tell (render.js and postfx both read it).
+ * The one genuinely hidden quantity is `swingRef`, a 1.1/s running mean of the
+ * mote's own speed; a player watching their own mote has the same signal at
+ * lower fidelity. It reads no object outside `ahead` units, never touches the
+ * world, and cannot see past `horizon` seconds.
+ */
+const ACE_SRC = `((P, KIND, M, w, over) => {
+  const { clamp, clamp01, lerp, smoothstep, damp } = M;
+
+  const O = Object.assign({
+    replanFree: 6,     // sim steps between plans while free      (20Hz)
+    replanAtt: 3,      // ...and while attached                   (40Hz)
+    horizon: 3.0,      // seconds to the absolute scoring horizon
+    safe: 0.0,         // ...and further seconds flown for hazards only, see below
+    flyDt: 1 / 30,
+    swingDt: 1 / 60,
+    swingT: 1.10,      // how far ahead an arc is imagined
+    scanAtt: 5,        // twin steps between release samples, attached
+    scanGrab: 11,      // ...and while judging a grab: it only has to rank anchors
+    grabN: 6, grabGap: 0.10,
+    ahead: 1250,       // a screen-width of world; nothing past it is legible
+    tail: 0.50,        // seconds of credit for the speed you exit with
+    pkW: 70,           // x-units one plankton is worth
+    hazW: 26000,       // a death ends the run, so nothing in the score competes
+    hushW: 40000,
+    margin: 60,        // a swing must beat drifting by this to be worth committing
+    maxHold: 3.2,
+    cushion: 900,      // ...and keep clear of the front even when it cannot reach
+  }, over || {});
+
+  const MARG = 34;     // the twin is a mental model, not the integrator: leave room
+
+  // ---- what is on screen right now, refreshed once per plan ----------------
+  const HZ = [], PK = [], PKmark = [];
+  let X0 = 0, hushX = 0, hushV = 0, roll = 0;
+
+  const gather = (p) => {
+    HZ.length = 0; PK.length = 0;
+    X0 = p.x;
+    const hs = w.hazards;
+    for (let i = 0; i < hs.length; i++) {
+      const h = hs[i];
+      if (h.x < p.x - 320) continue;
+      if (h.x > p.x + O.ahead) break;      // lists are sorted by x - invariant 5
+      if (h.alive) HZ.push(h);
+    }
+    const ks = w.plankton;
+    for (let i = 0; i < ks.length; i++) {
+      const k = ks[i];
+      if (k.x < p.x - 160) continue;
+      if (k.x > p.x + O.ahead) break;
+      if (!k.taken) PK.push(k);
+    }
+    while (PKmark.length < PK.length) PKmark.push(-1);
+  };
+
+  /** Player._killU's shapes, inflated by a cushion and by a jelly's bob. */
+  const hazAt = (x, y) => {
+    for (let i = 0; i < HZ.length; i++) {
+      const h = HZ[i];
+      const dx = x - h.x;
+      if (dx < -320) continue;
+      if (dx > 320) break;
+      let ax, ay, cy;
+      if (h.kind === KIND.JELLY) {
+        const amp = Math.min(h.amp || 0, 80);
+        ax = h.r * 0.74 + P.radius + MARG;
+        ay = h.r * 0.62 + P.radius + MARG + amp;
+        cy = (h.y0 === undefined ? h.y : h.y0) - h.r * 0.20;
+      } else {
+        ax = h.r * 0.62 + P.radius + MARG; ay = ax; cy = h.y;
+      }
+      const ex = dx / ax, ey = (y - cy) / ay;
+      if (ex * ex + ey * ey < 1) return true;
+    }
+    return false;
+  };
+
+  // ---- ballistic flight ----------------------------------------------------
+  const FS = { x: 0, y: 0, vx: 0, vy: 0 };
+  /**
+   * Mirrors the free branch of Player.update plus _walls, vent included. The
+   * vent is not optional: riding the floor IS the null policy, and a planner
+   * blind to it would never choose it even where it happens to be right.
+   */
+  const fly = (x, y, vx, vy, T, t0, score) => {
+    const dt = O.flyDt, n = Math.round(T / dt);
+    if (n < 3) return -1e17;
+    // Distance is banked at the value horizon; the flight then carries on for
+    // O.safe more seconds looking only for what kills. The idea was that value
+    // is a preference and a hazard is a fact, so they want separate horizons.
+    // NEGATIVE RESULT, and O.safe defaults to 0 because of it: sweeping the
+    // value horizon 1.0/1.4/1.8/2.2/2.6 against safe=1.6 on seeds 7,3,11,19 at
+    // 120s gave 94.4 / 88.8 / 93.5 / 83.7 / 89.8 m/s -- against 93.0 m/s for the
+    // single-horizon default. Total distance swung 18.7km to 31.4km across those
+    // five, but entirely through how long a run happened to survive, not through
+    // rate. Splitting the horizons buys nothing measurable.
+    // The flatness is the real finding: the ceiling does not care what the
+    // planner's horizon is anywhere between 1.0s and 3.0s, which is what makes
+    // the 4x rate advantage over the null policy a property of the game rather
+    // than of this file's tuning.
+    const ns = score ? n + Math.round(O.safe / dt) : n;
+    roll++;
+    let t = t0, pk = 0, hazT = -1, eatT = -1, top = 0, bot = 0;
+    let vX = 0, vVx = 0, vPk = 0, vT = 0;
+    for (let i = 0; i < ns; i++) {
+      if (i === n) { vX = x; vVx = vx; vPk = pk; vT = t; }
+      if (i % 3 === 0) { top = w.bandTop(x) + P.radius; bot = w.bandBot(x) - P.radius; }
+      vy += P.gravity * dt;
+      const s = Math.hypot(vx, vy);
+      if (s > 1e-3) {
+        const dec = (P.dragQuad * s * s + P.dragLin * s) * dt;
+        const k = Math.max(0, 1 - dec / s);
+        vx *= k; vy *= k;
+      }
+      x += vx * dt; y += vy * dt; t += dt;
+      const bandH = Math.max(300, bot - top);
+      const ventH = clamp(bandH * P.ventSpan, 120, 620);
+      const over = bot - y;
+      let draft = 0;
+      if (over < ventH) {
+        draft = Math.pow(clamp01(1 - over / ventH), P.ventFalloff);
+        const flowY = clamp(bandH * P.ventFlowK, 1100, 3000);
+        const pull = 1 - Math.exp(-P.ventRate * draft * dt);
+        vy += (-flowY - vy) * pull;
+        if (vx < P.ventFlowX) vx += (P.ventFlowX - vx) * pull * 0.55;
+      }
+      const rub = Math.exp(-P.wallFrictionRate * (1 - draft * 0.8) * dt);
+      if (y < top) { y = top; if (vy < 0) { vy = -vy * P.wallRestitution; vx *= rub; } }
+      else if (y > bot) { y = bot; if (vy > 0) { vy = -vy * P.wallRestitution; vx *= rub; } }
+      if (!score) continue;
+      if (hazT < 0 && hazAt(x, y)) hazT = t;
+      if (eatT < 0 && x < hushX + hushV * t + 40) eatT = t;
+      for (let j = 0; j < PK.length; j++) {
+        const q = PK[j];
+        if (q.x < x - 140) continue;
+        if (q.x > x + 140) break;
+        if (PKmark[j] === roll) continue;
+        const ddx = q.x - x, ddy = q.y - y;
+        const R = P.radius + P.planktonMagnet + q.r;
+        if (ddx * ddx + ddy * ddy < R * R) { PKmark[j] = roll; pk++; }
+      }
+    }
+    FS.x = x; FS.y = y; FS.vx = vx; FS.vy = vy;
+    if (!score) return 0;
+    if (ns <= n) { vX = x; vVx = vx; vPk = pk; vT = t; }   // no safety tail: bank the end
+    const span = O.horizon + O.safe;
+    let v = (vX - X0) + O.tail * vVx + O.pkW * vPk;
+    if (hazT >= 0) v -= O.hazW * (1.2 - 0.45 * clamp01((hazT - t0) / span));
+    if (eatT >= 0) v -= O.hushW * (1.2 - 0.45 * clamp01((eatT - t0) / span));
+    v -= O.cushion * clamp01(1 - (vX - (hushX + hushV * vT)) / 1400);
+    return v;
+  };
+
+  // ---- the swing, imagined -------------------------------------------------
+  const st = { x: 0, y: 0, vx: 0, vy: 0, rope: 0, holdTime: 0, windUp: 0, swingRef: 0, spin: 0 };
+  const PLAN = { v: 0, tau: 0 };
+
+  /** One step of the tethered integrator from player.js, minus fx and pickups. */
+  const twinStep = (s, a, dt) => {
+    s.holdTime += dt;
+    const rx = s.x - a.x, ry = s.y - a.y;
+    const rl = Math.hypot(rx, ry) || 1e-4;
+    const tang = Math.hypot(s.vx, s.vy);
+    s.swingRef = s.swingRef > 1 ? damp(s.swingRef, tang, 1.1, dt) : Math.max(tang, 1);
+    const rel = (tang - s.swingRef) / Math.max(120, s.swingRef * 0.75);
+    const pumpK = smoothstep(clamp01(0.5 + rel)) * (0.70 + 0.30 * clamp01(ry / rl));
+    const peak = lerp(P.reelBase, P.reelMax, clamp01(s.holdTime / P.reelRamp));
+    const floor = lerp(P.ropeMin, P.ropeMinFast, clamp01(tang / P.ropeFloorV));
+    let rate = peak * pumpK - P.payOut * (1 - pumpK);
+    if (s.rope < floor) rate = -Math.max(P.payOut * 0.6, (floor - s.rope) * 2.2);
+    else if (rate > 0 && s.rope - rate * dt < floor) rate = (s.rope - floor) / dt;
+    const prev = s.rope;
+    s.rope = clamp(s.rope - rate * dt, 60, P.ropeMax);
+    s.windUp = clamp01(s.windUp + (pumpK * P.windUpRate - P.windUpBleed) * dt);
+    s.vy += P.gravity * dt;
+    let sp = Math.hypot(s.vx, s.vy);
+    if (sp > 1e-3) {
+      const dec = (P.dragQuad * sp * sp + P.dragLin * sp + P.dragSpin * Math.abs(s.spin) * sp) * dt;
+      const k = Math.max(0, 1 - dec / sp);
+      s.vx *= k; s.vy *= k;
+    }
+    sp = Math.hypot(s.vx, s.vy);
+    const tx = -ry / rl, ty = rx / rl;
+    let dir = s.vx * tx + s.vy * ty;
+    if (Math.abs(dir) < 24) dir = tx;
+    const sgn = dir >= 0 ? 1 : -1;
+    let ka = P.swimAssist * clamp01(1 - sp / P.swimCeiling);
+    if (tx * sgn < 0) ka *= P.backAssist;
+    s.vx += tx * sgn * ka * dt; s.vy += ty * sgn * ka * dt;
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    const dx = s.x - a.x, dy = s.y - a.y, d = Math.hypot(dx, dy) || 1e-4;
+    const nx = dx / d, ny = dy / d, err = d - s.rope;
+    s.x -= nx * err; s.y -= ny * err;
+    const radial = s.vx * nx + s.vy * ny;
+    s.vx -= nx * radial; s.vy -= ny * radial;
+    if (prev !== s.rope && s.rope > 1) { const g = clamp(prev / s.rope, 0.94, 1.06); s.vx *= g; s.vy *= g; }
+    s.spin = (s.vx * -ny + s.vy * nx) / Math.max(s.rope, 1);
+  };
+
+  /** Player.release()'s impulse, then fly the result to the horizon. */
+  const releaseValue = (s, a, T, t0) => {
+    if (T < 0.4) return -1e17;
+    const dx = s.x - a.x, dy = s.y - a.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const tx = -dy / d, ty = dx / d;
+    const along = Math.sign(s.vx * tx + s.vy * ty) || 1;
+    const s0 = Math.hypot(s.vx, s.vy);
+    const ang = Math.atan2(-s.vy, s.vx);
+    const q = s0 < 1e-3 ? 0 : smoothstep(clamp01(1 - Math.abs(ang - P.launchAngle) / P.launchWindow));
+    const mag = P.releaseBoost
+      * (P.releaseFloor + (1 - P.releaseFloor) * q)
+      * (0.15 + 0.85 * s.windUp)
+      * clamp01(s.holdTime / P.loadTime)
+      * (0.72 + 0.28 * clamp01(s0 / 1600));
+    return fly(s.x, s.y, s.vx + tx * along * mag, s.vy + ty * along * mag, T, t0, true);
+  };
+
+  /** Best moment to let go of this arc, and what it is worth. */
+  const planSwing = (s, a, t0, budget, scan) => {
+    let bestV = -1e18, bestTau = 0;
+    const dt = O.swingDt, n = Math.round(budget / dt);
+    for (let i = 0; i <= n; i++) {
+      if (i % scan === 0) {
+        const tau = i * dt;
+        const v = releaseValue(s, a, O.horizon - t0 - tau, t0 + tau);
+        if (v > bestV) { bestV = v; bestTau = tau; }
+      }
+      if (i === n) break;
+      twinStep(s, a, dt);
+      if (hazAt(s.x, s.y)) break;                   // on rails into it; stop counting
+      const tt = w.bandTop(s.x) + P.radius, bb = w.bandBot(s.x) - P.radius;
+      if (s.y < tt - 8 || s.y > bb + 8) break;      // ...or the arc leaves the corridor
+    }
+    PLAN.v = bestV; PLAN.tau = bestTau;
+  };
+
+  /** Player._attach()'s lossy catch. A rope can only pull; radial speed is gone. */
+  const catchInto = (s, x, y, vx, vy, wu, a) => {
+    const dx = x - a.x, dy = y - a.y;
+    const d = Math.hypot(dx, dy) || 1e-4;
+    const nx = dx / d, ny = dy / d;
+    const radial = vx * nx + vy * ny;
+    const tx = -ny, ty = nx;
+    const tang = vx * tx + vy * ty;
+    const sgn = Math.abs(tang) < 24 ? (tx >= 0 ? 1 : -1) : (tang >= 0 ? 1 : -1);
+    const nt = tang + Math.abs(radial) * P.catchKeep * sgn;
+    s.x = x; s.y = y; s.vx = tx * nt; s.vy = ty * nt;
+    s.rope = Math.min(P.ropeMax, d);
+    s.holdTime = 0; s.windUp = wu; s.swingRef = Math.abs(nt); s.spin = 0;
+  };
+
+  // ---- the policy ----------------------------------------------------------
+  let tick = 0, held = false, lastHush = null;
+  const stats = { plans: 0, grabPlans: 0 };
+
+  return {
+    stats,
+    act(p, dt) {
+      hushX = w.hushX;
+      if (lastHush !== null) hushV = damp(hushV, (hushX - lastHush) / Math.max(1e-6, dt), 14, dt);
+      lastHush = hushX;
+
+      if (tick++ % (p.attached ? O.replanAtt : O.replanFree) !== 0) return held;
+      gather(p);
+      stats.plans++;
+
+      if (p.attached) {
+        if (p.holdTime > O.maxHold) { held = false; return held; }   // never hang forever
+        st.x = p.x; st.y = p.y; st.vx = p.vx; st.vy = p.vy;
+        st.rope = p.rope; st.holdTime = p.holdTime; st.windUp = p.windUp;
+        st.swingRef = p.swingRef; st.spin = p.spin;
+        planSwing(st, p.anchor, 0, O.swingT, O.scanAtt);
+        held = PLAN.tau > 1e-6;
+        return held;
+      }
+
+      // Free. Pressing before the retether delay does nothing at all.
+      if (p.sinceRelease <= P.retetherDelay) { held = false; return held; }
+      stats.grabPlans++;
+      let bestV = fly(p.x, p.y, p.vx, p.vy, O.horizon, 0, true) + O.margin;   // ...never press
+      let bestTau = -1;
+      let x = p.x, y = p.y, vx = p.vx, vy = p.vy, wu = p.windUp, tau = 0;
+      for (let c = 0; c < O.grabN; c++) {
+        const a = w.pickAnchor(x, y, vx, vy, P.reach);
+        if (a) {
+          catchInto(st, x, y, vx, vy, wu, a);
+          planSwing(st, a, tau, O.swingT, O.scanGrab);
+          if (PLAN.v > bestV) { bestV = PLAN.v; bestTau = tau; }
+        }
+        fly(x, y, vx, vy, O.grabGap, 0, false);
+        x = FS.x; y = FS.y; vx = FS.vx; vy = FS.vy;
+        wu = damp(wu, 0, 3.0, O.grabGap);
+        tau += O.grabGap;
+      }
+      held = bestTau === 0;
+      return held;
+    },
+  };
 })`;
 
 async function newPage(seed) {
@@ -234,25 +572,30 @@ async function runSkill(seed) {
  * Four players, same world, no hazards, no Hush. Distance is the only score.
  * A good release policy must beat a sloppy one by a margin a human can feel.
  */
-async function runPolicy(seed, secs) {
+async function runPolicy(seed, secs, kinds, aceOver) {
   const page = await newPage(seed);
-  const r = await page.evaluate(async (fxSrc, rigSrc, secs, LIVE) => {
+  const r = await page.evaluate(async (fxSrc, rigSrc, aceSrc, secs, LIVE, kinds, aceOver) => {
     const g = window.game, FIXED = 1 / 120;
-    const fx = eval(fxSrc), RIG = eval(rigSrc);
+    const fx = eval(fxSrc), RIG = eval(rigSrc), ACE = eval(aceSrc);
+    const M = await import('/src/engine/math.js');
+    const { P } = await import('/src/game/player.js');
+    const { KIND } = await import('/src/game/world.js');
 
     const play = (kind) => {
       g.startPlay();
       const w = g.world;
       if (!LIVE) RIG.clear(w);
       const p = g.player;
-      const reach = 620;
       const speeds = [];
-      let holdWhen = 0, releases = 0, stall = 0, grace = 1.4;
+      const ace = kind === 'ace' ? ACE(P, KIND, M, w, aceOver) : null;
+      let releases = 0, stall = 0, grace = 1.4;
+      let netGain = 0, netLoss = 0, swingX = 0, wasAtt = false;
       const i0 = { n: 0 };
       const steps = Math.round(secs / FIXED);
       for (let i = 0; i < steps; i++) {
         let want;
-        if (p.attached) {
+        if (ace) want = ace.act(p, FIXED);
+        else if (p.attached) {
           const a = p.anchor;
           const deg = RIG.phi(p, a) * 180 / Math.PI;
           if (kind === 'good') want = !(p.holdTime > 0.18 && RIG.rising(p, a) && deg > 8 && deg < 30);
@@ -268,7 +611,15 @@ async function runPolicy(seed, secs) {
         p.update(FIXED, w, { held: want }, fx, i * FIXED);
         if (LIVE) { RIG.live(w, p, FIXED, grace); grace = Math.max(0, grace - FIXED); }
         w.update(FIXED, i * FIXED, Math.max(p.x, LIVE ? w.hushX : 0));
-        if (was && !p.attached) releases++;
+        // Net ground per swing, not peak speed: an arc that ends behind where it
+        // started is worse than not swinging, and no other statistic here says so.
+        if (!wasAtt && p.attached) swingX = p.x;
+        if (wasAtt && !p.attached) {
+          releases++;
+          const d = p.x - swingX;
+          if (d >= 0) netGain += d; else netLoss -= d;
+        }
+        wasAtt = p.attached;
         speeds.push(p.speed);
         if (p.speed < 220) stall++;
         i0.n = i + 1;
@@ -277,17 +628,19 @@ async function runPolicy(seed, secs) {
       return {
         kind, dist: Math.round(p.maxX / 10), releases,
         alive: p.alive, cause: p.deathCause || '-',
-        // The chain multiplier is half the real score and the sterile lab
-        // cannot see it at all, because RIG.clear() deletes every plankton.
+        // Displayed, but NOT part of the score: main.js scores `p.maxX * METRES`
+        // and nothing multiplies it. See the note at the reporting block.
         mult: +(p.mult || 1).toFixed(1), chain: Math.round(p.chain || 0),
         secs: +((i0.n) / 120).toFixed(1),
         vMean: Math.round(speeds.reduce((s, x) => s + x, 0) / Math.max(1, speeds.length)),
         vP90: Math.round([...speeds].sort((a, b) => a - b)[Math.round(0.9 * (speeds.length - 1))] || 0),
         stallFrac: stall / Math.max(1, speeds.length),
+        swingNet: Math.round((netGain - netLoss) / Math.max(1, releases)),
+        swingBack: Math.round(netLoss / 10),
       };
     };
-    return ['good', 'sloppy', 'mash', 'cling', 'nofly'].map(play);
-  }, FX_SRC, RIG_SRC, secs, LIVE);
+    return kinds.map(play);
+  }, FX_SRC, RIG_SRC, ACE_SRC, secs, LIVE, kinds, aceOver);
   await page.close();
   return r;
 }
@@ -643,19 +996,43 @@ try {
     // lerp(196,470,difficulty) and nofly's mean speed is 266-310, so it is
     // outrun by the front as soon as difficulty passes about 0.27. The lab had
     // deleted the one system whose entire job is to punish drifting.
+    // A second correction, and it changes what "the ceiling" even means: the
+    // multiplier is NOT part of the score. main.js records `p.maxX * METRES` and
+    // nothing multiplies it; `mult` reaches frameCtx, the HUD and the particle
+    // burst size and stops there. README and this file both used to say the
+    // chain multiplied the score. It does not, so a policy cannot buy distance
+    // with plankton - a pickup is worth exactly the 16 u/s of forward assist in
+    // Player._plankton. The mult column below is kept as a *reported* number
+    // because it is what the player is shown, not because it scores.
     console.log(`policy comparison, ${SECS}s, ${LIVE ? 'LIVE world - hazards, plankton and the Hush all on' : 'no hazards, no Hush (pendulum only - see the note in the source)'}\n`);
+    const totals = new Map();
     for (const s of SEEDS) {
-      const rows = await runPolicy(s, SECS);
+      const rows = await runPolicy(s, SECS, KINDS, ACE_OVER);
       console.log(`seed ${s}`);
-      console.log(`  policy   dist(m)  rel  vMean  vP90  stall%${LIVE ? '  mult  lived' : ''}  end`);
-      const good = rows.find(r => r.kind === 'good');
+      console.log(`  policy   dist(m)  rel  vMean  vP90  stall%  net/swing  lost(m)${LIVE ? '  mult  lived' : ''}  end`);
       for (const r of rows) {
-        console.log(`  ${r.kind.padEnd(8)} ${pad(r.dist, 7)} ${pad(r.releases, 4)} ${pad(r.vMean, 6)} ${pad(r.vP90, 5)} ${pad(f1(r.stallFrac * 100), 6)}` +
+        console.log(`  ${r.kind.padEnd(8)} ${pad(r.dist, 7)} ${pad(r.releases, 4)} ${pad(r.vMean, 6)} ${pad(r.vP90, 5)} ${pad(f1(r.stallFrac * 100), 6)} ${pad(r.swingNet, 10)} ${pad(r.swingBack, 8)}` +
           (LIVE ? ` ${pad('x' + r.mult, 5)} ${pad(r.secs + 's', 6)}` : '') +
           `  ${r.alive ? 'alive' : 'died:' + r.cause}`);
+        const a = totals.get(r.kind) || { d: 0, t: 0, n: 0, died: 0 };
+        a.d += r.dist; a.t += Number(r.secs); a.n++; if (!r.alive) a.died++;
+        totals.set(r.kind, a);
       }
-      const sl = rows.find(r => r.kind === 'sloppy');
-      console.log(`  good/sloppy = ${f1(good.dist / Math.max(1, sl.dist))}x   good/mash = ${f1(good.dist / Math.max(1, rows.find(r => r.kind === 'mash').dist))}x   good/cling = ${f1(good.dist / Math.max(1, rows.find(r => r.kind === 'cling').dist))}x\n`);
+      const ref = rows.find(r => r.kind === 'nofly') || rows[rows.length - 1];
+      for (const r of rows) {
+        if (r === ref) continue;
+        process.stdout.write(`  ${r.kind}/${ref.kind} = ${f1(r.dist / Math.max(1, ref.dist))}x  `);
+      }
+      console.log('\n');
+    }
+    if (SEEDS.length > 1) {
+      console.log('ACROSS ALL SEEDS');
+      console.log('  policy   dist(m)  lived(s)  m/s   died  vs nofly');
+      const floor = totals.get('nofly');
+      for (const [k, a] of totals) {
+        console.log(`  ${k.padEnd(8)} ${pad(a.d, 7)} ${pad(f1(a.t), 9)} ${pad(f1(a.d / Math.max(1, a.t)), 5)} ${pad(a.died + '/' + a.n, 6)} ` +
+          (floor ? ` ${f1(a.d / Math.max(1, floor.d))}x` : ''));
+      }
     }
   } else if (MODE === 'hold') {
     for (const s of SEEDS) {
