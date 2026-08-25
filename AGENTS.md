@@ -188,6 +188,55 @@ before you declare done.**
 - State that `newRun()` does not reset leaks between runs. Input is one such
   thing: a probe that leaves the synthetic button held desyncs the next run.
 
+### Three shapes that cannot be tuned into behaving
+
+Full derivations are in AI_HANDOFF §6. These are properties of the primitives,
+not tuning mistakes, and each has bitten more than once.
+
+- **A ribbon cannot draw a soft edge at any falloff.** Its cross-section is
+  `exp(-x^2 * falloff)`, so even at falloff 1.0 the value at the ribbon's own
+  edge is 0.37 of peak, and its ends are butt caps. A short low-falloff stroke is
+  a filled quadrilateral with hard steps, not a body. Use a sprite for anything
+  that must fade to nothing. This produced the mote's rim reading as a selection
+  bracket, a spire's "machined rectangle", and the trapezoids under every anemone.
+- **A stretched quad is a straight line**, because its medial axis *is* a segment
+  and the profile across the width is compressed by the aspect. No sprite choice
+  saves a high-aspect quad. If a thing must not read as ruled, build it from
+  several offset pieces so no straight line passes through more than one.
+- **A branch on a world coordinate has a locus, and that locus is a line.** Any
+  `if` testing a world position, and any level set of a world-space field, draws
+  its own boundary wherever the value it separates is discontinuous across it —
+  and a straight boundary reads as a ruled seam. **Gate on the field, not on a
+  coordinate**: put the bound where everything inside is already zero, or window
+  the longest-tailed term to zero at it. If you own a level set, check what its
+  slope does across the whole range of its parameters, not at the value you
+  happened to test. Found four separate times here, each first blamed on
+  something else. It is the first thing to check when a reviewer reports a
+  straight line nobody drew.
+
+### There is no depth buffer
+
+The scene paints over whatever the background shader already drew. Burying
+geometry below `world.bandBot` conceals **nothing** — several call sites relied on
+that false premise, and a buried butt cap was exactly as visible as an exposed
+one. Fade across the band instead.
+
+### Distrust the measurement before the art
+
+The single most expensive habit here is believing a number. Defects blamed on the
+art have turned out to be defects in the instrument **six times**, and each cost
+at least one round: a focal metric sampling the mote's vertical mirror; percentile
+stats that grid-sampled and under-reported peaks 5x; an ablation statistic
+reporting grain rather than the ablated term; a filename regex collapsing five
+frames to one; a salience gate measuring lattice phase and area rather than
+highlights; and an audio rig rendering digital silence for 44 seconds while
+counting 273 sound events.
+
+So: before you change the art to satisfy a number, establish that the number
+measures what its name says. If a measurement contradicts your brief, **believe
+the measurement and say so** — that has been the right call every time it has
+happened here.
+
 ## The quality bar
 A harsh critic will compare your output **blind, side by side** against the
 previous build and say which is better. It does not know or care which is yours.
