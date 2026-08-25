@@ -191,10 +191,32 @@ fails) and clipping fraction; render and step budgets; that every object list in
 `world.js` is globally sorted by `x`; and that the deterministic autopilot can
 still play (a level it cannot traverse is broken).
 
-**Failures block; warnings do not.** Boot time and the HDR `p90` guideline are
-warnings on purpose — boot time is noisy under machine contention, and `p90` is
-a composition guideline rather than a defect. Everything else fails the run.
-`check.mjs` exits non-zero only on failures.
+**Failures block; warnings do not**, and `check.mjs` exits non-zero only on
+failures. The full warning set — this list used to say "boot time and the HDR
+p90, everything else fails the run", which was wrong, and a zero-context reviewer
+caught it by getting a warning that no document explained:
+
+| warning | why it is only a warning |
+|---|---|
+| boot time over budget | noisy under machine contention |
+| HDR `p90` over its scene limit | a composition guideline, not a defect |
+| near-black fraction over `blackMax` | composition |
+| shadow fraction outside `[0.08, 0.36]` | composition; both ends are art calls |
+| hero not in the top 3 highlight peaks | craft, and the blind critic is the real arbiter |
+| weak focal point (mote core under 4:1) | craft |
+| `hdrStats` itself failing | reported, because the frame statistics still stand |
+
+Everything else fails. **In particular the probes now fail rather than warn when
+they throw**, which they did not before: the ordering probe guards invariant 5
+and the determinism probe guards invariant 1, and a throw in either used to print
+a warning and let the run report "All checks passed." and exit 0 with the
+invariant unverified. The frozen-render check lives inside the determinism
+probe's own `try`, so one throw silently disabled both. Verified by sabotage —
+break the probe from the inside and the run must exit 1 naming it.
+
+Note the gate captures **five** of the eight named scenes: `title, tethered,
+launch, fast, hushNear`. `hazardNear`, `deep` and `dead` are never gated, so no
+defect that only appears in those is visible to it.
 
 ## 5. Capture and review workflow
 

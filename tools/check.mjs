@@ -462,7 +462,12 @@ for (const seed of SEEDS) {
       for (const [k, v] of Object.entries(inv)) {
         fails.push(`seed ${seed}: world.${k} is not sorted by x — ${v.n} inversion(s), worst ${v.worst} units back. Hot loops break on x and will silently skip objects.`);
       }
-    } catch (e) { warns.push(`seed ${seed}: ordering probe failed — ${e.message}`); }
+    // FAILS, not warns. This probe guards invariant 5 (world lists globally
+    // sorted by x), which has already shipped broken once and made 18 plankton
+    // silently uncollectable. If it throws -- `world` renamed, `populate()`
+    // raising -- a warning would let the run print "All checks passed." and exit
+    // 0 with the invariant unverified. A probe that cannot run has not passed.
+    } catch (e) { fails.push(`seed ${seed}: ordering probe failed — ${e.message}`); }
 
     // ---- determinism: state AND pixels ----
     try {
@@ -519,7 +524,15 @@ for (const seed of SEEDS) {
       S.determinism = det.a.state === det.b.state && det.a.pixels === det.b.pixels;
       if (det.a.state !== det.b.state) fails.push(`seed ${seed}: simulation NOT deterministic — replay diverged (${det.a.state} vs ${det.b.state})`);
       else if (det.a.pixels !== det.b.pixels) fails.push(`seed ${seed}: RENDER not deterministic — identical state produced different pixels (${det.a.pixels} vs ${det.b.pixels}); frames cannot be compared between builds`);
-    } catch (e) { warns.push(`seed ${seed}: determinism probe failed — ${e.message}`); }
+    // FAILS, not warns, and this is the most important one in the file. This
+    // block guards invariant 1, and the frozen-render check lives inside the
+    // same try -- so a single throw silently disabled BOTH, including the check
+    // credited with catching a shader that varied per draw call. Determinism is
+    // the only reason screenshots from two builds can be compared at all, so
+    // losing it silently takes out the blind review, which is the instrument
+    // this project trusts for craft. Exiting 0 with it unverified is the same
+    // defect class as the audio rig that rendered digital silence for months.
+    } catch (e) { fails.push(`seed ${seed}: determinism probe failed — ${e.message}`); }
   }
 
   S.errors = errs;

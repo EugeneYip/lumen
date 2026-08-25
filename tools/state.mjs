@@ -103,6 +103,27 @@ if (process.argv.includes('--json')) {
 const H = (s) => `\n\x1b[1m${s}\x1b[0m`;
 console.log(H('HEAD'));
 console.log(`  ${branch} @ ${headShort}`);
+// IS YOUR GROUND MOVING? Every other branch below is annotated (+ahead/-behind
+// vs main); HEAD was the one row that was not, and a zero-context reviewer
+// consequently spent an entire session testing a five-commit-stale worktree and
+// nearly reported an inverted fact as current -- one of those commits had
+// changed how the score is computed. This whole file exists because dynamic
+// state written into prose goes stale; omitting the one derived fact that tells
+// you your own checkout is stale was the same mistake one level up.
+{
+  const behind = Number(git('rev-list', '--count', `HEAD..${mainRef}`) || 0);
+  const ahead = Number(git('rev-list', '--count', `${mainRef}..HEAD`) || 0);
+  if (behind || ahead) {
+    console.log(`  ${behind ? `!! ${behind} commit(s) BEHIND ${mainRef}` : ''}` +
+      `${behind && ahead ? ', ' : ''}${ahead ? `${ahead} commit(s) ahead of ${mainRef}` : ''}`);
+    if (behind) {
+      console.log(`     Facts you verify from source here may already be false on ${mainRef}.`);
+      console.log(`     git log --oneline HEAD..${mainRef}     # what you are missing`);
+    }
+  } else {
+    console.log(`  up to date with ${mainRef}`);
+  }
+}
 if (inProgress.length) {
   console.log(`\n  !! A ${inProgress.join(' + ')} is IN PROGRESS.`);
   console.log('     Finish or abort it before starting new work.');

@@ -13,7 +13,7 @@ const MIME = {
   '.glsl': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8',
 };
 
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   try {
     let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (p.endsWith('/')) p += 'index.html';
@@ -31,4 +31,26 @@ createServer(async (req, res) => {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('404');
   }
-}).listen(PORT, () => console.log(`lumen: http://localhost:${PORT}/`));
+});
+
+// This is the README's very first command, and an occupied port used to greet a
+// newcomer with a raw unhandled EADDRINUSE stack trace. shoot.mjs already boots
+// on an ephemeral port precisely so several agents can run at once, so the
+// contention was known and simply not handled here.
+//
+// It does NOT silently move: a port you did not ask for is its own trap, and
+// something is already serving on the one you did. It says what is wrong and
+// what to do, and only auto-picks when explicitly told to with PORT=0.
+server.on('error', (e) => {
+  if (e.code !== 'EADDRINUSE') throw e;
+  console.error(`lumen: port ${PORT} is already in use.`);
+  console.error('  Something is already serving there -- possibly this game, from another session.');
+  console.error(`  Open http://localhost:${PORT}/ and see, or start a second copy on another port:`);
+  console.error('    node tools/serve.js 5174        # a port you choose');
+  console.error('    PORT=0 node tools/serve.js      # any free port');
+  process.exit(1);
+});
+server.listen(PORT, () => {
+  const p = server.address().port;
+  console.log(`lumen: http://localhost:${p}/`);
+});
