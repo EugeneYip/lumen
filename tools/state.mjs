@@ -12,7 +12,9 @@
  * Read-only by construction: it never checks out, prunes, resets or deletes.
  */
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 
 const ROOT = resolve(new URL('..', import.meta.url).pathname);
 const git = (...args) => {
@@ -151,6 +153,31 @@ if (worktrees.length > 1) {
 
 console.log(H('Remotes'));
 for (const r of report.remotes) console.log(`  ${r}`);
+
+// THE SHIPPED PAYLOAD, MEASURED. The README used to carry this as a number and
+// it went stale by 78% -- it claimed 443KB/139KB while the game had grown to
+// 769KB/258KB. There is no build step, so the payload is simply every module
+// under src/ plus index.html, and measuring it is three lines. Anything that can
+// be derived should be derived; prose about repository state is prose that lies.
+console.log(H('Payload'));
+{
+  const files = [];
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.(js|html|css)$/.test(e.name)) files.push(p);
+    }
+  };
+  try { walk(join(ROOT, 'src')); } catch { /* no src */ }
+  try { files.push(join(ROOT, 'index.html')); } catch { /* none */ }
+  let raw = 0;
+  const bufs = [];
+  for (const f of files) { try { const b = readFileSync(f); raw += b.length; bufs.push(b); } catch { /* skip */ } }
+  const gz = gzipSync(Buffer.concat(bufs), { level: 9 }).length;
+  const kb = (n) => (n / 1024).toFixed(0) + 'KB';
+  console.log(`  ${files.length} files   ${kb(raw)} raw   ${kb(gz)} gzipped   (no build step: this IS the payload)`);
+}
 
 console.log(H('Next'));
 console.log('  Read README.md, then AI_HANDOFF.md, then AGENTS.md.');

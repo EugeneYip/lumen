@@ -7,8 +7,11 @@ left, so stopping is death. Score is distance in metres; collecting plankton
 builds a chain multiplier.
 
 No build step. No runtime dependencies. No asset files: every texture, sound and
-piece of geometry is generated procedurally at boot, which is why the whole game
-is ~443KB of JavaScript (139KB gzipped) and loads instantly.
+piece of geometry is generated procedurally at boot, which is why it loads
+instantly. Because there is no build step, the payload is simply the modules
+under `src/` plus `index.html` — `node tools/state.mjs` prints its measured size
+under **Payload**. It is derived rather than written down here for a reason:
+this paragraph once claimed a size that had gone stale by 78%.
 
 ## Run it
 
