@@ -429,19 +429,23 @@ Longer-standing items:
   (12ac90a) — the two are now mutually exclusive on `launchGlow`, `> 0.55`
   against `< 0.15` decaying at 5.5/s, so at least 0.24s of sim must pass
   between them; measured 24-113m apart on 20 seeds, so that pair cannot
-  collide again. **`deep` still collides**, and is the worse case because it
-  tests `maxX` — a run maximum that only resets in `newRun()` — so it is a
-  latch, not a moment. Whether it duplicates depends on where the *previous*
-  seeks left the run, which is exactly why it hides. Seek the canonical
-  `shoot.mjs` list (`node tools/_collide.mjs 2,3,4,5,6,7,8,9,10,11,42
-  title,tethered,launch,fast,hazardNear,hushNear,deep`) and `deep` lands one
-  step after `hushNear` at identical depth on 7 of 11 seeds (3, 4, 5, 8, 9, 10,
-  11), distinct only where the run was still shy of 600m (2, 6, 7, 42). Seek
-  `hushNear,deep` alone and seeds 3 and 5 stop colliding, because `hazardNear`
-  is no longer ahead of them to carry the run past the threshold first. Fix is
-  either a restart before each seek — the HDR block in `check.mjs` already does
-  this and says why — or a predicate describing a moment rather than a
-  threshold already crossed. Both live in lead-owned files.
+  collide again. **`deep` is also fixed now**, by the second route this entry
+  proposed: its predicate became
+  `maxX * METRES > Math.max(600, _seekEntryDepth + 150)`, so it describes a
+  moment relative to where the seek started rather than a threshold the run may
+  already have crossed. It used to land one step after `hushNear` at identical
+  depth on 7 of 11 seeds. Re-run the canonical reproduction —
+  `node tools/_collide.mjs 2,3,4,5,6,7,8,9,10,11,42
+  title,tethered,launch,fast,hazardNear,hushNear,deep` — and all 11 seeds now
+  give distinct hashes, times and depths, typically 100-150m apart.
+  The general hazard has not gone away and is worth remembering when adding a
+  scene: **a predicate that tests a run maximum is a latch, not a moment.**
+  `maxX` only resets in `newRun()`, so whether such a scene duplicates depends on
+  where the *previous* seeks left the run, which is exactly why it hides. Note
+  also that on some seeds `deep` now resolves at a *lower* depth than `hushNear`
+  (600m against 1475m on seed 4) because the run died and restarted between
+  seeks. That is benign — the frames are distinct, which is the whole
+  requirement — but it will look wrong in a table if you are not expecting it.
 - ~~Two `tethered` frames cannot reach black.~~ **Resolved, and instructive.**
   Two owners investigated this in good faith and both concluded, correctly, that
   it was not theirs: postfx measured that a 0.020 black point (10x what shipped)
