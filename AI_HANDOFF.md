@@ -639,6 +639,23 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **The pendant/spire cell widths do NOT draw a comb — measured, not assumed.**
+  After the far-wall fracture work, the obvious next suspect was a module-width
+  tooth in the silhouette, since `ragged()`, the benches and the pendant/spire
+  cell code (`if (ph > 0.42) top += ...`) run at cell widths of 300 and 262 world
+  units, and a repeating cell is one of the forms the branch-locus trap takes.
+  `tools/_comb.mjs` exists to answer exactly this and it says no. Across eight
+  frames, two seeds and four depths the strongest lag is 13.3, 12.6, 294.5, 25.8,
+  29.4, 12.5, 26.8 and 25.3px — **it moves, and a period that moves is not a
+  period.** Measured directly at the lags those cell widths predict (~250px and
+  ~218px), contrast is 0.28-2.20x, i.e. nothing.
+  One loose end worth keeping: **~294px is elevated on three of four frames**
+  (4.41x, 1.11x, 3.58x, 2.72x). It matches neither cell width, is the strongest
+  line in only one frame of eight, and measures identically in a build from
+  before the far-wall work — so it is not new and it is not what the hypothesis
+  said it was. If someone chases it, start by finding what has a ~294px period,
+  rather than assuming it is the cells.
+
 - **The far walls' remaining notch energy is silhouette, not fracture.** After
   both far-wall fracture channels were fixed, roughly **47%** of the far walls'
   `_hair.mjs` notch energy is neither of them — it is `ragged()`, the benches,
