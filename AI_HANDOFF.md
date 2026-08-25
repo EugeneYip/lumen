@@ -744,8 +744,18 @@ Longer-standing items:
 are not on `main`. This section records only *intent*, which a command cannot
 tell you. Delete an entry once its branch has been fully harvested.
 
-**All of the branches present at the time of writing have been harvested for
-whatever was worth taking, and none should be merged wholesale.** They were each
+**DO NOT HARVEST any branch whose subject is that the chain multiplier is not
+part of the score** (at the time of writing, `claude/epic-hermann-abdb4d`,
+"docs: the chain multiplier is a streak stat, not a score multiplier"). It edits
+`AGENTS.md` and `README.md` to say the multiplier is display-only. **That was
+true when the branch was cut and is now false**: `Game._bank()` credits ground at
+the live multiplier, and routing through plankton is worth +68.9% of score rate.
+Applying it would silently revert correct documentation to an inverted claim, and
+it will look perfectly reasonable in a diff. This is the failure mode the harvest
+rule exists for: a branch is a snapshot of a belief, not a patch.
+
+**All of the other branches present at the time of writing have been harvested
+for whatever was worth taking, and none should be merged wholesale.** They were each
 cut from an older `main`, so a full merge would revert large amounts of later
 work — one of them would have undone the entire post-processing streak pass and
 743 lines of particle work. This is the concrete reason for the rule in §9.
