@@ -490,6 +490,22 @@ Longer-standing items:
   at 1280x720 with `gl.finish()`.
   Someone should still confirm real pacing on a machine with a screen; nothing
   here can. **Do not re-gate it without evidence that the number discriminates.**
+- **The salience rank measures peak population, and deliberately not extent.**
+  After the metric was rebuilt (see the commit that replaced the 24x14 grid), the
+  hero ranks 1st or 2nd of 16-79 highlight peaks in every gate frame, because it
+  is the brightest pixel in all of them. That is a true statement and a much
+  better one than the area integral it replaced — but it is not the whole of
+  what "can a player find their character" means. Looking at a 900m seed 7 frame
+  at 1:1 myself, the mote is a handful of pixels at 0.96 while an anchor bulb is
+  a large glowing mass at 0.919 with tentacles and a wide halo, and the eye goes
+  to the anchor first. Peak brightness says hero; apparent size says anchor.
+  The old metric over-weighted extent, the new one ignores it, and the truth is
+  in between. This was left as it is on purpose rather than papered over with a
+  third statistic: **the blind critic is the arbiter of whether the hero reads**,
+  and encoding a taste judgement into a gate is how the last four rounds were
+  lost. If a reviewer says the hero is hard to find in a frame where the rank is
+  1, believe the reviewer, and look at extent.
+
 - **`tools/_*` are scratch instruments**, deliberately kept because they are how
   most real bugs here were found. Not tests, no pass/fail contract, may rot:
   `_hair.mjs` (ruled-hairline notch energy over a region — the instrument the
