@@ -42,9 +42,10 @@
 // the way a canyon actually recedes.
 //
 // Debug kill switches, matching render.js's noSprites/noRibbons: append
-// bgNoSnow / bgNoRays / bgNoVents / bgNoHush, or bgNoFar / bgNoSilt /
-// bgNoGrain / bgNoBreak, to drop one feature group and attribute an artefact -
-// or a value floor - to it. Eight uniform multiplies. They are how the
+// bgNoSnow / bgNoRays / bgNoVents / bgNoHush, bgNoFar / bgNoSilt / bgNoGrain /
+// bgNoBreak, bgNoLamp / bgNoLedge / bgNoDip / bgNoTalus, or bgNoMoteKey, to
+// drop one feature group and attribute an artefact - or a value floor, or a
+// missing one - to it. Thirteen uniform multiplies. They are how the
 // axis-aligned-rectangle bug was pinned on the marine snow after two sessions
 // of blaming other people's passes, how the missing blacks were pinned on this
 // file rather than on the grade, and how the lavender streak field was pinned
@@ -76,6 +77,7 @@ uniform float uDiff;
 uniform vec4  uKill;         // debug: x snow, y rays, z vents, w hush (1 = on)
 uniform vec4  uKill2;        // debug: x far walls, y silt, z grain, w silhouette
 uniform vec4  uKill3;        // debug: x lamp on rock, y ledges, z dip/faults, w talus
+uniform vec4  uKill4;        // debug: x the mote's key light on rock (1 = on)
 uniform vec4  uLights[${MAXL}];   // xy world pos, z strength, w warmth
 
 // Chromaticities: peak channel is 1.0, brightness comes from the V_ constants.
@@ -102,6 +104,29 @@ const float V_LIT   = 0.104;   // water directly under an open fissure
 const float V_FLOOR = 0.0007;  // the medium's own faint bioluminescence
 const float V_ROCK  = 0.028;   // rock albedo: near-black mass, by design
 const float V_RIM   = 0.850;   // grazing light on a near rock edge
+// THE HERO'S OWN KEY LIGHT ON ROCK, and the largest single number in this
+// file's rock budget on purpose - five times the sky-lit albedo above.
+//
+// 'The mote lights nothing' has been the top-ranked complaint in three
+// consecutive reviews, and the last two attempts to answer it both failed for
+// the same measurable reason: they were LEVEL changes to a term whose RADIUS
+// was wrong. Probed on the four capture depths a reviewer was actually looking
+// at, the nearest rock to a swimming mote measures 270, 447, 450 and 451 world
+// units - the mote is in open water, which is where the game is played - while
+// the in-scatter pool that was carrying its light has a half-value radius of 51
+// and its wide lobe 195. It never arrived. Worse, when the probe isolated the
+// lift by hue it found the only lifts above +15 code values anywhere in those
+// frames were NEGATIVE in cyan - they were the amber anchors, which get a ten
+// times wider core from the same expression. The reviewer read four frames and
+// said no rock goes cyan; the instrument agrees, and says why.
+//
+// So this is a separate light with its own reach - see moteKey, half value at
+// 464 units - and it modulates ALBEDO: it is multiplied by alb, which carries
+// the strata, the joints, the cross-lamination and the grain, so what the eye
+// gets is the rock's own material coming up out of the dark. Additive glow at
+// the same level reads as fog in FRONT of the wall, which is the note the
+// anchors already pass and this used to fail.
+const float V_MOTEKEY = 0.150;
 // Distant rims need their own, far smaller budget. Four layers x two edges is
 // eight full-width bands: even narrow, that touches most of the frame, and at
 // near-rock strength it single-handedly put p90 at twice its ceiling. Aerial
@@ -175,6 +200,11 @@ const vec3 ROCK_COOL = vec3(0.46, 0.72, 1.00);
 const vec3 ROCK_WARM = vec3(1.00, 0.62, 0.30);
 const vec3 BIO_MINT  = vec3(0.40, 1.00, 0.70);
 const vec3 BIO_ICE   = vec3(0.34, 0.82, 1.00);
+// The colour the mote's own light lands in. Blue-dominant, off PAL.moteOuter,
+// so it cannot be confused with the mint of the plankton or the amber of an
+// anchor: 'a rock face goes cyan when the mote swings past it' is the read the
+// premise is judged on, and it only reads if the hue is unambiguous.
+const vec3 MOTE_LIGHT = vec3(0.22, 0.78, 1.00);
 const float SUN_SLANT = 0.215;   // world x the light drifts per unit of descent
 const float BEDY = 135.135;      // nominal world units per sedimentary bed
 
@@ -687,6 +717,38 @@ vec3 lampLight(vec2 w, float nrm){
   return s * uKill3.x;
 }
 
+// The mote's KEY light: the one term in this file whose job is the premise.
+//
+// Separate from the pool above, because the two are answering different
+// questions and one falloff cannot do both. The pool is what a light looks like
+// in the water immediately around it - a tight core with shape in it, and the
+// reason it is tight is that a wide one is a wash. This is what a light does to
+// a surface across a room, and the room here is 270-450 world units wide,
+// measured against the real bandTop/bandBot at the four depths the review
+// sampled. Half value at 464 units, which is chosen to sit in the middle of
+// that measured range rather than picked for how it reads in one frame.
+//
+// The profile is inverse-fourth, not inverse-square: spreading plus absorption,
+// the same argument the pool's wide lobe is built on. That is what makes a
+// several-hundred-unit reach affordable - at 1000 units it is down to 12% and
+// at 1600 to 3%, so it cannot become an ambient lift on rock across the frame,
+// which is the failure mode that would cost the exposure contract its p90 and
+// cost the hero its rank. Measured on the tail rather than assumed.
+const float MOTE_R = 520000.0;
+float moteKey(vec2 w, float nrm){
+  vec4 Lg = uLights[0];
+  if(Lg.z <= 0.0) return 0.0;
+  vec2 dl = Lg.xy - w;
+  float r2 = dot(dl, dl);
+  float f = MOTE_R / (r2 + MOTE_R);
+  // A WRAPPED cosine, not a clamped one. A face turned away from a point source
+  // in scattering water is not black, but it has to be plainly darker than the
+  // face turned toward it or the light has no direction and the whole thing
+  // reads as fog again - which is the exact note this term exists to answer.
+  float nd = mix(1.0, 0.24 + 0.76 * sat(dl.y * nrm * inversesqrt(max(r2, 1.0))), abs(nrm));
+  return f * f * nd * Lg.z * uKill3.x * uKill4.x;
+}
+
 // ---------------------------------------------------------------- lighting --
 // How open the trench roof is above x. Two incommensurate scales so the pattern
 // does not repeat inside a run; returned raw because callers want several
@@ -867,6 +929,7 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   // value as the face under it is not a tread, it is a stripe.
   irr *= 1.0 + 1.40 * tr;
   vec3 lamp = lampLight(w, roof ? 1.0 : -1.0);
+  float key = moteKey(w, roof ? 1.0 : -1.0);
   vec3 c = body * V_ROCK * alb * exp(-into / 205.0) * irr;
   // A ROOF SEEN FROM UNDER IT IS A SURFACE, NOT A SOLID. 'into' is distance
   // behind the drawn silhouette, and at the top of frame that is a thousand
@@ -890,6 +953,33 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   // A parting plane is a gap, so it carries a lamp further in than the body.
   c += body * V_ROCK * 1.10 * seam * lamp * exp(-into / 180.0);
 
+  // ---- the mote, landing on the wall --------------------------------------
+  // The hue is pushed 62% of the way to white before the light is applied, and
+  // that is a deliberate departure from strict albedo*irradiance. Warm rock
+  // under cyan light is physically a dull olive; what the premise needs is for
+  // the surface to plainly go the colour of the creature. Holding alb - which
+  // is where the strata, the joints, the cross-lamination and the grain all
+  // live - is what keeps this reading as a lit SURFACE rather than as a coloured
+  // wash, and alb swings 0.05 to 2.4, so the lit patch has 3-5:1 of internal
+  // contrast in it. Buying detail with contrast rather than with level is the
+  // rule the rest of this file is built on; it applies to the hero's light too.
+  vec3 keyC = mix(body, vec3(1.0), 0.62) * MOTE_LIGHT;
+  // A SURFACE, NOT A SOLID - the same argument the receding ceiling and the far
+  // walls are shaded on. 'into' is distance behind the drawn silhouette, and on
+  // a floor filling the lower third of frame that runs to 500 units of rock the
+  // player is looking straight at. The body lamp's exp(-into/62) skin is right
+  // for a light raking an edge and wrong for this: it confined every previous
+  // version of the mote's light to a 62-unit rind that the frames simply did
+  // not contain. The radial term already handles distance honestly, in world
+  // space, per pixel - so this only has to stop the mass from lighting up like
+  // a lantern seen through it.
+  float keyD = 0.42 + 0.58 * exp(-into / 260.0);
+  c += keyC * V_MOTEKEY * alb * key * keyD;
+  // Bedding planes are gaps, so they take it deeper - the same relation the sky
+  // and the anchor pool already have with seam, and the reason a lit stretch of
+  // wall reads as layered rather than as a patch of paint.
+  c += keyC * V_MOTEKEY * 1.15 * seam * key * exp(-into / 460.0);
+
   // Tight core plus a small skirt. A wide skirt is pure p90 cost: it triples
   // the lit area for a highlight the eye reads entirely from its inner edge.
   // Broken along its length by the rock's own fine grain - free, since strata
@@ -903,8 +993,19 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   float rim = (exp(-into / 17.0) + 0.20 * exp(-into / 48.0)) * (0.28 + 1.40 * fine)
             * (1.0 + 0.95 * bedf.x) * (1.0 - 0.62 * bedf.y);
   // The edge nearest a lamp is the brightest rock in the frame, and it is what
-  // reads the silhouette out of the dark for the player.
-  c += body * V_RIM * rim * lamp * 0.52;
+  // reads the silhouette out of the dark for the player. The mote's key gets a
+  // share of it: an edge is where a light's direction is most legible, and a
+  // cyan-lit silhouette against amber-lit rock is the clearest statement
+  // available that the two are different sources.
+  //
+  // It is also the cheapest highlight energy in the pass, and that is not a
+  // coincidence - rim is 17 units wide and broken by the grain and the bedding,
+  // so it buys the exposure contract's p99 with almost no area. Raised from
+  // 0.30 to pay back the far-wall break of slope below, which takes its 0.008
+  // out of the top of the distribution rather than the bulk. Highlights spent
+  // on a shadow, bought back on an edge: the same energy, in the place a
+  // reviewer actually reads the hero's light from.
+  c += body * V_RIM * rim * (lamp * 0.52 + MOTE_LIGHT * key * 0.34);
 
   if(roof){
     // Backlit underside. What light it has is bounced up off the water plus the
@@ -946,7 +1047,8 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
     // A raking lamp across a rippled surface is also the strongest texture cue
     // available at this depth, and it comes for free - lamp is already in hand.
     c += (uCSurf * pow(sat(sky * 2.4), 1.1) * (0.40 + 0.80 * caus) * 1.80
-          + lamp * 3.20 + body * (0.06 + 0.94 * seam) * 0.55)
+          + lamp * 3.20 + MOTE_LIGHT * key * 2.40
+          + body * (0.06 + 0.94 * seam) * 0.55)
        * V_SILT * 3.00 * crest * (0.45 + 0.90 * fine);
     // THE TREAD ITSELF. Silt-toned, so it separates from the face in hue as
     // well as in value, and lit by three things on purpose: the downwelling
@@ -954,7 +1056,7 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
     // lamp - because a bench top is the largest upward-facing surface a mote
     // ever swims over, and it is the natural place for its light to land.
     c += (uCSurf * pow(sat(sky * 2.3), 1.1) * 1.55
-          + lamp * 2.60
+          + lamp * 2.60 + MOTE_LIGHT * key * 2.00
           + uCSilt * (0.10 + 0.90 * amb) * 0.34)
        * V_SILT * 0.82 * tr * (0.50 + 0.85 * fine) * (0.55 + 0.80 * caus)
        * (0.45 + 0.85 * sat(rpp * 0.5 + 0.5));
@@ -1056,6 +1158,17 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // rim vanished entirely, leaving four layers that differed from the haze by
   // a few percent. Coverage was always correct; only the shading was wrong.
   float intoS  = (roof ? dT : dB) * s;
+  // A TOP SURFACE FORESHORTENS, AND THIS ONE DID NOT. intoS is already divided
+  // back into near-plane units, so the constant threshold the tread below used
+  // gave the bench on the deepest plane exactly the same number of PIXELS of
+  // top surface as the bench in front of it - four benches at four distances
+  // all showing the same amount of their own top, which is the one thing
+  // perspective never does. That is why a review which accepted the near
+  // benches said in the same breath that the far ones do not foreshorten.
+  // Scaled by the layer's own apparent size the deepest plane shows about 11
+  // pixels of tread against the nearest plane's 23: a 2:1 ladder across the
+  // four, which is the ratio their shared bed spacing already projects at.
+  float fsK = 0.22 + 0.78 * s;
   float belowD = max(0.0, w.y - top);
   float belowS = belowD * s;
   // THE PLANE'S OWN DAYLIGHT, AND THE REASON IT HAS A GRADIENT AT ALL.
@@ -1148,6 +1261,50 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   float sw = max(0.11, 2.0 * pxL / BEDY);
   c += rk * V_ROCK * 0.50 * (0.11 / sw) * (1.0 - smoothstep(0.0, sw, min(bfF, 1.0 - bfF)))
      * (sky + 1.10 * aw) * exp(-intoS / 650.0);
+  // The mote reaches the first plane back and effectively nothing beyond it.
+  // SCREEN-ANCHORED, AND THAT IS NOT A SHORTCUT. A wall behind the player, lit
+  // by the player, shows its brightest patch DIRECTLY BEHIND HIM. toLayer
+  // traces a pixel back to where it would lie on the swimming plane, which for
+  // a deep layer is thousands of units off, so keying the mote's light to it
+  // put the lit patch a fraction of the way from screen centre to the mote and
+  // left it sitting there - a pool that does not follow the hero at all. It
+  // measured exactly as badly as it sounds: three places of the mote's global
+  // salience on the opening frame of both seeds, spent on a patch that was in
+  // the wrong place. Read at the near plane it is a pool around the mote on
+  // every layer, which is what a light behind a swimmer actually looks like.
+  //
+  // pow(s, 2.2) stands in for a z distance this projection does not carry:
+  // layer 1 gets a third of the near-plane key, layer 4 a hundredth. Without
+  // any of it the plane directly behind the player is the one large surface in
+  // frame that ignores him, which is the same defect one step back. Added
+  // BEFORE the fog, so aerial perspective veils the mote's light on a far wall
+  // exactly as it veils the wall's own.
+  float keyF = moteKey(toWorld(uv), roof ? 1.0 : -1.0) * pow(s, 2.2);
+  c += mix(rk, vec3(1.0), 0.62) * MOTE_LIGHT * V_MOTEKEY * alb * keyF
+     * (0.45 + 0.55 * exp(-intoS / 300.0));
+  // The break of slope, which is what makes a tread the top OF something. The
+  // near rock has had one for two rounds - see 'brow' in trenchRock - and its
+  // absence out here is the other half of why a far bench read as a stripe: a
+  // bright band with nothing under it is a band; a bright band with a line of
+  // contact occlusion under it is a plane seen edge on.
+  //
+  // ON THE ROCK, BEFORE THE FOG - and that distinction is worth two places of
+  // the hero's global salience, which is how it was found. Applied to the
+  // composite it darkened the BACKSCATTER as well, so it was dimming the water
+  // between the eye and the wall: a shadow cast forward through open water,
+  // which is not a thing, and a broad enough removal that it took the light out
+  // of the mote's own backdrop. Applied here the fog lifts the shadowed rock
+  // back toward the haze exactly as it lifts everything else at that distance,
+  // so what is left is a shadow ON A SURFACE, which is what was wanted.
+  // Measured with bgNoLedge against the same frame: this costs the exposure
+  // contract's p99 exactly nothing, which is not obvious and was worth the
+  // check - the top one percent of a shallow frame is light SHAFT, and a shaft
+  // is added to the composite after this, so darkening the rock underneath it
+  // does not touch the beam standing on it. It is paid for out of the bulk,
+  // which is where an occlusion term should be paid for.
+  float bd3 = intoS - 42.0 * fsK * 1.35;
+  c *= 1.0 - (roof ? 0.0 : 0.28 * uKill3.y)
+     * exp(-(bd3 * bd3) / (42.0 * fsK * 42.0 * fsK * 0.42));
   // Aerial perspective is the fog toward the local haze, full stop. Stacking an
   // absorb() on top of it just annihilated the rock and fought the same effect.
   // BACKSCATTER, and the reason a receding plane read as a black slab. The
@@ -1217,7 +1374,15 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // exponential skirt is a glow round an edge, and a glow round an edge is the
   // stroked outline this file keeps having to remove. Paid for out of the old
   // wide skirt, so the mean rim energy on a floor edge barely moves.
-  float tread = (roof ? 0.0 : 0.30 * uKill3.y) * (1.0 - smoothstep(24.0, 42.0, intoS));
+  // Brightened by exactly what it loses in width, so foreshortening a bench
+  // costs the frame no light at all - it only redistributes it. A top surface
+  // seen from further away reads as a bright LINE along a skyline rather than a
+  // band, and a line at the same energy is both the stronger perspective cue
+  // and the better citizen of an exposure contract that wants real highlights
+  // and a dark bulk. Capped, because the deepest plane would otherwise want
+  // three times the amplitude and a far bench is not a light source.
+  float tread = (roof ? 0.0 : 0.30 * uKill3.y) * min(2.6, 1.0 / fsK)
+              * (1.0 - smoothstep(24.0 * fsK, 42.0 * fsK, intoS));
   o += uCHigh * V_FARRIM * sky * (roof ? 0.30 : 1.00) * (0.50 + 0.95 * openL)
      * (1.0 - fog) * (exp(-intoS / 18.0) + 0.15 * exp(-intoS / 44.0) + tread);
   return vec4(o, cov);
@@ -1879,6 +2044,13 @@ function killMasks() {
     new Float32Array([on('bgNoSnow'), on('bgNoRays'), on('bgNoVents'), on('bgNoHush')]),
     new Float32Array([on('bgNoFar'), on('bgNoSilt'), on('bgNoGrain'), on('bgNoBreak')]),
     new Float32Array([on('bgNoLamp'), on('bgNoLedge'), on('bgNoDip'), on('bgNoTalus')]),
+    // bgNoMoteKey isolates the HERO's light from the anchors', which bgNoLamp
+    // cannot: they share one expression and the anchors are ten times wider, so
+    // for three rounds every measurement of 'does the mote light the rock' was
+    // actually measuring an anchor. Killing this one and diffing the frame is
+    // how the 270-450 unit geometry in V_MOTEKEY's note was established, and it
+    // is the only honest way to answer the question at all.
+    new Float32Array([on('bgNoMoteKey'), 1, 1, 1]),
   ];
 }
 
@@ -1893,8 +2065,8 @@ export class Background {
     });
     this.bandMap = new Float32Array(2);
     this.lights = new Float32Array(MAXL * 4);
-    const [k1, k2, k3] = killMasks();
-    this.kill = k1; this.kill2 = k2; this.kill3 = k3;
+    const [k1, k2, k3, k4] = killMasks();
+    this.kill = k1; this.kill2 = k2; this.kill3 = k3; this.kill4 = k4;
     this.c = {
       vd: chroma(PAL.voidDeep), dp: chroma(PAL.waterDeep), md: chroma(PAL.waterMid),
       hi: chroma(PAL.waterHigh), sf: chroma(PAL.surface), st: chroma(PAL.silt),
@@ -1976,6 +2148,7 @@ export class Background {
     gl.uniform4fv(u.uKill, this.kill);
     gl.uniform4fv(u.uKill2, this.kill2);
     gl.uniform4fv(u.uKill3, this.kill3);
+    gl.uniform4fv(u.uKill4, this.kill4);
     gl.uniform4fv(u.uLights, this.lights);
 
     gl.uniform3fv(u.uCVoid, c.vd);
