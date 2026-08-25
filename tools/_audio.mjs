@@ -270,10 +270,26 @@ function sessionScript(a, t, dt) {
   if (t > S.nextB) { a.play('brush', {}); S.nextB = t + 3 + Math.random() * 4; }
 }
 
+
+// THE MASTER STARTS AT ZERO AND init() RAMPS IT OPEN, so cancelling that ramp
+// without also setting a value leaves the gain at 0 and renders digital silence.
+// Three of the four modes did exactly that, and reported peak 0.000 / -180 dB
+// over 44- and 70-second renders while happily counting 273 sound events and
+// 5000 created nodes. Nobody caught it because a spectrogram of silence still
+// looks like a picture, and AI_HANDOFF recorded the soundscape as "verified
+// structurally via offline render" on the strength of it.
+//
+// oneshots had it right all along -- cancel, THEN set -- which is what made
+// the diagnosis quick once the graph was probed directly instead of read.
+const openMaster = (a) => {
+  a.master.gain.cancelScheduledValues(0);
+  a.master.gain.value = 0.92;   // the same value init() ramps to when unmuted
+};
+
 window.RIG = {
   async session(dur = 44, step = 1 / 30) {
     const r = await runOffline({ dur, step,
-      setup: (a) => { a.master.gain.cancelScheduledValues(0); a.play('start'); },
+      setup: (a) => { openMaster(a); a.play('start'); },
       drive: sessionScript });
     return { png: panel(r.buf, { label: 'session ' + dur + 's  step ' + step.toFixed(4) }),
       stats: stats(r.buf), bands: (({ cent, corrT, ...x }) => x)(bands(r.buf)), steps: r.steps, err: r.err };
@@ -307,7 +323,7 @@ window.RIG = {
   // the chain has to stay audible at the loudest moment in the game
   async chain() {
     const r = await runOffline({ dur: 16, step: 1 / 30,
-      setup: (a) => { a.master.gain.cancelScheduledValues(0); a.play('start'); },
+      setup: (a) => { openMaster(a); a.play('start'); },
       drive: (a, t, dt) => {
         a.update(dt, { intensity: 1, danger: 0.9 });
         const S = a.__s || (a.__s = { n: 0, next: 3, r: 3.2 });
@@ -331,7 +347,7 @@ window.RIG = {
     let plays = 0;
     const t0 = performance.now();
     const r = await runOffline({ dur: 70, step: 1 / 30,
-      setup: (a) => { a.master.gain.cancelScheduledValues(0); marks.init = total; a.play('start'); },
+      setup: (a) => { openMaster(a); marks.init = total; a.play('start'); },
       drive: (a, t, dt) => {
         a.update(dt, { intensity: t < 55 ? 0.9 : 0, danger: t < 55 ? 0.5 : 0 });
         if (t > 55) { if (!marks.at55) marks.at55 = total; return; }
