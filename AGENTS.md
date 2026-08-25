@@ -14,8 +14,10 @@ AAA visual and tactile standard. Read this whole file before touching anything.
 `LUMEN — Deep Drift`. A one-button momentum game. You are a bioluminescent mote
 in an abyssal trench. **Hold** to cast a light-tether at the nearest good anchor
 and swing; **release** to launch. "The Hush" — an advancing wall of dark — erases
-the world from the left, so stopping is death. Score is distance in metres,
-multiplied by plankton chains.
+the world from the left, so stopping is death. Score is metres of NEW ground,
+banked at the chain multiplier live when you claim them — not total distance
+times a final multiplier, which would let a player farm plankton at the end and
+inflate everything behind them.
 
 Pillars, in priority order:
 1. **FEEL** — the swing must read in your wrists. Hitstop, screenshake, dilation.

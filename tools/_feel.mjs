@@ -628,8 +628,9 @@ async function runPolicy(seed, secs, kinds, aceOver) {
       return {
         kind, dist: Math.round(p.maxX / 10), releases,
         alive: p.alive, cause: p.deathCause || '-',
-        // Displayed, but NOT part of the score: main.js scores `p.maxX * METRES`
-        // and nothing multiplies it. See the note at the reporting block.
+        // The multiplier IS part of the score now (Game._bank), but this loop
+        // cannot see that -- it drives player.update() directly and never runs
+        // Game.step, so nothing banks. See the note at the reporting block.
         mult: +(p.mult || 1).toFixed(1), chain: Math.round(p.chain || 0),
         secs: +((i0.n) / 120).toFixed(1),
         vMean: Math.round(speeds.reduce((s, x) => s + x, 0) / Math.max(1, speeds.length)),
@@ -996,14 +997,19 @@ try {
     // lerp(196,470,difficulty) and nofly's mean speed is 266-310, so it is
     // outrun by the front as soon as difficulty passes about 0.27. The lab had
     // deleted the one system whose entire job is to punish drifting.
-    // A second correction, and it changes what "the ceiling" even means: the
-    // multiplier is NOT part of the score. main.js records `p.maxX * METRES` and
-    // nothing multiplies it; `mult` reaches frameCtx, the HUD and the particle
-    // burst size and stops there. README and this file both used to say the
-    // chain multiplied the score. It does not, so a policy cannot buy distance
-    // with plankton - a pickup is worth exactly the 16 u/s of forward assist in
-    // Player._plankton. The mult column below is kept as a *reported* number
-    // because it is what the player is shown, not because it scores.
+    // THIS MODE CANNOT MEASURE THE SCORE, AND THAT IS STRUCTURAL. The loop drives
+    // player.update() directly and never runs Game.step, so Game._bank never
+    // runs and `dist` is just `maxX/10` -- which no scoring rule can move. Every
+    // number below is a DISTANCE number. When the multiplier was wired into the
+    // score, running this before and after gave byte-identical output; that was
+    // the correct result and it proves the sim was untouched, but it is not
+    // evidence about scoring and must not be quoted as if it were.
+    // To measure score, route the LIVE loop through g.step() and read the game's
+    // own g.score instead of recomputing it. Done that way, ace on seeds 7,3
+    // over 180s scores 2584 /s with plankton routing and 1530 /s with pkW=0 --
+    // routing is worth +68.9% of score rate against a few percent of noise in
+    // distance, and ace beats the null policy 15.8x on score where it beats it
+    // 2.4x on distance. Nobody has folded that into this file yet.
     console.log(`policy comparison, ${SECS}s, ${LIVE ? 'LIVE world - hazards, plankton and the Hush all on' : 'no hazards, no Hush (pendulum only - see the note in the source)'}\n`);
     const totals = new Map();
     for (const s of SEEDS) {

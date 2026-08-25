@@ -570,23 +570,36 @@ Longer-standing items:
      early hazard death on seed 3 moved a five-seed aggregate from 7.2x to 5.2x
      while the other four seeds were unchanged within 1%.
 
-  **The chain multiplier is not part of the score.** `main.js` records
-  `p.maxX * METRES` and nothing multiplies it; `mult` reaches `frameCtx`, the HUD
-  and the particle burst size and stops there. `README.md` and this file both
-  said the chain multiplied the score. It does not, and `--ace pkW=0` confirms
-  it: deleting plankton routing entirely changes the rate by 0.7%. A pickup is
-  worth exactly the 16 u/s of forward assist in `Player._plankton`. Either wire
-  the multiplier into the score or stop describing it as one; right now half of
-  the HUD's real estate reports a number that cannot affect the outcome.
+  **The chain multiplier is part of the score, and it is worth a lot.**
+  It used not to be: `main.js` recorded `p.maxX * METRES` and nothing multiplied
+  it, while the HUD gave a large element to `CHAIN x10.5` and the README called
+  it a multiplier. `Game._bank()` now credits newly-claimed ground at the
+  multiplier live when it is claimed — deliberately not total distance times a
+  final multiplier, which would let a player farm plankton at the end and inflate
+  everything behind them. Measured by driving the real `g.step()` and reading the
+  game's own score, `ace` on seeds 7,3 over 180s scores **2584 /s** with routing
+  and **1530 /s** with `pkW=0`: routing is worth **+68.9% of score rate**, against
+  a few percent of noise in distance.
+  **`_feel.mjs --mode policy` structurally cannot see this.** It drives
+  `player.update()` directly and never runs `Game.step`, so nothing banks and
+  every number it prints is a distance number. Running it before and after the
+  scoring change gives byte-identical output — the correct result, and proof the
+  simulation was untouched, but not evidence about scoring. Do not quote it as
+  such. Folding a score column into that file is an open task.
 
   What is still open, but is now a design question rather than an alarm: the
-  floor is high in absolute terms. Zero input scores 23.7 m/s because the mote
-  falls into the vent, which holds `vx` near `ventFlowX`. Whether an endless
-  runner should pay 27% of a good player's rate for no input at all is a
-  deliberate choice nobody has made. **If it is ever changed, measure against
-  `ace`, not against `good`** — and note that the ceiling is flat in the
-  planner's horizon anywhere from 1.0s to 3.0s (84-94 m/s), so 3.7x is a
-  property of the game and not of that file's tuning.
+  floor is high **in distance**. Zero input travels 23.7 m/s because the mote
+  falls into the vent, which holds `vx` near `ventFlowX`, so on distance alone a
+  drifter reaches 27% of a good player's rate for no input at all.
+  **Scoring the multiplier shrank this a great deal and it should be re-judged
+  on score, not on distance:** `ace` beats the null policy **15.8x on score**
+  where it beat it 2.4x on distance over the same runs, because a drifter
+  collects almost no plankton and so banks its metres at nearly x1. Whether the
+  remaining floor is still too high is a deliberate choice nobody has made.
+  **If it is ever changed, measure against `ace`, not against `good`** — and note
+  that the distance ceiling is flat in the planner's horizon anywhere from 1.0s
+  to 3.0s (84-94 m/s), so that margin is a property of the game and not of that
+  file's tuning.
 
 - **The salience rank measures peak population, and deliberately not extent.**
   After the metric was rebuilt (see the commit that replaced the 24x14 grid), the

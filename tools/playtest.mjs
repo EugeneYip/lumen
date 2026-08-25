@@ -136,7 +136,9 @@ console.log(`                compositor artefact -- trust the CPU and GPU budget
 console.log(`                and judge real pacing on a machine with a screen)`);
 const satPct = (out.saturatedAfterWarmup / out.framesAfterWarmup * 100).toFixed(1);
 console.log(`  sim          ${out.stepsTotal} steps, peak accumulator ${out.maxAccumulator}s, saturated ${out.saturatedAfterWarmup}/${out.framesAfterWarmup} frames after warm-up (${satPct}%)`);
-console.log(`  run          mode=${out.mode}  reached ${out.depth}m  best ${out.best}m`);
+// `best` is a SCORE now, not metres -- see Game._bank in main.js. Printing it
+// with an m suffix was wrong the moment scoring changed.
+console.log(`  run          mode=${out.mode}  reached ${out.depth}m  best ${out.best}`);
 console.log(`  audio        ready=${out.audioReady} silent=${out.audioSilent}`);
 
 // The accumulator clamps at MAX_STEPS (8); sitting there means the sim cannot
