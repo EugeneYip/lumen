@@ -492,6 +492,8 @@ Longer-standing items:
   here can. **Do not re-gate it without evidence that the number discriminates.**
 - **`tools/_*` are scratch instruments**, deliberately kept because they are how
   most real bugs here were found. Not tests, no pass/fail contract, may rot:
+  `_hair.mjs` (ruled-hairline notch energy over a region — the instrument the
+  "straight line nobody drew" defects needed and did not have),
   `_probe.mjs` (level coverage, phrase mix), `_reach.mjs` (fairness against the
   real `Player`), `_feel.mjs` (movement, many modes), `_spot.mjs` (dumps the
   level around a death), `_grade.html`/`_grade.mjs` (synthetic HDR bench),
