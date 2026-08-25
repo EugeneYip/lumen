@@ -138,17 +138,20 @@ class Game {
     // measured it) -- the capture harness must never be at the mercy of browser
     // chrome behaviour, and that is AGENTS.md's first absolute rule.
     //
-    // `_hiddenMute` is separate from `this.muted` so that auto-muting cannot
-    // overwrite, or be overwritten by, the player's own M preference.
+    // SUSPEND, do not mute. Muting the master was the first version of this and
+    // it is the weak one: the oscillators keep running, and the sequencer keeps
+    // scheduling against an audio clock that is running away from a frame clock
+    // throttled to ~1Hz. `audio.setSuspended` stops the context outright, which
+    // freezes that clock, and it never touches `this.muted` -- so the player's
+    // own M preference is neither overwritten nor consulted, and there is no
+    // second piece of state to keep in sync.
     document.addEventListener('visibilitychange', () => {
       if (this.headless) return;
       if (document.hidden) {
         if (this.mode === 'play') this.mode = 'paused';
-        this._hiddenMute = true;
-        this.audio.setMuted(true);
-      } else if (this._hiddenMute) {
-        this._hiddenMute = false;
-        this.audio.setMuted(this.muted);
+        this.audio.setSuspended(true);
+      } else {
+        this.audio.setSuspended(false);
       }
     });
   }
