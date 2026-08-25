@@ -58,6 +58,47 @@
 //    length x speed compounds while stretch has a hard ceiling at the point a
 //    profile's own cutoff becomes a straight edge. See gearK, and see the two
 //    artefacts recorded at the wake's `elg` and at the striations.
+//  - THE WAKE IS NOT A SPEEDOMETER ON SCREEN, AND THE CLAIM ABOVE THAT IT IS
+//    HAS BEEN MEASURED FALSE. It is true of ARC LENGTH: emission is
+//    distance-driven, so the trail covers speed x lifetime of PATH. But the
+//    player is on a tether 90% of the time and a tether is a circle, so the
+//    trail wraps the arc and what a still frame shows is the CHORD.
+//    Instrumented over 640 samples of real autopilot on seed 7 - the WAKE point
+//    cloud's principal-axis extent, in screen pixels, binned by instantaneous
+//    speed:
+//        v      213   477   623   774   918  1091  1314  1652
+//        L px   240   237   228   247   254   238   252   330
+//    Six times the speed for five percent of the length, and non-monotone
+//    inside that. Two more readings from the same run say why it cannot be
+//    fixed by tuning: the cloud gets LESS line-like as it speeds up (L/W 5.6 at
+//    a crawl against 3.5-3.8 at the cruise, because the braid widens with gk and
+//    the arc curls), and its principal axis sits 30-45 degrees off travel at the
+//    cruise and 70 off at a crawl. Attached samples median L 241 at v 841; free
+//    samples 275 at v 1245. So the visible difference between a slow wake and a
+//    fast one is almost entirely the `0.16 + 0.84 * spK` BRIGHTNESS term - which
+//    is a level cue, and a level cue is exactly the thing a reviewer has to
+//    reason about rather than feel.
+//    This was not fixed here. It is recorded because the next person to read
+//    "the wake IS the speedometer" needs the number before they spend a round on
+//    lengthening something that is bounded by the swing radius. What the length
+//    could be bought with instead, untried: the element PITCH, which is
+//    currently a constant on screen (one per TRAIL_GAP of travel at every speed)
+//    and is the one spatial magnitude an arc does not compress.
+//  - AND SPEED IS ALSO ONSET, WHICH NOTHING HERE WAS SAYING. gearK and spdK are
+//    both functions of speed alone, so a steady 30 m/s and a just-released
+//    30 m/s drew the identical frame; feeling speed is largely feeling change.
+//    surgeK reads player.speedSmooth - a damp that already existed in the sim
+//    and had no readers - and is wired into the striation rate, the wake's
+//    emission rate, and the near field's population and tear. See surgeK.
+//  - THE NEAR FIELD IS WHERE SPEED IS FELT, AND THERE WAS NO NEAR FIELD. The
+//    ambient layer spanned parallax depths 0.30-1.75, i.e. 3.3x the camera rate
+//    down to 0.57x. That is a real gradient and it is not one you can see in a
+//    still, because both ends are small and neither sweeps. AK.RUSH sits at
+//    0.10-0.24 - 4 to 10 times the camera rate, 7 to 18 times the far layer's -
+//    and is large enough that the difference is a silhouette. It is what gives
+//    the frame its own in-frame reference: a long near stroke, a short mid one
+//    and a round far speck, all in one image, so nothing has to be remembered
+//    from another frame to order them.
 //  - NOTHING THIS FILE DRAWS MAY BE A BRIGHTER CLUSTER THAN THE ANIMAL THAT
 //    CAUSED IT. Stated as art it is obvious; it is here because it is also a
 //    measurement, and the measurement caught two violations this pass. The
@@ -160,6 +201,30 @@ const spdK = (sp) => clamp01((sp - SPD_LO) / SPD_SPAN);
 // they already had and the middle gains the ones it never had.
 const GEAR_LO = 520, GEAR_INV = 1 / 600;
 const gearK = (sp) => { const q = clamp01((sp - GEAR_LO) * GEAR_INV); return q * q * (3 - 2 * q); };
+
+// ...and ONSET, which is a different question again and is the one nothing in
+// this file was answering. Both signals above are functions of speed alone, so
+// a steady 30 m/s and a just-released 30 m/s draw the identical frame - and a
+// review that keeps saying "speed is inferable, not felt" is describing exactly
+// that: feeling speed is mostly feeling CHANGE, and there was no change term.
+//
+// The signal was already in the simulation and unread. player.js keeps
+// `speedSmooth = damp(speed, 6/s)` for its own use, so `speed - speedSmooth` is
+// a free, deterministic, frame-rate-independent derivative of speed over about
+// a sixth of a second. Measured over 60s of autopilot on seed 7 (7054 live
+// steps): p01 -749, p10 -306, p50 +28, p90 +293, p97 +335, p99.5 +442, max
+// +593. So a 60..340 window spends the whole of this signal on the top decile
+// of moments, which is what an onset is - it must be OFF nearly always or it is
+// just another brightness term.
+//
+// Deliberately one-sided. The negative half is real (a swing bleeds speed as
+// fast as a release adds it) but a cue that shortens when you decelerate reads
+// as the frame stalling, and the named capture scenes would sample it at random.
+const SURGE_LO = 60, SURGE_INV = 1 / 280;
+const surgeK = (p) => {
+  const q = clamp01(((p.speed || 0) - (p.speedSmooth || 0) - SURGE_LO) * SURGE_INV);
+  return q * q * (3 - 2 * q);
+};
 
 // The wake IS the speedometer, and this is the mechanism. Emission is driven by
 // DISTANCE travelled, so the stream holds one element every TRAIL_GAP units at
@@ -1530,6 +1595,7 @@ export class Particles {
     const sp = Math.hypot(p.vx, p.vy);
     const spK = spdK(sp);
     const gk = gearK(sp);          // the cruise band, steeply. See gearK().
+    const srg = surgeK(p);         // ...and CHANGE. See surgeK().
     const inv = 1 / (sp || 1);
     const tx = p.vx * inv, ty = p.vy * inv;
     const nx = -ty, ny = tx;
@@ -1593,6 +1659,13 @@ export class Particles {
       //     behind the head, which is all the mote's own annulus can afford.
       //     What is new is the reach.
       //
+      //     ...ALONG THE PATH, WHICH IS NOT THE SAME AS ON SCREEN, and the
+      //     header records the measurement that says so: the screen extent of
+      //     this trail is flat in speed (240px at v=213, 252px at v=1314)
+      //     because the mote is on a tether 90% of the time and the trail wraps
+      //     the arc. Read that note before retuning anything below on the
+      //     assumption that length is the readout.
+      //
       //     Emission is driven by DISTANCE, not by a timer, so the stream is a
       //     constant-density line whose LENGTH is speed x TRAIL_LIFE: 150
       //     units at a slow swing, 690 at top speed. Individual elements
@@ -1610,7 +1683,11 @@ export class Particles {
       // a comma; closing the spacing instead is what turns a row of commas back
       // into one drawn line, and it makes the element COUNT rise 2.7x across
       // the cruise where the trail's length rises 2.1x.
-      this._aTrail += sp * dt * (1 / TRAIL_GAP) * (1 + 0.55 * gk);
+      // The surge term is a COUNT on an onset: a release thickens the stream by
+      // nearly half for the ~0.17s the derivative survives, and then it is gone.
+      // Rate only, so each element is what it always was and no light per
+      // element moved.
+      this._aTrail += sp * dt * (1 / TRAIL_GAP) * (1 + 0.55 * gk + 0.45 * srg);
       if (this._aTrail > 5) this._aTrail = 5;
       // TWO FILAMENTS AT A SWING, THREE AT THE CRUISE.
       //
@@ -1935,7 +2012,14 @@ export class Particles {
       //
       //     Drawn on the FLANKS, never behind the head, and CLOUD-classed so
       //     the mote's keep-out owns them anyway.
-      this._aStria += dt * gk * gk * 21;
+      // ...and it TEARS on an onset. The flanks are where "the water is being
+      // shoved out of the way" lives, so an acceleration belongs here before it
+      // belongs anywhere else - and this emitter is already CLOUD-classed and
+      // 250-470 units out on the beam, so recruiting more of it cannot reach the
+      // hero's block. Rate only: the individual striation is unchanged, so this
+      // is a count and not a level, and it decays with speedSmooth over about a
+      // sixth of a second whether or not the speed it bought does.
+      this._aStria += dt * (gk * gk + 1.15 * gk * srg) * 21;
       if (this._aStria > 3) this._aStria = 3;
       while (this._aStria >= 1) {
         this._aStria -= 1;
@@ -2447,10 +2531,11 @@ export class Particles {
 // ============================================================================
 // Ambient life. Screen-space drifters at a continuum of parallax depths.
 //
-// One species reads as dust on a lens. Five do not: dense almost-invisible
+// One species reads as dust on a lens. Six do not: dense almost-invisible
 // marine snow for the sense of a medium, twinkling sparks, fat low-contrast
-// motes that build depth, rare pulsing organisms that are actually alive, and
-// the odd larval strand. Size, colour, speed and brightness all correlate with
+// motes that build depth, rare pulsing organisms that are actually alive, the
+// odd larval strand, and - much closer to the camera than any of them, and only
+// while the water is moving - the RUSH strokes that are the near field. Size, colour, speed and brightness all correlate with
 // depth, and every one of them is pushed by the same curl field at the same
 // world coordinates the debris is, so the water is one water.
 //
@@ -2484,14 +2569,45 @@ export class Particles {
 //    constant means total light and peak both constant, so this whole pass is
 //    invisible to the exposure contract and visible only to the eye.
 // ============================================================================
-const AK = { SNOW: 0, SPARK: 1, FAT: 2, ORG: 3, LARVA: 4 };
+const AK = { SNOW: 0, SPARK: 1, FAT: 2, ORG: 3, LARVA: 4, RUSH: 5 };
 
 export class Ambient {
   constructor(seed = 1, count = 190) {
     const r = makeRng(seed * 104729 + 7);
     // Denser than it looks. Marine snow is the strongest "deep water" cue there
     // is, and it only works if it is numerous and almost invisible.
-    const n = Math.max(1, Math.round(count * 1.7));
+    //
+    // RUSH is APPENDED, not mixed in, and that is the whole reason for the two
+    // counts. Two separate defects came out of the obvious version, which took
+    // RUSH's share out of the species selector:
+    //
+    //  - It DELETED RIVALS. Every RUSH individual was a marine snowflake that no
+    //    longer existed, and the gate reports the hero's rank beside the number
+    //    of distinct highlight peaks for exactly this reason. It caught it: seed
+    //    3 / fast went 61 peaks to 48 and launch 80 to 72.
+    //  - It RESHUFFLED THE WHOLE FIELD. One shared RNG stream means changing the
+    //    number of draws anywhere moves every drifter after it, so an A/B of two
+    //    builds compared two different fields and the difference attributable to
+    //    the new layer could not be separated from the churn.
+    //
+    // Appending fixes both. The first n0 iterations draw exactly the uniforms
+    // they drew before, in the same order, so every one of the other five
+    // species is byte-identical to the build without this layer.
+    //
+    // AND A NEGATIVE RESULT, because the obvious conclusion from that was wrong
+    // and the number said so. The seed 7 launch frame's HDR max moves 39.402 to
+    // 40.641 and its p99 0.2545 to 0.2526 in this build, and I attributed both
+    // to the reshuffle above - but they are UNCHANGED after the reshuffle was
+    // removed, so the reshuffle was not the cause. It is the surge terms in
+    // _disturb: an emission RATE that responds to a new signal consumes a
+    // different number of RNG draws per step, which moves every particle
+    // downstream of it, and a release spark is hot enough to be the frame's max.
+    // That churn cannot be appended away, because it is the simulation change
+    // itself. Attribute a statistic to the thing you changed LAST, not to the
+    // thing you changed first.
+    const n0 = Math.max(1, Math.round(count * 1.7));
+    const nR = Math.round(count * 0.31);
+    const n = n0 + nR;
     this.n = n;
     const f = (k) => new Float32Array(k);
     this.px = f(n); this.py = f(n); this.pz = f(n); this.ps = f(n);
@@ -2510,8 +2626,9 @@ export class Ambient {
 
     for (let i = 0; i < n; i++) {
       const u = r();
-      const k = u < 0.60 ? AK.SNOW : u < 0.73 ? AK.SPARK : u < 0.895 ? AK.FAT
-        : u < 0.965 ? AK.ORG : AK.LARVA;
+      const k = i >= n0 ? AK.RUSH
+        : u < 0.60 ? AK.SNOW : u < 0.73 ? AK.SPARK : u < 0.895 ? AK.FAT
+          : u < 0.965 ? AK.ORG : AK.LARVA;
       this.sp[i] = k;
       this.px[i] = r() * 4000; this.py[i] = r() * 3000 - 1500;
       this.pz[i] = lerp(0.30, 1.75, Math.pow(r(), 1.22));
@@ -2580,6 +2697,74 @@ export class Ambient {
         this.br[i] = lerp(0.6, 1.5, r());
         this.el[i] = lerp(1.55, 2.35, r());        // a body, not a ball
         this.rs[i] = (r() - 0.5) * 0.26;
+      } else if (k === AK.RUSH) {
+        // THE FOREGROUND, and the reason it did not exist before is measured.
+        //
+        // Speed is felt closest to the camera, and this layer had no camera-side
+        // extreme: pz spanned 0.30-1.75, so the nearest drifter swept at 3.3x
+        // the camera's rate against the farthest at 0.57x. A 5.8:1 ratio sounds
+        // like parallax and is not one you can SEE in a still, because both ends
+        // are small and the near end is only slightly bigger. Nothing in the
+        // frame was near enough to sweep.
+        //
+        // These sit at 0.10-0.24, i.e. 4.2x-10x the camera rate and 7x-18x the
+        // far layer's, and they are large enough that the difference is a
+        // silhouette rather than a statistic. That is the whole cue: within ONE
+        // frame the viewer has a long near stroke, a short mid one and a round
+        // far speck to compare, so nothing has to be remembered from another
+        // frame to order them. A magnitude with an in-frame reference is felt;
+        // the same magnitude alone is inferred, which is the review's own
+        // wording for what was wrong.
+        //
+        // Dim on purpose and gated on motion: at rest a big soft near blob is
+        // just fog on the lens, so it fades out entirely below a swing. It is
+        // drawn as a torn train (see draw) rather than one long quad, because a
+        // stretched quad's medial axis is a segment and this is by far the
+        // largest thing this file would ever stretch.
+        // SIZED DOWN AND MULTIPLIED, and that is a measurement rather than a
+        // preference. The first version was ten drifters at ps 7.5-17, which
+        // drew 159px beads over 62k pixels carrying 640 units of light - a
+        // SURFACE brightness of 0.010 against the layer's own 0.040 mean and the
+        // striations' 0.05-0.14. Photographed at 1.6x it was a faint diagonal
+        // haze, not a stroke: a veil is not a shape, and a shape needs an edge.
+        // Halving the size quarters the area and therefore quadruples surface
+        // brightness for the SAME energy, and the count went up to pay for the
+        // length the individual gave up. Count is the orderable quantity anyway.
+        this.pz[i] = lerp(0.10, 0.24, r());
+        this.ps[i] = lerp(4.6, 10.5, r());
+        this.pw[i] = lerp(0.08, 0.30, r());
+        this.dx[i] = lerp(-5, 7, r());
+        this.dy[i] = lerp(2, 11, r());
+        // ...and then AMPLITUDE, which is the third measurement and the one that
+        // decided the tuning. Differenced against the same frame with this
+        // species removed and the result amplified 10x, the layer was already
+        // drawing exactly the right thing: a field of same-angle strokes across
+        // the whole frame, varied in length and position, unmistakably combed.
+        // At 1x it was not there. The shape was never the problem and two rounds
+        // of reshaping it would have been wasted; it was under the level at
+        // which a soft stroke separates from deep water.
+        //
+        // AND IT IS PRICED. Bracketed rather than guessed - deliberately taken
+        // 2.5x too far first, so the level that reads could be found from above
+        // instead of crept up on. What it costs, measured as the tonemapped mean
+        // of the whole frame against the identical build without this species,
+        // both at the same commit: title 0.0979 -> 0.0979 and 0.1075 -> 0.1075
+        // on the two gate seeds, i.e. EXACTLY nothing at rest, which is the
+        // proof the gate is a gate; hushNear (20 m/s) -0.12% and +0.23%; fast
+        // +1.55% and +1.04%; launch +0.35% and +1.11%. HDR p50 moves 0.0161 to
+        // 0.0164 against a ceiling of 0.030, and p99 does not move at all on
+        // seven of the eight scenes that report it. The read is not bought with
+        // level - it is bought with 63 objects whose count, alignment and
+        // radial gradient carry it - but the objects are not free and this is
+        // what they cost. Do not spend it again without re-measuring.
+        this.br[i] = lerp(0.72, 1.80, r());
+        this.el[i] = lerp(1.5, 2.3, r());
+        this.rs[i] = (r() - 0.5) * 0.20;
+        // `tk` is the twinkle exponent for the species that twinkle; RUSH does
+        // not, so it carries the individual's TEAR instead - how far its three
+        // beads stand off each other at a given speed. Reused rather than added
+        // because a sixth Float32Array per drifter buys one number.
+        this.tk[i] = lerp(0.78, 1.30, r());
       } else {
         this.ps[i] = lerp(11, 28, r());
         this.pw[i] = lerp(0.12, 0.4, r());
@@ -2640,7 +2825,7 @@ export class Ambient {
     // Every stretch divides the tint by itself, so this moves no light into or
     // out of the frame: it is the same photons over more pixels, which is what
     // motion blur physically is and what keeps it out of the exposure contract.
-    let smr = 0, sang = 0;
+    let smr = 0, sang = 0, srg = 0;
     const gm = this._bind();
     if (gm && (gm.mode === 'play' || gm.mode === 'dead')) {
       const pl = gm.player;
@@ -2648,7 +2833,11 @@ export class Ambient {
       // Weighted toward gearK, because the near layer is the widest-area
       // motion cue in the frame and it was reading 0.32 against 0.51 across the
       // band the game plays in. 0.26 against 0.67 is a smear you can order.
-      if (psp > SPD_LO) { smr = 0.42 * spdK(psp) + 0.58 * gearK(psp); sang = Math.atan2(pl.vy, pl.vx); }
+      if (psp > SPD_LO) {
+        smr = 0.42 * spdK(psp) + 0.58 * gearK(psp);
+        sang = Math.atan2(pl.vy, pl.vx);
+        srg = surgeK(pl);
+      }
     }
     // THE POCKET. 135 world units of full suppression against a 99-unit annulus
     // edge, then 92 more to reach full strength - so the hero sits in a hole in
@@ -2659,6 +2848,9 @@ export class Ambient {
     // through the one part of the frame that has to stay the hero's. Measured
     // cost to the hero's own block energy: 0.01 of 5.93. See _keep().
     const vh = cam.viewH || 1080;
+    // Reach of the RUSH layer's radial ramp: full strength about two thirds of
+    // a screen height out from the mote. Hoisted because it is per-frame.
+    const radInv = 1 / (vh * 0.66);
     // Alive rather than "playing", for the reason Particles._gk now is: the
     // title frame has a lit mote in it and measured the worst hero rank of any
     // scene on either seed with the pocket switched off.
@@ -2765,6 +2957,95 @@ export class Ambient {
         rot += dd * al;
       }
 
+      if (k === AK.RUSH) {
+        // The foreground, drawn as a TORN TRAIN and never as one long quad.
+        // This is the largest thing in the file and therefore the one that could
+        // most easily reproduce the ruled diagonal: a stretched quad's medial
+        // axis IS a segment, so three offset beads is the only shape that can
+        // carry this much length. Same table the striations use, so the two
+        // read as one vocabulary.
+        //
+        // It exists only while the water is moving. Below a swing the whole
+        // species fades out, which is what stops it being fog on the lens on the
+        // title frame and in the slow half of a run.
+        // A COUNT, NOT A DIMMER. Fading the whole species in together is a
+        // brightness ramp wearing a costume, and this file's own finding is that
+        // a brightness needs a reference in frame while a count does not. Each
+        // individual therefore carries its own threshold, so the near field
+        // ARRIVES - two strokes at a swing, a dozen at the cruise - and a viewer
+        // can order two frames by counting them. The threshold is read off the
+        // twinkle phase, which for this species only sets where a slow sine
+        // starts and is otherwise unused, so it costs no storage and correlates
+        // with nothing that shows.
+        // The SPREAD of these thresholds is what decides whether the count is
+        // still moving in the band the game plays in, and the first version got
+        // it wrong in a way only the instrument showed: at 0.10-0.40 every
+        // stroke was already recruited by 800 units/sec, so the population read
+        // 0, 3, 30, 60, 60, 60, 60 across 450-2250 and the whole cue had
+        // saturated a third of the way up the cruise. 0.06-0.76 puts half the
+        // species on at 700 and all of it at 1120, i.e. the count DOUBLES across
+        // exactly the 700-940 band a review called interchangeable.
+        const onLo = 0.06 + 0.70 * this.pp[i] * 0.15915494;
+        // ...and the ONSET moves the threshold, not the brightness. A surge
+        // recruits strokes that were not there a sixth of a second ago, which is
+        // the difference between "you are going 30 m/s" and "you just got to
+        // 30 m/s" - and it cannot spend a unit of exposure to say it, because
+        // every stroke it recruits is one this layer already knew how to draw.
+        const on = clamp01((sh + 0.42 * srg - onLo) * 3.2);
+        if (on <= 0) continue;
+        let gate = on * on * (3 - 2 * on);
+        // ------------------------------------------------------ and RADIAL ---
+        // A field of identical strokes everywhere is a wash, and a wash is a
+        // thing you infer. Real peripheral flow has a gradient: nothing moves at
+        // the point you are moving toward and everything moves at the edge of
+        // your vision, so the stroke has to LENGTHEN off-axis or it is texture.
+        //
+        // The centre of that gradient is the mote, not the screen, because the
+        // mote is where the eye is and where the camera leads. So this doubles
+        // as the keep-out the rest of the layer gets from _keep(): strokes are
+        // short and faint in the hero's neighbourhood and long and present at
+        // the frame edge, which is the same suppression the pocket already
+        // applies, spent on a cue instead of thrown away.
+        //
+        // Sized off viewH for the same reason every other radius in this file
+        // is - a constant in world units stops covering the same pixels the
+        // moment the lens zooms out on a launch.
+        let per = 1;
+        if (this._kOn) {
+          const rdx = x - this._kx, rdy = y - this._ky;
+          const rd = Math.sqrt(rdx * rdx + rdy * rdy) * radInv;
+          per = rd < 1 ? rd : 1;
+          per = 0.07 + 0.93 * per * per;
+        }
+        gate *= per;
+        // Bead aspect is capped WELL below the 9:1 the rest of the layer allows.
+        // A bead at 15:1 is a ruled sliver whatever the profile, and these are
+        // the only quads here big enough to hold that aspect without the pixel
+        // floor stopping them first - so the ceiling has to be explicit.
+        // Everything above it goes into the PITCH instead, which is the file's
+        // standing answer: a gap cannot become a ruled line however far it is
+        // opened, and a length bought with spacing cannot clip.
+        let bas = 1 + (ax - 1) * per;
+        if (bas > 7.0) bas = 7.0;
+        const sw = s * 1.22;
+        // THE ONSET LANDS HERE. Speed opens the train; a surge opens it further
+        // and does it in about a sixth of a second, so a release visibly tears
+        // the near field apart while a steady cruise at the same speed does not.
+        // Length is bought entirely with spacing, so the surge cannot become a
+        // brightness term or spend a single unit of exposure.
+        const pitch = sw * Math.sqrt(bas) * this.tk[i] * (0.72 + 0.62 * sh + 0.95 * srg);
+        const ca = Math.cos(rot), sa2 = Math.sin(rot);
+        for (let n3 = 0; n3 < 3; n3++) {
+          const sk = sw * STRIA_SZ[n3];
+          const al = STRIA_AL[n3] * pitch;
+          const lt = STRIA_LT[n3] * sk * 0.42;
+          const q = aniso(sk, sk, bas, fl) * gate / STRIA_AREA;
+          emit(batch, x + ca * al - sa2 * lt, y + sa2 * al + ca * lt,
+            qw, qh, rot + STRIA_RJ[n3] * 0.7,
+            cr * q, cg * q, cb * q, S.SMOKE, CEIL_AMB);
+        }
+        continue;
+      }
       if (k === AK.LARVA) {
         const q = quad(s * this.el[i], s * 0.5, fl);
         emit(batch, x, y, qw, qh, rot, cr * q, cg * q, cb * q, S.FILAMENT, CEIL_AMB);
