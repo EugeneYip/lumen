@@ -106,6 +106,11 @@ const out = await page.evaluate(() => {
     at60: dts.filter((d) => d < 22).length,
     at30: dts.filter((d) => d >= 22 && d < 40).length,
     stalls: dts.filter((d) => d >= 40).length,
+    // Boot compiles shaders and builds the atlas, and it lands in the frame
+    // times as a single multi-second entry. Reporting that as "worst" says
+    // nothing about the loop, so the steady state gets its own view.
+    stallsAfterWarmup: dts.slice(30).filter((d) => d >= 40).length,
+    worstAfterWarmupMs: +Math.max(0, ...dts.slice(30)).toFixed(2),
     maxStepsInAFrame: Math.max(...pt.steps),
     // Warm-up always hitches (shader compile, first upload), so judge
     // saturation on the steady state only.
@@ -140,10 +145,38 @@ console.log(`  audio        ready=${out.audioReady} silent=${out.audioSilent}`);
 // with wall time and the game is silently running in slow motion.
 const satFrac = out.saturatedAfterWarmup / out.framesAfterWarmup;
 if (satFrac > 0.02) problems.push(`sim saturated on ${(satFrac * 100).toFixed(1)}% of frames after warm-up - the fixed-step loop cannot keep up and the game is running slow`);
-if (out.stalls > out.frames * 0.05) problems.push(`${out.stalls} frames over 40ms (${(out.stalls / out.frames * 100).toFixed(1)}%) - visible hitching`);
 if (out.depth < 20) problems.push(`the run went nowhere (${out.depth}m) - real mouse input may not be reaching the tether`);
-if (out.medianMs > 20) problems.push(`median frame ${out.medianMs}ms is below 50fps`);
 if (out.audioReady !== true) problems.push('audio never initialised from a real gesture (autoplay path broken?)');
+
+// WALL-CLOCK PACING IS REPORTED, NOT GATED, AND THAT IS A MEASURED DECISION.
+// It used to fail the run on `stalls > 5%` and `median > 20ms`, three lines
+// after printing a note saying headless Chrome's compositor halves the rate on
+// its own. It did exactly what that note predicted: interleaved runs of HEAD
+// against a control commit from before an entire round of rendering work --
+// old, new, old, new, same machine, same minute -- gave
+//   control  median 33.3ms  67 stalls / 570 frames  worst 1516ms
+//   HEAD     median 33.3ms  50 stalls / 581 frames  worst 1166ms
+//   control  median 33.3ms  60 stalls / 572 frames  worst 1833ms
+//   HEAD     median 33.3ms  58 stalls / 626 frames  worst 3149ms
+// Both builds fail, by the same margin, in both directions. The statistic has
+// no power to separate them, so gating on it only teaches a contributor to run
+// this tool and ignore its verdict -- which is worse than not gating, because
+// the day it reports something real nobody will look.
+//
+// What survives here is what a display cannot fake: the sim keeping up, real
+// mouse events reaching the tether, and audio starting from a real gesture.
+// Those are this tool's actual job -- it is the only thing that runs the
+// production path at all -- and none of them depend on the compositor. CPU and
+// GPU budgets are gated authoritatively in check.mjs, which measures work done
+// rather than the gap between rAF callbacks, and takes best-of-N minimums.
+const pace = [];
+if (out.medianMs > 20) pace.push(`median frame ${out.medianMs}ms (${out.fps} fps)`);
+if (out.stallsAfterWarmup > (out.frames - 30) * 0.05)
+  pace.push(`${out.stallsAfterWarmup} frames over 40ms after warm-up, worst ${out.worstAfterWarmupMs}ms`);
+if (pace.length) {
+  console.log(`\n  TREND (not gated, see comment)  ${pace.join('; ')}`);
+  console.log('  Judge pacing on a machine with a display; check.mjs owns the budgets.');
+}
 
 if (problems.length) {
   console.error('\nFAILED\n' + problems.map((p) => '  - ' + p).join('\n'));

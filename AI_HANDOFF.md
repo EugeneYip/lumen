@@ -473,12 +473,23 @@ Longer-standing items:
   slow things down — but a minimum over a contended window is still not the
   same as an idle measurement. Sequence perf work alone.
 - **Frame pacing cannot be measured authoritatively without a display.**
-  `playtest.mjs` drives the real rAF loop with real mouse events and reports a
-  roughly 60/40 split between 16.7ms and 33.3ms frames, but headless Chrome has
-  no display and its compositor halves the rate on its own. The budgets
-  underneath are comfortable and measured: CPU ~5.6ms per frame of which the 2D
-  HUD is ~0.5ms, and the GL chain ~2-3.4ms at 1280x720 with `gl.finish()`.
-  Someone should confirm real pacing on a machine with a screen; nothing here can.
+  `playtest.mjs` drives the real rAF loop with real mouse events, but headless
+  Chrome has no display and its compositor halves the rate on its own. It used
+  to *fail the run* on that, three lines after printing a note saying the number
+  could not be trusted. Interleaved runs of HEAD against a control commit from
+  before a whole round of rendering work — old, new, old, new, same minute —
+  failed both builds by the same margin and in both directions, so the statistic
+  has no power to separate them. Pacing is now **reported as a trend, not
+  gated**; what `playtest.mjs` still fails on is what a display cannot fake —
+  the sim keeping up, real mouse events reaching the tether, and audio starting
+  from a real gesture. Those are its actual job, since it is the only thing that
+  runs the production path at all.
+  The budgets underneath are comfortable and measured, and `check.mjs` owns
+  them because it measures work done rather than the gap between rAF callbacks:
+  CPU ~5.6ms per frame of which the 2D HUD is ~0.5ms, and the GL chain ~2-3.4ms
+  at 1280x720 with `gl.finish()`.
+  Someone should still confirm real pacing on a machine with a screen; nothing
+  here can. **Do not re-gate it without evidence that the number discriminates.**
 - **`tools/_*` are scratch instruments**, deliberately kept because they are how
   most real bugs here were found. Not tests, no pass/fail contract, may rot:
   `_probe.mjs` (level coverage, phrase mix), `_reach.mjs` (fairness against the
