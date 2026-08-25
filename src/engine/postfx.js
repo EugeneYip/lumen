@@ -64,6 +64,14 @@
 //      crushed the other. The window now follows the level of whatever layer it
 //      is sitting on, and the veil and the toe are driven by the same field -
 //      see FIELD_PRE_FS for what that field is and, importantly, what it is not.
+//   8. A defect that is not this file's got measured, twice, with a statistic
+//      that could not see it. Both times the conclusion was right and the
+//      evidence was noise, which is worse than being wrong quickly: it reads as
+//      settled and it is not. The tell is in the numbers themselves - if an
+//      ablation at 0x and the same ablation at 4x report the SAME value, the
+//      instrument is saturated by something else and neither number means
+//      anything. See ORIENT_FS for what it was measuring instead, and for the
+//      detector that does resolve a 2px line.
 import { compile, RenderTarget, drawFullscreen, FS_VS, GLSL_COMMON, Blend, texture2D } from './gl.js';
 
 const clampN = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -186,22 +194,60 @@ void main(){
 // be a property of the SOURCE instead of a property of the glass. A horizontal
 // bar across the frame is the one thing a bioluminescent organism cannot cast.
 //
-// This layer has now been blamed twice for the hard straight 'lavender streaks'
-// in the 450m frame, on the reasoning that a gaussian along a line's own axis
-// brightens the line without blurring across it - which is true, and is not
-// what draws them. Ablated on seed 7 at 450m, measuring the ruled-line ridge
-// energy (L minus the mean of its neighbours 3px either side, p99.9) over the
-// violet field: 43.60 at ship, 43.53 with uStreakAmt forced to zero, 43.68 with
-// it at 4x. That is 0.2%, which is nothing. Two reasons it cannot be this
-// layer, both worth keeping: the ridge field and the smear run at QUARTER res,
-// where a 1.5px full-res line is sub-texel and mostly gone; and those lines sit
-// far below uThreshold, so the only part of them that reaches the mip chain at
-// all is the uFloor veiling term at 1.8% amplitude. The artefact is in the
-// linear HDR scene BEFORE this file runs - read post.scene back and it is
-// already there, ?noSprites=1 removes it and ?noRibbons=1 does not, and
-// per-layer difference imaging puts it on atlas layer S.SHARD. Postfx's only
-// effect on it is that the soft layers partly HIDE it: ridge p99.9 rises from
-// 43.60 to 52.98 with veil, halo and grain ablated. Fix it where it is drawn.
+// This layer has now been blamed three times for the dead-straight ruled
+// diagonals in the 450m and 1000m frames, on the reasoning that a gaussian
+// along a line's own axis brightens the line without blurring across it, so a
+// faint straight feature would feed on itself. The reasoning is sound. It is
+// still not what draws them, and the case is now closed with an instrument
+// that can actually see the thing being argued about.
+//
+// Read the earlier ablation here as a warning, because it was right by luck.
+// It scored the artefact as the p99.9 of a vertical high-pass over the violet
+// field and got 43.60 / 43.53 / 43.68 at 1x / 0x / 4x streak. Those numbers are
+// not evidence. That statistic is reporting the GRAIN: ablate the grain alone
+// and the same number falls 32%, while a 4x change in this layer moves it by
+// 0.0%. A per-pixel percentile cannot resolve a 2px line - it returns whichever
+// of line and noise is larger, and here that is always the noise.
+//
+// What does resolve it: shear-average the window ALONG a candidate slope first,
+// which suppresses per-pixel grain by sqrt(N) while a coherent line keeps its
+// full amplitude, then high-pass across, and take the best response over slopes.
+// On seed 7 at 450m over x 2-130, y 140-340 that locks onto the line at slope
+// -0.25, y 194, and reports (code values, each against the window's own level,
+// so dimming the frame cannot flatter it):
+//
+//   linear HDR scene, before this file   1.263e-2 over 3.69e-2  rel 0.342
+//   final frame                          4.603    over 19.93    rel 0.231
+//   uStreakAmt = 0                       4.603       bit-identical
+//   uStreakAmt = 4x                      4.603       bit-identical
+//   ?noSprites=1                         gone - the best remaining response in
+//                                        the window is a different feature at a
+//                                        different slope, 1.77
+//
+// The levels drift as the scene is edited by its own owner; the bit-identical
+// pair does not, and that is the part to trust. Re-derive rather than trust the
+// third decimal, and if a re-run ever shows 0x and 4x differing, the instrument
+// changed, not the conclusion.
+//
+// So the line is in the scene at 34% local contrast and this file delivers it
+// at 23%: postfx ATTENUATES it by a third, and by 59% at 1000m. Nothing in here
+// amplifies it. The largest single-ablation move is +19% from switching the
+// lens softening off, and every operator that moves it at all moves it UP when
+// removed, so each is currently hiding it a little. ?noRibbons=1 leaves it
+// untouched; under ?debugLayers=1 the raw scene ratio on it back-solves to
+// atlas layer 12, S.SHARD. It is a velocity-stretched shard quad, and it draws
+// over silhouettes because a sprite has no depth to test. Fix it where it is
+// drawn; there is no honest way to remove it from here, and dimming it until
+// something else hides it has already been tried twice and caught twice.
+//
+// The 'degenerate orientation in a flat field' half of that hypothesis is real,
+// and is already answered by the design. Over the violet wash the doubled-angle
+// vector does come back unit length - an arbitrary axis, locally coherent,
+// exactly as predicted. It is never used, because the reach is driven by the
+// GATE and not by the axis: k there has max 0.0033 and mean 3.1e-5, and this
+// layer's own output over those texels peaks at 3.9e-6 against the veil's
+// 5.3e-3 at the same pixels. The smear's tail does not escape its gate. In a
+// field with no ridge there is no tail.
 //
 // The operator is the Hessian of compressed luminance, not a structure tensor,
 // and that distinction is the whole design. A structure tensor measures edges,
@@ -470,7 +516,7 @@ uniform float uToeRange, uOcclToe, uShelfTrack, uShelfBias, uShelfLo, uShelfHi, 
 uniform vec3  uShadowTint, uHighTint, uLiftCol;
 uniform vec3  uAbsorb, uScatterCol;
 uniform float uScatter, uScatterEdge, uScatterBase;
-uniform float uGrain, uGrainChroma, uGrainCoarse;
+uniform float uGrain, uGrainChroma, uGrainCoarse, uGrainNear, uGrainFar;
 uniform float uFlash;  uniform vec3 uFlashCol;
 uniform float uFade, uDesat, uHush;  uniform vec3 uHushTint;
 uniform vec4  uWave0, uWave1;
@@ -869,16 +915,37 @@ void main(){
   //     says near geology, fine where it says far or medium. That is the honest
   //     version of 'grain coarsens toward the viewer' - the proxy is contrast
   //     amplitude, not distance, so it gets the wall planes and the decor right
-  //     and calls a smooth near surface far. Amplitude comes down as the clump
-  //     grows, because a lower-frequency clump at equal amplitude reads as more
-  //     grain, not as bigger grain. ---
+  //     and calls a smooth near surface far.
+  //
+  //     AMPLITUDE rides it too now, and that is the free half of atmospheric
+  //     perspective: a far plane is seen through more water, so its texture is
+  //     scattered out of it along with its contrast. This used to run the other
+  //     way round - near geology was DIMMED 18% to pay for its coarser clump,
+  //     which left the FAR planes carrying the loudest grain in the frame and
+  //     inverted the depth cue it was supposed to support. Measured on the field
+  //     itself, the range channel puts rangeK at about 0.03 on an unmodelled far
+  //     wall and 0.79-1.00 on near striation, so the two ends land on the two
+  //     families almost cleanly and the smooth-near-surface miss documented in
+  //     FIELD_PRE_FS costs only grain, which a smooth surface should not have
+  //     much of anyway.
+  //
+  //     Two things this deliberately does not do. It does not go to zero far
+  //     away - the TPDF below is the anti-banding guard, but a far gradient with
+  //     no emulsion left on it reads as vinyl rather than as distance. And it is
+  //     not the reason a lit surface can look flat: that was asked, so it is
+  //     measured rather than argued. Differencing the finished frame against
+  //     grain=0 over near rock gives 1.26 code values RMS and 6.1 peak on a mean
+  //     of 28.8, so a +15 code-value lift from the mote sits about 12:1 over the
+  //     grain. The grain does composite on top of the surface lighting - it is
+  //     added after the sRGB encode, so it is literally the last thing in the
+  //     frame - and at that amplitude it cannot be what swallows a lift. ---
   float gs = hash11(floor(uTime * 24.0) + 0.5) * 311.0;
   float gsc = mix(1.0, uGrainCoarse, rangeK);
   float gn = grain(fc, gs, gsc);
   float gc = hash12(fc + gs * 1.7 + 3.71) - 0.5;
   float gl = dot(col, LUMA);
   float gw = smoothstep(0.014, 0.12, gl) * (1.0 - 0.62 * smoothstep(0.52, 1.0, gl));
-  gw *= mix(1.0, 0.82, rangeK);
+  gw *= mix(uGrainFar, uGrainNear, rangeK);
   col += (vec3(gn) + vec3(gc, 0.0, -gc) * uGrainChroma) * uGrain * gw;
 
   // Two uniforms make a triangular PDF, which unlike a single one does not
@@ -982,6 +1049,11 @@ export const GRADE = {
 
   grain: 0.048,
   grainChroma: 0.32,
+  // Grain amplitude across the near/far proxy. Near keeps roughly what it had
+  // (it was 0.82 there, paying for the coarser clump); far is what the depth
+  // cue buys, and it is a floor rather than zero - see the grain block.
+  grainNear: 0.86,
+  grainFar: 0.34,
   absorb: [0.070, 0.026, 0.016],
   scatter: 0.0022,
   scatterBase: 0.30,      // on-axis inscatter; the rest is path length
@@ -1260,6 +1332,8 @@ export class Post {
 
       grain: G.grain * (1 + deadK * 0.60 + slow * 0.35),
       grainChroma: G.grainChroma,
+      grainNear: G.grainNear,
+      grainFar: G.grainFar,
 
       // Pre-tonemap, so it rolls off instead of clipping. Modest: this is
       // added flat to every pixel before the curve.
@@ -1382,6 +1456,7 @@ export class Post {
     v3('uAbsorb', g.absorb); v3('uScatterCol', g.scatterCol);
     f('uScatter', g.scatter); f('uScatterBase', g.scatterBase); f('uScatterEdge', g.scatterEdge);
     f('uGrain', g.grain); f('uGrainChroma', g.grainChroma);
+    f('uGrainNear', g.grainNear); f('uGrainFar', g.grainFar);
     f('uFlash', g.flash); v3('uFlashCol', g.flashCol);
     f('uFade', g.fade); f('uDesat', g.desat); f('uHush', g.hush);
     v3('uHushTint', g.hushTint);
