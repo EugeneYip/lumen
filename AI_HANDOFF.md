@@ -581,6 +581,18 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **The far walls' remaining notch energy is silhouette, not fracture.** After
+  both far-wall fracture channels were fixed, roughly **47%** of the far walls'
+  `_hair.mjs` notch energy is neither of them — it is `ragged()`, the benches,
+  and the pendant/spire cell code (`if (ph > 0.42) top += ...`, cell widths 300
+  and 262). That is `bgNoBreak` territory. Two things follow. First, the floor
+  for any fracture work is **not** the `bgNoFar` number: a rock face legitimately
+  has notch energy in it, and chasing the statistic to the floor means deleting
+  the wall. Second, cell widths of 300 and 262 are exactly the shape that
+  produces a module-width tooth, and **that is worth checking before anyone
+  chases the fracture channels again** — see the branch-locus trap in §6, which
+  has now bitten four times.
+
 - **The documented "10-25 degrees" release window does not survive measurement,
   and the reason is interesting.** `README.md` states "the distance-optimal
   release is a narrow window 10-25 degrees ahead of the anchor".
