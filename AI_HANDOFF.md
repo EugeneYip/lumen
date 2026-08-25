@@ -461,32 +461,30 @@ Longer-standing items:
   better the curve gets easier. Re-run `tools/_probe.mjs` and `tools/_reach.mjs`
   after any physics change. `_reach.mjs` reports roughly one dead-end anchor per
   seed, which has never been triaged as tolerance-or-defect.
-- **Audio has never been verified by ear**, and until now it had not really been
-  verified at all: three of the four `tools/_audio.mjs` modes cancelled the
-  master gain ramp without setting a value, so they rendered digital silence and
-  reported it as a spectrogram. `tools/playtest.mjs` does confirm the autoplay
-  path works: audio initialises from a real gesture in a real loop.
-  With the rig fixed, a 44s session renders peak -1.3 dBFS, RMS -10.87, zero
-  clipped samples, correlation 0.359 at 32.4% side — a healthy master. The
-  per-sound table from `node tools/_audio.mjs oneshots` is where the real
-  problems are, and none of them need ears to establish:
-  1. **Nothing in the game produces energy above 8 kHz**, and only one sound
-     exceeds 0.3% in 4–8 kHz. The mix has no air at all. Band split of the
-     session is 65.6% below 250 Hz.
-  2. **Three sounds are out of phase and will partially cancel in mono** —
-     `start` at correlation -0.372 with 67.3% side energy, `death` at -0.31, and
-     `brush` at -0.013. Phones, laptops and Bluetooth speakers sum to mono.
-     `start` is also 85.2% below 250 Hz, so on a laptop speaker the first sound
-     the player ever hears is both rolled off and phase-cancelled.
-  3. **The core verbs are the quietest sounds in the game.** `attach` peaks at
-     -17.3 dBFS and `release` at -12.7, against `death` at -1.5 — a 16 dB spread
-     against the sound a player hears hundreds of times per run.
-  4. **Time-to-peak is 207–393 ms on attach, release, wall and start.** For a
-     game whose first pillar is FEEL and whose whole verb is one button, the
-     audio confirmation of a press arrives a quarter-second after it. Only
-     `pickup` is snappy, at 12 ms. Caveat: the column is time to peak, so a
-     deliberately swelling pad reads slow and is not necessarily wrong — but a
-     press with no transient at all cannot read in the wrists.
+- **Audio is measured now, but still not verified BY EAR, and one call needs a
+  human.** Until recently three of the four `tools/_audio.mjs` modes cancelled
+  the master gain ramp without setting a value, so they rendered digital silence
+  and reported it as a spectrogram; every earlier statement about this soundscape
+  rested on that. The rig now measures `monoFold` — the level actually lost
+  summing to mono, overall and per band — because **correlation is only a proxy
+  and it misled us once**: `brush` at correlation -0.013 looked like a defect and
+  folds at -3.02 dB, which is exactly what two decorrelated sources do. Only fold
+  loss worse than -3 dB is real.
+  Current state: every one-shot folds between -0.46 and -2.61 dB, all
+  correlations positive, session master peak -1.26 dBFS / RMS -10.76 / zero
+  clipped. The bed is still deliberately dark — above 4 kHz is 0.1% of session
+  energy — with HF confined to contact transients, on the argument that water
+  absorbs treble over distance and a contact on your own body is at zero
+  distance.
+  **The open question a number cannot settle:** whether `attach`'s new above-8 kHz
+  tick reads as a contact or as too clicky for an abyss. Every measurement says
+  it belongs. Someone should listen.
+  Two other things left standing: the master is squashed at a 9.5 dB crest factor
+  (peak -1.26 against RMS -10.76), which is pre-existing and is the next thing to
+  look at; and `brush` folds worst of the set at -2.61 dB, which is the
+  decorrelated floor for a wet sound and not a defect.
+  `tools/playtest.mjs` confirms the autoplay path: audio initialises from a real
+  gesture in a real loop.
 - **Never run a performance investigation alongside a capture-heavy agent.**
   Every agent here drives its own headless Chrome, and GPU contention has now
   produced false readings three times: a render budget measuring 7.9ms and
