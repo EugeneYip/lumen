@@ -509,6 +509,31 @@ const K = { SPARK: 0, BUBBLE: 1, CLOUD: 2, EMBER: 3, DART: 4, VORTEX: 5, COLD: 6
 // why grit stops dead and a bubble sails on.
 const dragFor = (base, size) => base * (12 / (size + 2));
 
+// ------------------------------------------------------------ the striation ---
+// A striation is a TORN TRAIN of three beads, not one stretched sliver. These
+// are a SHAPE, so they are a table rather than a formula, and every one of them
+// exists to stop three quads lining up into a rule:
+//   AL  along-axis position, in pitches   - unequal, so the train is not a comb
+//   LT  lateral throw, in bead heights    - THE fix; the centres leave the axis
+//   SZ  size                              - procgen with no variance reads as
+//                                           procgen
+//   LF  life                              - they die at different times, so the
+//                                           train tears instead of blinking out
+//   RJ  rotation offset, radians          - and they are not even parallel
+const STRIA_AL = [-0.58, 0.06, 0.60];
+const STRIA_LT = [0.84, -0.92, 0.46];
+const STRIA_SZ = [1.22, 0.94, 1.10];
+const STRIA_LF = [0.88, 1.00, 0.93];
+const STRIA_RJ = [-0.20, 0.06, 0.17];
+// 1.12^2 * (1.22^2 + 0.94^2 + 1.10^2): the train's drawn area in units of one
+// old sliver's s^2, with the aspect factored out. It is here so the brightness
+// term can carry the old element's light across EXACTLY - see the emitter.
+const STRIA_AREA = 4.49;
+// Shear along the train, per second, as a fraction of the along-axis offset.
+// The gaps open with time; the beads do not grow. That is the difference
+// between a streak that tears and one that stretches.
+const STRIA_TEAR = 0.55;
+
 const CFG = {
   attach: {
     spd: [70, 360], life: [0.24, 0.66], size: [4.5, 21], col: N_ANCH, hot: N_ANCHH,
@@ -580,6 +605,7 @@ export class Particles {
     this._t = 0;
     this._aWake = 0; this._aBub = 0; this._aSilt = 0; this._aGlow = 0; this._aPull = 0;
     this._aStria = 0;
+    this._recyc = 0;       // draw-free pool recycle cursor; see _spawnQuiet()
     this._side = 1;
     this._impSeq = -1; this._lchSeq = -1;
     this._pkScatX = -1e9;
@@ -625,6 +651,45 @@ export class Particles {
     this.wobA[i] = 0; this.delay[i] = 0; this.asp[i] = 1; this.lit[i] = 0;
     // Seed the cache now: a recycled slot's stale water could be from anywhere
     // in the trench, and it would be used for up to three steps.
+    waterAt(x, y, this._t);
+    this.wx[i] = flowX; this.wy[i] = flowY;
+    this.emitted++;
+    return i;
+  }
+
+  /**
+   * A spawn that consumes NO randomness.
+   *
+   * _spawn() takes one rng draw for a default rotation, which every caller with
+   * a real orientation overwrites on the very next line. That is free when an
+   * emission is one particle. It stops being free when an emission becomes a
+   * TRAIN of them: three draws where there was one shifts the whole stream and
+   * reshuffles every particle in the game. This file has already had a focal
+   * figure move 4.1 -> 3.9 from a single accidentally dropped draw, so beads
+   * after the first come through here and breaking a particle into pieces stays
+   * a pure geometry change.
+   *
+   * The full-pool branch recycles on a counter rather than on a draw for the
+   * same reason. It is unreachable in practice and that is measured, not
+   * assumed: peak occupancy over a full run is 504 on seed 7 and 662 on seed 3
+   * against a CAP of 4096. Six times of headroom is also why adding beads
+   * cannot push _spawn() into ITS draw-taking branch.
+   */
+  _spawnQuiet(x, y, vx, vy, life, s0, s1, col, bright, layer, drag, grav, spin) {
+    let i;
+    if (this.n < CAP) i = this.n++;
+    else i = this._recyc = (this._recyc + 1) & (CAP - 1);
+    this.x[i] = x; this.y[i] = y; this.vx[i] = vx; this.vy[i] = vy;
+    this.life[i] = life; this.max[i] = life;
+    this.size[i] = s0; this.size1[i] = s1;
+    this.r[i] = col[0]; this.g[i] = col[1]; this.b[i] = col[2];
+    this.bright[i] = bright; this.layer[i] = layer;
+    this.drag[i] = drag; this.grav[i] = grav;
+    this.rot[i] = 0; this.spin[i] = spin;
+    this.kind[i] = K.SPARK;
+    this.noHero[i] = this._noHero;
+    this.flow[i] = 1; this.cool[i] = 0; this.str[i] = 0;
+    this.wobA[i] = 0; this.delay[i] = 0; this.asp[i] = 1; this.lit[i] = 0;
     waterAt(x, y, this._t);
     this.wx[i] = flowX; this.wy[i] = flowY;
     this.emitted++;
@@ -1815,62 +1880,151 @@ export class Particles {
       //     runs roughly 1 : 4 : 12 across those three speeds - which is not a
       //     measurement, it is a difference in kind.
       //
-      //     Drawn as heavily sheared SMOKE on the FLANKS, never behind the
-      //     head: 90-330 units off the travel axis, which is outside every
-      //     radius the hero is measured against, and CLOUD-classed so the
-      //     mote's keep-out owns them anyway. Total light scales with the count
-      //     and not with the stretch - each streak's surface brightness is
-      //     divided by exactly the factor its quad is multiplied by - so a
-      //     motion cue cannot become a brightness cue behind our back.
+      //     A STRIATION IS A TORN TRAIN OF THREE PUFFS, and it is that because
+      //     the single stretched sliver it replaces was a ruled line. That
+      //     defect survived four consecutive blind reviews - "a dead-straight
+      //     ruled magenta diagonal crossing the violet wash" at the left of the
+      //     450m frame - and was twice "fixed" by dimming, which the reviewer
+      //     saw through both times: "fainter only because the darker Hush hides
+      //     them better. Not fixed, just camouflaged."
+      //
+      //     Here is the arithmetic that was missing. A SINGLE QUAD'S MEDIAL
+      //     AXIS IS A STRAIGHT LINE SEGMENT, and whatever a profile does across
+      //     its width is compressed by the aspect ratio - so at 13:1 every
+      //     transverse feature the texture has is thirteen times finer than the
+      //     thing's own length and what is left on screen is a rule. No choice
+      //     of layer fixes that. It is geometry, not art, and it is why the two
+      //     dimming rounds could not have worked.
+      //
+      //     SHARD made it worse than the quad's own number suggests. Its drawn
+      //     ribbon is an eighth of the quad height it is painted in, so an asp
+      //     of 13.5 drew a ribbon at about 107:1: 700 pixels long and seven
+      //     wide, laid across a flat violet field. It was chosen precisely
+      //     BECAUSE it "tapers at both ends and so cannot have a straight side
+      //     however far it is stretched" - which was true and beside the point.
+      //     It has no straight SIDE. It is nothing but a straight LINE.
+      //
+      //     So the fix is geometric, and it is this file's own precedent: the
+      //     Hush tendrils were rebuilt from cell-based points because a cell of
+      //     points cannot draw a line at all. One sliver becomes three short
+      //     SMOKE puffs - a profile that fills its quad, so its drawn aspect is
+      //     its quad's - thrown off the travel axis by most of their own
+      //     height. No straight line passes through more than one of them.
+      //
+      //     Two consequences, both checkable rather than argued:
+      //       - this file no longer draws atlas layer 12 anywhere, so the
+      //         false-colour instrument that named S.SHARD will now name
+      //         nothing here;
+      //       - measured with a detector that shear-averages along a candidate
+      //         slope BEFORE high-passing across it, the reported line at slope
+      //         -0.255 / y=195 of the seed 7 450m frame read 0.0172 against a
+      //         grain floor of 0.0045, and silencing this emitter alone took it
+      //         to 0.0059, i.e. to the floor. That is the number this had to
+      //         reach, and brightness was not allowed to be how it got there -
+      //         see the bright term, which conserves the old element's light to
+      //         the last photon.
+      //
+      //     Why four rounds missed it is worth as much as the fix. The earlier
+      //     ablation scored the artefact with the p99.9 of a vertical
+      //     high-pass, which reports the GRAIN: ablating grain moved it 32%
+      //     while a 4x change in this layer moved it 0.0%. AN ABLATION WHOSE 0x
+      //     AND 4x REPORT THE SAME VALUE HAS A SATURATED INSTRUMENT, and the
+      //     answer is to distrust the instrument, not to acquit the layer.
+      //     Shear-averaging first suppresses per-pixel grain by sqrt(N) while a
+      //     coherent line keeps full amplitude; nothing else made this visible.
+      //
+      //     Drawn on the FLANKS, never behind the head, and CLOUD-classed so
+      //     the mote's keep-out owns them anyway.
       this._aStria += dt * gk * gk * 21;
       if (this._aStria > 3) this._aStria = 3;
       while (this._aStria >= 1) {
         this._aStria -= 1;
-        // SHARD and not a stretched SMOKE, and the aspect is a third of what it
-        // was, both for the same measured reason. SMOKE's silhouette is a
-        // noise-eroded disc: stretch it 30:1 and the erosion runs along the
-        // length instead of across it, so what draws is a capsule with two
-        // straight sides and a dithered cap - which is exactly what a 3x crop
-        // of the 940 frame showed, four of them. SHARD is the kit's long
-        // sliver, tapering to nothing at BOTH ends over an envelope that
-        // narrows with it, so it cannot have a straight side however far it is
-        // stretched. It was documented "currently unused"; this is what it is
-        // for. The cue was never the aspect anyway - it is the COUNT.
-        const st = 1 + 1.5 * gk;
-        const side = r() < 0.5 ? -1 : 1;
-        // 140 units minimum, not 90, and the reason is a measurement: at 90 a
-        // striation's own block outranked the hero's on seed 3 / hushNear, which
-        // is the same defect the wake had and the same rule breaks it - nothing
-        // this file draws may be a brighter cluster than the animal that caused
-        // it. Water rushing past belongs beyond the hero's block anyway.
-        // 180 and not 140, which is bookkeeping rather than art: these are
-        // CLOUD-classed, so _clear() owns them, and a 33-unit striation
-        // stretched 4x has enough reach that anything inside about 240 units is
-        // suppressed to nothing. Emitting there spends pool and draws nothing.
-        const off = lerp(180, 430, Math.pow(r(), 0.8)) * side;
-        const back = (r() - 0.3) * 520;
-        const s0 = lerp(22, 44, r());
-        const j = this._spawn(
-          p.x - tx * back + nx * off, p.y - ty * back + ny * off,
-          tx * lerp(-40, 70, r()) + nx * (r() - 0.5) * 34,
-          ty * lerp(-40, 70, r()) + ny * (r() - 0.5) * 34,
-          lerp(0.5, 1.1, r()), s0, s0 * lerp(1.1, 1.5, r()),
-          // No SURF at all now. "Barely any" was already the right direction -
-          // the first version of this drew four desaturated grey-blue slabs to
-          // the left of the mote at 3x, the "flat hard rectangle" this file has
-          // a rule about - and the hue rule in the header finishes the job:
-          // pale teal is one step off moteOuter, so it belongs to the mote.
-          r() < 0.18 ? N_SILT : N_WATER,
-          lerp(0.13, 0.30, r()) / st, S.SHARD,
-          dragFor(4.0, s0), lerp(-6, 10, r()), 0
-        );
-        this.kind[j] = K.CLOUD;
-        this.flow[j] = lerp(1.1, 1.7, r());
-        this.cool[j] = lerp(0.3, 0.7, r());
-        this.asp[j] = lerp(3.2, 5.4, r()) * st;
-        // Tight to travel - a striation that wanders is a cloud. 0.22 radians
-        // of jitter is enough that thirty of them are not a comb.
-        this.rot[j] = travel + (r() - 0.5) * 0.22;
+        // DRAW ORDER IS FROZEN HERE. Every uniform below was already being
+        // drawn by the single-sliver version; they are hoisted into locals only
+        // so the train can be built from values that have already been paid
+        // for. Seventeen draws, then one more inside _spawn() for the first
+        // bead - exactly the eighteen this emission has always taken. The other
+        // two beads go through _spawnQuiet(), which takes none, so no particle
+        // anywhere else in the game moves.
+        const uSide = r(), uOff = r(), uBack = r(), uSz = r();
+        const uVa = r(), uVb = r(), uWa = r(), uWb = r();
+        const uLife = r(), uGrow = r(), uCol = r(), uBr = r(), uGrav = r();
+        const uFlow = r(), uCool = r(), uAsp = r(), uRot = r();
+
+        const side = uSide < 0.5 ? -1 : 1;
+        // 250-470 rather than 180-430, and the shift is bookkeeping against
+        // _clear() again - just in the other direction. The old inner bound was
+        // set where a 13x sliver's own reach suppressed everything anyway; a
+        // bead reaches a fifth of that, so the keep-out no longer does the work
+        // and the geometry has to. Water rushing past belongs beyond the hero's
+        // block, and now it is there because it was put there.
+        const off = lerp(250, 470, Math.pow(uOff, 0.8)) * side;
+        const back = (uBack - 0.3) * 520;
+        const s0 = lerp(22, 44, uSz);
+        const grow = lerp(1.1, 1.5, uGrow);
+        const life = lerp(0.5, 1.1, uLife);
+        const grav = lerp(-6, 10, uGrav);
+        const flow = lerp(1.1, 1.7, uFlow);
+        const cool = lerp(0.3, 0.7, uCool);
+        // No SURF, and no planktonCore either: pale teal is one step off
+        // moteOuter, so it belongs to the mote. Silt and deep water only.
+        const col = uCol < 0.18 ? N_SILT : N_WATER;
+        const vx = tx * lerp(-40, 70, uVa) + nx * (uVb - 0.5) * 34;
+        const vy = ty * lerp(-40, 70, uWa) + ny * (uWb - 0.5) * 34;
+        const rot = travel + (uRot - 0.5) * 0.22;
+
+        // The bead. asp is the QUAD's aspect and SMOKE fills its quad, so this
+        // is also very nearly the DRAWN aspect - which is the whole reason the
+        // layer changed. The recorded objection to SMOKE was that stretching it
+        // 30:1 leaves a capsule with two straight sides; the conclusion drawn
+        // from that was to find a profile that survives 30:1, and the right one
+        // was not to go anywhere near it.
+        const asp = lerp(1.9, 2.6, uAsp);
+        const sB = s0 * 1.12;
+        // AND THIS IS WHERE THE SPEED WENT. The train is torn further APART at
+        // speed instead of being drawn longer: at the bottom of the cruise the
+        // three beads overlap into one ragged streak, at the top they stand off
+        // by most of their own length. A gap cannot become a ruled line however
+        // far it is opened, which is exactly the property the stretch it
+        // replaces did not have - and it obeys the file's own rule that a
+        // length cue is bought with anything except stretch.
+        const pitch = sB * asp * (0.86 + 0.80 * gk);
+        // Per-striation scramble of the bead pattern, reused from an already
+        // drawn uniform rather than drawn - see the draw-order note.
+        const th = 0.62 + 0.76 * uGrav;
+        // Light carried across EXACTLY, so this is a shape change and not a
+        // brightness one. The old element's energy was b * s^2 * qa, the *st on
+        // its aspect and the /st on its tint having cancelled; the train's is
+        // b' * s^2 * STRIA_AREA * asp. Dividing one by the other is the whole
+        // term. It comes out at 0.049-0.139 surface brightness against the
+        // sliver's 0.052-0.12 at the cruise, so nothing here is hiding behind
+        // the Hush this time.
+        const bright = lerp(0.13, 0.30, uBr) * lerp(3.2, 5.4, uAsp)
+          / (STRIA_AREA * asp);
+
+        for (let k = 0; k < 3; k++) {
+          const sk = sB * STRIA_SZ[k];
+          const al = STRIA_AL[k] * pitch;
+          const lt = STRIA_LT[k] * sk * th * side;
+          // The tear, as a velocity gradient along the train rather than a
+          // scripted growth: the trailing bead falls back, the leading one
+          // runs on, and the gaps open over the life. Secondary motion, and it
+          // costs one multiply.
+          const bvx = vx + tx * al * STRIA_TEAR;
+          const bvy = vy + ty * al * STRIA_TEAR;
+          const bx = p.x - tx * back + nx * off + tx * al + nx * lt;
+          const by = p.y - ty * back + ny * off + ty * al + ny * lt;
+          const j = k === 0
+            ? this._spawn(bx, by, bvx, bvy, life * STRIA_LF[k], sk, sk * grow,
+              col, bright, S.SMOKE, dragFor(4.0, sk), grav, 0)
+            : this._spawnQuiet(bx, by, bvx, bvy, life * STRIA_LF[k], sk, sk * grow,
+              col, bright, S.SMOKE, dragFor(4.0, sk), grav, 0);
+          this.kind[j] = K.CLOUD;
+          this.flow[j] = flow;
+          this.cool[j] = cool;
+          this.asp[j] = asp;
+          this.rot[j] = rot + STRIA_RJ[k] * th;
+        }
       }
 
       // --- gas shed at speed: cavitation off something moving fast
