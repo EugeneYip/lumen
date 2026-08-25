@@ -581,6 +581,33 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **On a portrait phone, two thirds of the screen is rock.** The viewport meta in
+  `index.html` (`user-scalable=no, viewport-fit=cover`) and the unified
+  mouse/touch/key path in `input.js` both say mobile is intended, but every
+  capture in this project is 1600x900 and nothing tests a tall aspect.
+  `src/game/camera.js:61-68` pins the horizontal extent for tall windows —
+  `if (aspect < 1.2) viewW = DESIGN_H * 1.2` — and lets the vertical blow out.
+  Computed at zoom 1 against a 1050-unit swimmable band:
+
+  | aspect | viewW | viewH | lookahead | band as % of view height |
+  |---|---|---|---|---|
+  | desktop 16:9 | 1920 | 1080 | 960 | **97.3%** |
+  | phone landscape | 2339 | 1080 | 1169 | 97.3% |
+  | square | 1296 | 1296 | 648 | 81.0% |
+  | tablet 3:4 | 1296 | 1728 | 648 | 60.8% |
+  | phone portrait 375x812 | 1296 | 2806 | 648 | **37.4%** |
+
+  Landscape is fine at any phone size. Portrait is the problem: the playfield
+  occupies 37% of the screen, the mote is tiny, and the rest is trench wall.
+  Lookahead is 648 against 960, a 1.48x disadvantage — real but bounded, and much
+  smaller than it first appears.
+  **A caution, because I made this mistake myself:** measuring `cam.viewH` live at
+  two window sizes compares two different zoom states — the speed zoom moves it a
+  long way — and that made the gap look like 4x. Compute the aspect cases at a
+  fixed zoom from the formula instead, which is what the table above does.
+  Unresolved. The honest options are to fit the band vertically on tall aspects
+  and accept less lookahead, or to tell the player to rotate. Nobody has decided.
+
 - **`tools/_*` are scratch instruments**, deliberately kept because they are how
   most real bugs here were found. Not tests, no pass/fail contract, may rot:
   `_hair.mjs` (ruled-hairline notch energy over a region — the instrument the
