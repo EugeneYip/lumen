@@ -60,6 +60,9 @@ const BUDGET = {
   // frame by highlight energy, which is the question a player scanning a still
   // actually asks.
   moteRankMax: 3,
+  // NOTE: there is deliberately no detail threshold. See the `detail` column,
+  // which is reported as a trend line only -- and read the note in AI_HANDOFF
+  // section 8 about why a frame-wide statistic cannot gate craft.
 };
 
 /**
@@ -219,6 +222,40 @@ for (const seed of SEEDS) {
             }
           } catch { /* mote off-screen */ }
 
+          // Local structure, measured at NATIVE resolution. The 192x108 sample
+          // above is right for distribution and rank but useless here: at a
+          // 6.7x downsample a prop's beaded filaments are sub-pixel, and a
+          // frame-wide mean over that sample was measured to be identical
+          // across a build where a reviewer could plainly see one prop go from
+          // filaments to airbrush. So this takes its own full-size pass.
+          //
+          // It reports the 90th percentile rather than the mean, because the
+          // defect is localised — a handful of props smoothed out barely moves
+          // an average dominated by grain and rock, but it does move the top of
+          // the distribution, which is where crisp structure lives.
+          let detail = 0;
+          {
+            const f = document.createElement('canvas');
+            f.width = src.width; f.height = src.height;
+            const fx = f.getContext('2d', { willReadFrequently: true });
+            fx.drawImage(src, 0, 0);
+            const fd = fx.getImageData(0, 0, f.width, f.height).data;
+            const W2 = f.width, H2 = f.height;
+            const lum = new Float32Array(W2 * H2);
+            for (let i = 0, j = 0; i < fd.length; i += 4, j++) {
+              lum[j] = (fd[i] * 0.2126 + fd[i + 1] * 0.7152 + fd[i + 2] * 0.0722) / 255;
+            }
+            const laps = [];
+            for (let yy = 1; yy < H2 - 1; yy += 2) {
+              for (let xx = 1; xx < W2 - 1; xx += 2) {
+                const i = yy * W2 + xx;
+                laps.push(Math.abs(4 * lum[i] - lum[i - 1] - lum[i + 1] - lum[i - W2] - lum[i + W2]));
+              }
+            }
+            laps.sort();
+            detail = laps.length ? laps[Math.floor(laps.length * 0.90)] : 0;
+          }
+
           let shadow = 0;
           for (let i = 0; i < n; i++) if (vals[i] < 8 / 255) shadow++;
           const shadowFrac = shadow / n;
@@ -226,7 +263,7 @@ for (const seed of SEEDS) {
           vals.sort();
           const q = (p) => vals[Math.min(n - 1, Math.floor(p * n))];
           return { mean: sum / n, max, clipped: clipped / n, black: black / n,
-            shadowFrac, contrast, moteRank, blockCount,
+            shadowFrac, contrast, moteRank, blockCount, detail,
             p20: q(0.2), p50: q(0.5), p90: q(0.9), p95: q(0.95), p99: q(0.99) };
         });
 
@@ -426,7 +463,7 @@ if (JSON_OUT) {
       if (v.hdr) console.log(`  ${(sc + ' hdr').padEnd(11)} p50 ${v.hdr.p50}  p90 ${v.hdr.p90}  p99 ${v.hdr.p99}  max ${v.hdr.max}   (linear, pre-tonemap)`);
       console.log(`  ${sc.padEnd(11)} mean ${v.mean.toFixed(4)}  p50 ${v.p50.toFixed(3)}  spread ${(v.p95 - v.p20).toFixed(3)}` +
         `  shadow ${((v.shadowFrac || 0) * 100).toFixed(1)}%  focal ${v.contrast ? v.contrast.toFixed(1) + ':1' : '--'}` +
-        `  rank ${v.moteRank != null ? v.moteRank + '/' + v.blockCount : '--'}` +
+        `  rank ${v.moteRank != null ? v.moteRank + '/' + v.blockCount : '--'}  detail ${(v.detail || 0).toFixed(4)}` +
         `  clipped ${(v.clipped * 100).toFixed(2)}%  black ${(v.black * 100).toFixed(1)}%  (${v.depth}m)`);
     }
   }

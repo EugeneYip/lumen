@@ -328,6 +328,25 @@ of some frames is dead space; and there is no depth-absorption gradient, so far
 and near read at the same contrast despite `palette.js` providing `depthFade`
 and `absorb` and every decor item carrying a `depth` field.
 
+**A negative result worth not repeating: frame-wide statistics cannot gate
+craft.** Two rounds regressed by over-optimising a one-sided target — chasing
+the shadow floor deleted a wall plane, and chasing hero salience by capping peak
+values flattened hand-placed coral and anemone props into airbrush. The obvious
+response is a counterweight metric, and it was tried: mean absolute Laplacian,
+then the 90th percentile at native resolution. **It does not work.** Measured
+across the exact pair of builds where a reviewer could plainly see one prop go
+from beaded filaments to a gas cloud, the number moved about 1% — consistent in
+direction across all five scenes, far too small to gate on. The defect occupies
+a fraction of a percent of the frame and any frame-wide statistic is swamped by
+grain and rock.
+
+The `detail` column is kept as a reported trend line, not a threshold. **The
+instrument that actually catches this class of defect is the blind review** —
+it caught both regressions, and neither was visible in any number. That is the
+argument for keeping `tools/CRITIC.md` in the loop rather than treating the gate
+as sufficient. A metric can prove a specific claim; only a reviewer notices what
+nobody thought to measure.
+
 Longer-standing items:
 
 - **Named scenes are seeked in sequence, so a later scene can land on the frame
