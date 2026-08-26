@@ -84,6 +84,25 @@
 //    could be bought with instead, untried: the element PITCH, which is
 //    currently a constant on screen (one per TRAIL_GAP of travel at every speed)
 //    and is the one spatial magnitude an arc does not compress.
+//  - AND TWO WAKE ARTEFACTS A REVIEW BLAMED ON "THE TRAIL SYSTEM" ARE NOT IN
+//    THIS FILE. Recorded here because this is where the next person will look.
+//    Attributed by elimination, not by reading code (AI_HANDOFF §7):
+//      "a dead-straight, uniform-width blue line running horizontally 550px
+//      across its own wake - a stale trail sample that never faded."
+//    It survives ?noRibbons=1, dies under ?noSprites=1, and under
+//    ?debugLayers=1 it false-colours as atlas layer 19, S.ANAMORPH. Silencing
+//    THIS FILE's draw entirely leaves it exactly where it was. It is the mote's
+//    own anamorphic bleed in render.js step 10 - one quad at
+//    `alen = R * (2.2 + sk*40 + lg*44)`, centred at `p.x - dx*alen*0.40`, so it
+//    reaches 0.9 of its length behind the mote and 0.1 ahead of it, which is
+//    why it looks like a trail with a little overshoot. It is not stale and it
+//    is not a sample: it is a stretched quad, its medial axis IS a segment, and
+//    its length is proportional to speed - which is also why the review's two
+//    builds showed it at "550px" and "about half the length".
+//      "a hard angular kink partway along - a polyline showing its vertices"
+//    is the ribbon in render.js `_trail()` over `player.trailPts`, visible on
+//    its own under ?noSprites=1, along with the butt cut at its trailing end.
+//    Neither is reachable from here. Do not spend a round looking.
 //  - AND SPEED IS ALSO ONSET, WHICH NOTHING HERE WAS SAYING. gearK and spdK are
 //    both functions of speed alone, so a steady 30 m/s and a just-released
 //    30 m/s drew the identical frame; feeling speed is largely feeling change.
@@ -99,6 +118,12 @@
 //    the frame its own in-frame reference: a long near stroke, a short mid one
 //    and a round far speck, all in one image, so nothing has to be remembered
 //    from another frame to order them.
+//    ...AND THAT ORDERING DID NOT EXIST INSIDE THE LAYER ITSELF until it was
+//    measured. Every depth term in Ambient.draw is already clamped by z = 0.63
+//    and stays clamped all the way in, so across 0.10-0.24 the band varied in
+//    SCROLL RATE and in nothing else - and a scroll rate is invisible in a
+//    still. See the depth ramp in the RUSH branch of draw() for the numbers and
+//    for what they now read.
 //  - NOTHING THIS FILE DRAWS MAY BE A BRIGHTER CLUSTER THAN THE ANIMAL THAT
 //    CAUSED IT. Stated as art it is obvious; it is here because it is also a
 //    measurement, and the measurement caught two violations this pass. The
@@ -2606,7 +2631,15 @@ export class Ambient {
     // itself. Attribute a statistic to the thing you changed LAST, not to the
     // thing you changed first.
     const n0 = Math.max(1, Math.round(count * 1.7));
-    const nR = Math.round(count * 0.31);
+    // 0.31 -> 0.46, i.e. 65 individuals to 97. Appended, so this is one of the
+    // few counts in the file that can be raised without moving anything: the
+    // first n0 iterations and the first 65 RUSH individuals draw exactly the
+    // uniforms they drew before, in the same order, and only new ones follow.
+    // Bought because count is the orderable quantity (see the header) and
+    // because the recruitment spread below now reaches further up the speed
+    // range, which costs population at any given speed if the population does
+    // not grow to meet it.
+    const nR = Math.round(count * 0.46);
     const n = n0 + nR;
     this.n = n;
     const f = (k) => new Float32Array(k);
@@ -2757,6 +2790,26 @@ export class Ambient {
         // level - it is bought with 63 objects whose count, alignment and
         // radial gradient carry it - but the objects are not free and this is
         // what they cost. Do not spend it again without re-measuring.
+        //
+        // ...AND THE BRACKET CAME DOWN TOO FAR. Re-measured with a draw-time
+        // tint scale (no RNG churn, so the compared frames hold the identical
+        // field) on seed 7 at 120/400/900m, counting pixels this species moves
+        // by at least N display levels out of 255, HUD rows excluded:
+        //
+        //     scale   max delta   px >= 2    px >= 8   frame mean
+        //       1x      41-50      26k-41k   3.6k-6.0k   +0.24..0.42%
+        //       2x      64-81      35k-55k   6.3k-10k    +0.45..0.76%
+        //       3x      81-98      42k-65k   8.3k-14k    +0.65..1.05%
+        //       4x      96-112     47k-73k  10k-16k      +0.83..1.31%
+        //
+        // Looked at rather than inferred: at 1x the strokes are findable if you
+        // know where to look and invisible if you do not, at 4x the field is
+        // unmistakably combed. So the shape finding above still stands and the
+        // level was still short. What is NOT done here is a flat multiply -
+        // see the depth ramp in draw(). A uniform lift is a veil again, just a
+        // brighter one; the level is spent on the NEAR end, which is the end
+        // that is supposed to be loud, and taken off the far end, which is
+        // supposed to be quiet.
         this.br[i] = lerp(0.72, 1.80, r());
         this.el[i] = lerp(1.5, 2.3, r());
         this.rs[i] = (r() - 0.5) * 0.20;
@@ -2934,7 +2987,16 @@ export class Ambient {
       // combed along one axis can be ordered cold, and unlike a length it
       // cannot be confused with a change of scale.
       const moves = k !== AK.LARVA && k !== AK.ORG;
-      const sh = (smr > 0 && moves) ? smr * clamp01((1.12 - z) / 0.66) : 0;
+      // ...and NOTHING IS ALLOWED TO BE COMPLETELY STILL. The depth taper used
+      // to reach exactly zero at z = 1.12, and pz is lerp(0.30, 1.75, r^1.22),
+      // so 37.6% of the ambient field had no shear and no alignment at any
+      // speed whatsoever - a third of the drifters frozen in a frame whose
+      // whole subject is motion, which is a fair reading of a review saying
+      // the motion is confined to one corner. A floor of 0.16 leaves the
+      // near/far ratio at 6.3:1, which is still a gradient by any measure, and
+      // it costs NOTHING: every elongation goes through aniso(), which is
+      // area-preserving, so this moves silhouettes and not one photon.
+      const sh = (smr > 0 && moves) ? smr * (0.16 + 0.84 * clamp01((1.12 - z) / 0.66)) : 0;
       let ax = this.el[i];
       if (sh > 0) {
         ax *= 1 + sh * (k === AK.FAT ? 3.4 : 5.2);
@@ -2985,7 +3047,33 @@ export class Ambient {
         // saturated a third of the way up the cruise. 0.06-0.76 puts half the
         // species on at 700 and all of it at 1120, i.e. the count DOUBLES across
         // exactly the 700-940 band a review called interchangeable.
-        const onLo = 0.06 + 0.70 * this.pp[i] * 0.15915494;
+        // ...and 0.76 was still short of the top. Measured by driving the real
+        // Ambient.draw at injected speeds with the surge held at zero, the
+        // population read 0, 0, 1, 16, 41, 62, 63, 63, 63 across 150-2100
+        // units/sec: every stroke was recruited by 1000, i.e. by 100 m/s, and
+        // a review asking for "dense at 165 m/s" was asking for a band in
+        // which nothing moved any more. 0.05-0.93 keeps the whole curve alive
+        // to the top of the speed range - the top strokes arrive dim rather
+        // than not at all, because `on` is a ramp and not a switch.
+        //
+        // Measured through the real draw, before -> after, seed 7 at 400m:
+        //
+        //   m/s     15   31   52   70   84  100  125  165  210
+        //   before   0    0    1   16   41   62   63   63   63
+        //   after    0    0    2   19   49   80   89   95   95
+        //   train px (median)   before 100 118 139 147 150 150
+        //                       after  111 131 131 133 141 141
+        //   train px (longest)  before 165 211 238 249 256 256
+        //                       after  183 262 341 358 369 369
+        //
+        // Still exactly zero below 31 m/s on both builds, which is the half of
+        // the review's ask that was already satisfied and must not be lost:
+        // seed 3 at 900m (27 m/s) differences to ZERO changed pixels against
+        // the previous build, so the layer is provably absent there rather than
+        // merely dim. The median train barely moves and the longest one grows
+        // 1.44x - that is the depth ramp doing its job, not a length cue going
+        // soft: the near strokes take the length and the far ones give it back.
+        const onLo = 0.05 + 0.88 * this.pp[i] * 0.15915494;
         // ...and the ONSET moves the threshold, not the brightness. A surge
         // recruits strokes that were not there a sixth of a second ago, which is
         // the difference between "you are going 30 m/s" and "you just got to
@@ -3015,9 +3103,86 @@ export class Ambient {
           const rdx = x - this._kx, rdy = y - this._ky;
           const rd = Math.sqrt(rdx * rdx + rdy * rdy) * radInv;
           per = rd < 1 ? rd : 1;
-          per = 0.07 + 0.93 * per * per;
+          // Floor 0.07 -> 0.02, and it is bookkeeping rather than art: the
+          // depth ramp below multiplies the near end of the band by 3.4, so a
+          // floor left where it was would have put 3.4x as much light in the
+          // one annulus the focal metric is taken over. seed 7 / fast measures
+          // focal contrast 4.0:1 against a floor of 4.0 and has no headroom in
+          // either direction, so the pocket has to deepen by exactly what the
+          // field gains. 0.02 * 3.4 = 0.068, i.e. the hero's neighbourhood is
+          // left where it was to within a percent while the frame edge - the
+          // part that is supposed to be moving - takes the whole increase.
+          per = 0.02 + 0.98 * per * per;
         }
         gate *= per;
+        // ------------------------------------------------ and DEPTH, at last ---
+        // THIS LAYER HAD NO PARALLAX INSIDE ITSELF, and that is a measurement
+        // rather than a judgement. Every depth-driven term in Ambient.draw is
+        // SATURATED across the whole RUSH band, all three of them by arithmetic
+        // that is certain rather than sampled:
+        //
+        //   g    = min(iz*iz, 2.5)          z <= 0.24 gives iz*iz >= 17, so the
+        //                                   brightness clamp is hit by every
+        //                                   individual and cannot vary with z;
+        //   fade = clamp01((z-0.32)/1.45)   exactly 0 for the whole band, so no
+        //                                   depth absorption either;
+        //   sh   = smr * clamp01((1.12-z)/0.66)   1.33-1.55 before the clamp.
+        //
+        // So the layer spanned 0.10-0.24 in SCROLL RATE and in nothing else.
+        // Measured over the three depth thirds of the band at 165 m/s, mean
+        // train extent ran near 162.5px / mid 166.0px / far 129.3px and mean
+        // peak tint near 0.0619 / mid 0.0604 / far 0.0640 - near and mid
+        // identical, and the FAR strokes marginally the brightest, which is
+        // backwards from both the optics and the review's own prescription
+        // ("near strokes long, fast and soft-edged; far strokes short and
+        // faint").
+        //
+        // nz is the band's own depth key, 1 at the camera. It is squared for
+        // the level so the bright end is a minority - a gradient a viewer can
+        // see needs its extremes separated, not its average moved - and left
+        // linear for the length. Mean over a uniform band is 0.55 + 4.05/3 =
+        // 1.90x of light for an 8.4:1 near-to-far ratio, where a flat 1.90x
+        // multiply would have bought 1:1.
+        //
+        // BRACKETED, from the near end rather than from the mean. Measured mean
+        // peak tint of the three depth thirds at 165 m/s, near / mid / far:
+        //
+        //   before                      0.0619 / 0.0604 / 0.0640   (backwards)
+        //   0.62 + 2.78 nz^2            0.1427 / 0.0604 / 0.0404
+        //   0.55 + 4.05 nz^2  (here)    0.1881 / 0.0742 / 0.0388
+        //
+        // so the near end is 3.04x what the review called "the right idea at
+        // the wrong amplitude" - the "roughly 3x under" hypothesis measured
+        // rather than applied - and the ordering is now near > mid > far, at
+        // 4.8:1 across the band, where it used to be flat and slightly
+        // inverted. The step from 2.78 to 4.05 cost +0.15% of frame mean and
+        // bought 17% more moved pixels, so the curve is still linear and there
+        // is more available: the next principled stop is near = 6.0, where the
+        // nearest strokes cross 0.25 linear and become HIGHLIGHTS in the
+        // exposure contract's own units while the far end stays in the water
+        // band. It was not taken here because the failure this layer has
+        // already had once is a veil, a still frame cannot show a veil, and
+        // three of the four cues asked for (count, parallax, taper) are shape
+        // rather than level. Take it only with a blind review, not with a
+        // statistic.
+        //
+        // What the whole pass cost, tonemapped frame mean against the identical
+        // simulation on the previous build (verified byte-identical: every
+        // captured `summary` line matches, so nothing here reached the sim):
+        // title 0.0979 -> 0.0979 and 0.1075 -> 0.1075, i.e. EXACTLY nothing at
+        // rest; seed 7 fast +0.92%, launch +0.85%, hushNear +0.12%, hazardNear
+        // +0.72%; seed 3 fast +1.53%, launch +0.84%. HDR p50 0.0164 -> 0.0166
+        // against a ceiling of 0.030, and p99 ROSE on three scenes and fell on
+        // none. Focal contrast is unchanged to a decimal place on every scene
+        // including seed 7 / fast, which sits at 4.0:1 on a 4.0 floor - that is
+        // the pocket floor below doing its job. seed 7 / fast's crushed-shadow
+        // warning improves, 36.9% -> 36.4% against a 36% ceiling it was already
+        // over. Ruled-hairline notch energy over the whole playfield rose 0.0%
+        // to 3.7% across eight frames on two seeds while the layer's own moved
+        // pixels rose 60%, so the added content is less notchy than the frame
+        // it was added to. Do not spend any of this again without re-measuring.
+        const nz = (0.24 - z) * 7.142857;
+        gate *= 0.55 + 4.05 * nz * nz;
         // Bead aspect is capped WELL below the 9:1 the rest of the layer allows.
         // A bead at 15:1 is a ruled sliver whatever the profile, and these are
         // the only quads here big enough to hold that aspect without the pixel
@@ -3025,15 +3190,30 @@ export class Ambient {
         // Everything above it goes into the PITCH instead, which is the file's
         // standing answer: a gap cannot become a ruled line however far it is
         // opened, and a length bought with spacing cannot clip.
+        // 7.0 -> 5.2, and it is the amplitude above that pays for it. SMOKE
+        // fills its quad, so `bas` is very nearly the DRAWN aspect, and 7:1 is
+        // already past the ~6:1 at which a stretched SMOKE stops being a torn
+        // puff and becomes a capsule with two straight sides (the same bound
+        // the vortex roll is capped at, for the same reason). A dim capsule is
+        // survivable and a bright one is a ruled stroke, so raising the level
+        // without lowering this would have bought the exact defect the review
+        // warns about in the same paragraph it asks for the level.
         let bas = 1 + (ax - 1) * per;
-        if (bas > 7.0) bas = 7.0;
+        if (bas > 5.2) bas = 5.2;
         const sw = s * 1.22;
         // THE ONSET LANDS HERE. Speed opens the train; a surge opens it further
         // and does it in about a sixth of a second, so a release visibly tears
         // the near field apart while a steady cruise at the same speed does not.
         // Length is bought entirely with spacing, so the surge cannot become a
         // brightness term or spend a single unit of exposure.
-        const pitch = sw * Math.sqrt(bas) * this.tk[i] * (0.72 + 0.62 * sh + 0.95 * srg);
+        // The depth term is the other half of the parallax above and is the one
+        // that is FREE: spacing is not light. 0.62-1.45 across the band, mean
+        // 1.035, so the layer's total spread is where it was and only the
+        // near/far ordering is new. The constant is up from 0.72 to 0.84 to
+        // return the length the lower aspect cap takes out (pitch scales as
+        // sqrt(bas), and sqrt(5.2/7.0) = 0.862).
+        const pitch = sw * Math.sqrt(bas) * this.tk[i]
+          * (0.62 + 0.83 * nz) * (0.84 + 0.72 * sh + 1.10 * srg);
         const ca = Math.cos(rot), sa2 = Math.sin(rot);
         for (let n3 = 0; n3 < 3; n3++) {
           const sk = sw * STRIA_SZ[n3];
