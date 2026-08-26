@@ -454,56 +454,61 @@ Verify each against the current code before acting; some may be fixed. The
 authoritative snapshot of quality is whatever `node tools/check.mjs --seeds 7,3`
 says today, plus a blind review per `tools/CRITIC.md`.
 
-**Most recent blind review** — round ten, eight depth-matched pairs, two seeds.
-**The current build won 7 of 8.** Nine-axis mean **4.6**, ship verdict **No**.
-The reviewer identified the builds unaided: one clips its HUD text to flat
-255,255,255 in all eight frames, the other "never clips a single world or UI
-pixel" — that is the HUD ceiling landing, and it decided most of the round.
+**Most recent blind review** — round eleven, eight depth-matched pairs, two
+seeds, identical world generation so every difference is a rendering difference.
+**The same build won all eight pairs** — decisive x5, clear x2, slight x1. The
+reviewer verified the pair registration itself ("stalactite drips, plankton motes
+and HUD glyphs land on identical pixels in every pair I checked") and corrected
+its own pair-06 verdict from "clear" down to "slight" on an 8x re-check, noting
+that a slight win is a failed iteration. Nine-axis mean **4.9**, ship verdict
+**No**.
 
 | axis | | axis | |
 |---|---|---|---|
-| Composition | 5 | Object craft | 4 |
-| **Value structure** | **6** | **Detail & texture** | **3** |
-| Colour | 5 | **Motion legibility** | **3** |
-| Light behaviour | 4 | UI | 6 |
+| Composition | 6 | Object craft | 5 |
+| **Value structure** | **7** | Detail & texture | 4 |
+| Colour | 5 | Motion legibility | 4 |
+| **Light behaviour** | **3** | UI | 5 |
 | Cohesion | 5 | | |
 
-**READ THIS ROUND'S CONTENT JUDGEMENTS WITH CARE — the A/B compared two
-different worlds.** The round folded in a `world.js` generation fix, so matched
-depths no longer showed matched content. Reverting only that change accounts for
-the entire large-amplitude divergence at every depth (max delta 184 of 184) while
-every rendering change in the round together accounts for max delta 61. So the
-reviewer's "an entire amber organism goes missing" and "10-17% less detail
-energy" are substantially a different world, **not** a rendering regression. Its
-judgements about *how things are drawn* stand; its judgements about *what is
-present* do not. The rule is now in `CRITIC.md`.
+**"Nothing receives light" is half wrong, and the half that is right names the
+work.** The reviewer gave three proofs and all three are **props**: a kelp trunk
+in front of an anchor staying pure cold cyan, a rock lip in front of a vent
+taking no warm rim, a shaft crossing an anchor with neither acknowledging the
+other. Checked at 4x on a 400m frame: **the rock and seabed plainly do carry a
+warm cast** near an anchor — that fix landed and is measurable at ~90000 pixels —
+while the kelp and branch props beside it stay cold blue-grey. The precise
+statement is that **`background.js` has a light rig and `render.js` has none.**
+Everything drawn as a prop is a self-lit decal composited over an unrelated
+ambient. That is the single highest-value piece of work left, and the reviewer
+supplied an acceptance bar for it: rock 40px from an anchor must be visibly
+warmer and lighter than rock 200px away, *and* a kelp trunk beside it must carry
+a warm edge on its anchor-facing side.
 
-Its three ranked problems, all open:
+**Ruled lines: improved, not fixed.** The losing build is "graph paper" — eleven
+strokes at even pitch, none bending. The winner curves them, varies their length
+and stops them at strata. But it is still **one stroke vocabulary applied
+everywhere** and still produces near-twins. Its acceptance bar is worth adopting
+because it is objective: **no stroke may have a neighbour within 100px sharing
+its angle to within 5°.**
 
-1. **Ruled geometry, everywhere** — and it gave coordinates. Constant-angle,
-   constant-spacing, constant-width stroke sets in the rock hatch, the near-field
-   "rain" particulate, kelp trunks and stair-step ledge silhouettes with
-   axis-aligned risers. *(textures + world + environment.)* Note the near-field
-   dash field has now been named by **two consecutive reviewers** — "scratches on
-   the lens", then "dead-straight rain strokes at one repeated angle in every
-   frame" — and it is a consequence of tripling that layer's amplitude, which
-   made it visible enough to see that it is uniform.
-2. **The wake carries no speed.** "At 31 m/s and at 171 m/s the *character* is
-   identical — same strand count, same width, same edge hardness. Only total
-   length changes, which you can't read without a second frame to compare."
-   *(vfx.)*
-3. **Creature craft is bimodal, and the danger signal is the weak half.** The
-   anchors are "genuine 7-level work"; the hazard and burst plants are one
-   primitive stamped radially. It also flags two accent-discipline breaks: one
-   burst-plant asset is recoloured into **both** mint and amber, so two reserved
-   accents are worn by the same prop, and the magenta hazard is staged *inside*
-   the violet Hush field — "the two accents the player most needs to tell apart,
-   rendered adjacent, at similar value, in the darkest busiest corner."
-   *(scene + world.)*
+**Speed: the reviewer says length is still the only variable, and this needs
+settling.** That contradicts a measurement taken the same day showing wake width
+15.9 → 26.0px strictly monotone with speed on both seeds. The likely reconciler
+is that the reviewer compared a 31 m/s frame at 900m against 171 m/s frames at
+120m, so camera scale and depth differ too — but nobody has confirmed it. Its
+acceptance bar is good: crop the wake alone, hide the HUD, and a stranger should
+call 31 against 171 correctly.
 
-**A warning worth keeping:** on finding the player, "the eye is led by the
-*tether line* and the *wake arc*, not by the character… the protagonist is found
-via its accessories."
+**Colour discipline broken in three places**, with coordinates: burst plants
+wearing amber *and* mint simultaneously; a Hush mote sitting on an amber vent;
+and danger rendered inside the Hush volume, where "hazard aura and Hush field are
+indistinguishable at 5x".
+
+**Finding the player: 2-4 seconds, and "you never find the character".** The eye
+goes to the score numeral, then the brightest anchor, then follows the tether or
+wake back to an 8px bead. Third review running to say the protagonist is found
+via its accessories.
 
 Runners-up from the same review: geometry floats (kelp and reeds terminate on a
 flat horizontal baseline instead of intersecting the seabed — `world.bandBot(x)`
