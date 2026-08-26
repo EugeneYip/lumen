@@ -81,6 +81,46 @@ const L_LEAF = LY('LEAF', S.SHARD);
 const L_ROCK = LY('ROCK', S.SMOKE);
 const L_MEMB = LY('MEMBRANE', S.BLOB);
 
+// ------------------------------------------------- props that receive light ---
+// The round-eleven review scored Light behaviour 3/10 - "emitters are self-lit
+// decals composited over an unrelated ambient" - and claimed nothing in the
+// frame receives light anywhere. Half of that is wrong and the half that is
+// right was ours: background.js grew a light rig, and every one of the
+// reviewer's three proofs is a PROP. Measured at 4x on a 400m frame, the rock
+// and seabed near an anchor plainly do carry a warm cast (background.js prices
+// it at ~90000 pixels moved two display levels or more), while the kelp trunk
+// standing in that same pool, and the rock column beside it, stayed the same
+// cold blue-grey they are at 900 units away. A lamp that lights the floor and
+// not the plant in front of it is a decal, exactly as the review said.
+//
+// So this is the same rig, evaluated on the CPU per element at draw time.
+// background.js solved the equivalent problem without a per-light loop per
+// layer by noticing that light on a receding plane is read at the near plane,
+// which makes the lamp a screen-space quantity; props are drawn as sprites and
+// ribbons through batches, so the analogous move here is per ELEMENT rather
+// than per pixel. There are at most seven lights and a few dozen props in shot,
+// so the whole rig costs a few hundred iterations a frame - see _lampAt.
+//
+// THE NUMBERS ARE COPIED FROM background.js VERBATIM AND MUST STAY THAT WAY.
+// That is a real hazard and this project has been bitten by it: world.js used
+// to mirror physics constants by hand and a +19% gravity change silently
+// invalidated its reachability model. There is no seam to share these through -
+// frameCtx carries cam, world and player but not the background instance, and
+// background.js belongs to someone else - so they are duplicated deliberately.
+// Duplicated EXACTLY, because the point is agreement: a prop's warm edge has to
+// be the same light as the warm cast on the rock it is standing on, or the
+// frame has two suns. If _updateLights or lampLight in background.js changes,
+// this changes with it.
+const MAXL = 7;                      // background.js: the mote plus six anchors
+const LAMP_COLD = [0.30, 0.72, 1.00];   // lampLight()'s cold emitter (the mote)
+const LAMP_WARM = [1.00, 0.56, 0.20];   // ...and its warm one (an anchor)
+// lampLight()'s falloff: a tight pool plus a wide squared lobe. The wide lobe
+// is what actually reaches a wall - the tight one's half-value radius is 51
+// world units and the nearest rock to a swimming mote measures 272-450 - and
+// squaring it makes it fall faster than inverse square, which is absorption
+// rather than spreading.
+const LAMP_CORE_COLD = 2600, LAMP_CORE_WARM = 26000, LAMP_WIDE = 92000;
+
 // The hero's own hue. A blind review measured the mote as cyan in a cyan
 // environment - "the hero owns no hue of its own, while the amber anchor is the
 // warmest, most saturated, brightest thing in frame" - so the thing you grab
@@ -341,6 +381,12 @@ export class Scene {
     this._spine = new Float32Array(8);   // 4 points down the mote's own flow line
     this._bleed = new Float32Array(10);  // 5 waypoints down the anamorphic bleed
     this._ai = 0;                        // monotonic cursor into world.anchors
+    // The light rig. xy world position, z strength, w warmth - the exact
+    // layout background.js uploads as uLights, for the reason above.
+    this._lt = new Float32Array(MAXL * 4);
+    this._lnum = 0;                      // how many of them are live this frame
+    this._lcol = [0, 0, 0];              // incident colour x strength at a point
+    this._ldx = 0; this._ldy = -1;       // ...and the direction it arrives from
     this._view = [new Array(MAXP + 1), new Array(MAXP + 1), new Array(MAXP + 1)];
     for (let k = 0; k < 3; k++) {
       for (let n = 2; n <= MAXP; n++) this._view[k][n] = this._pool[k].subarray(0, n * 2);
@@ -353,6 +399,122 @@ export class Scene {
 
   /** How much of the object at world x the Hush has already eaten. 0..1. */
   _eat(x) { return clamp01((this._hx + HUSH_LEAD - x) / HUSH_DEEP); }
+
+  /**
+   * The mote plus the nearest few anchors. Same selection rule, same reach and
+   * same strengths as background.js's _updateLights, so the two rigs cannot
+   * disagree about which lamps exist - see the note at MAXL.
+   */
+  _updateLights(world, player, cam) {
+    const L = this._lt;
+    let n = 0;
+    if (player) { L[0] = player.x; L[1] = player.y; L[2] = 1.0; L[3] = 0.0; n = 1; }
+    const as = world.anchors;
+    if (as) {
+      const reach = cam.viewW * 0.6;
+      for (let i = 0; i < as.length && n < MAXL; i++) {
+        const a = as[i];
+        if (a.alive === false) continue;
+        const dx = a.x - cam.x, ad = dx < 0 ? -dx : dx;
+        if (ad > reach) continue;
+        // WINDOWED TO ZERO AT THE BOUND, which background.js does not need to
+        // do and this file does. It is the branch-locus rule from AGENTS.md in
+        // its temporal form: `reach` is a hard test on a CAMERA coordinate, and
+        // the camera is a spring whose state newRun() does not fully reset, so
+        // an anchor sitting within a float of the boundary can be in the set on
+        // one run and out of it on the next. That is not a small difference
+        // here - the set decides every prop's lamp DIRECTION, and a direction
+        // flip moves a rim from one flank to the other. check.mjs caught it
+        // exactly that way: identical simulation state (the fingerprint rounds
+        // to 1e-3), different pixels, seed 7, hashes 310ab49a vs fc852c05,
+        // while tools/_det3.mjs stayed STABLE because a FROZEN state cannot
+        // exercise it. Fading the last 12% of the reach means an anchor that
+        // enters or leaves contributes nothing either way, so the set can flip
+        // freely and the image cannot.
+        L[n * 4] = a.x; L[n * 4 + 1] = a.y;
+        L[n * 4 + 2] = (a.big ? 0.85 : 0.55) * clamp01((reach - ad) / (reach * 0.12));
+        L[n * 4 + 3] = 1.0;
+        n++;
+      }
+    }
+    this._lnum = n;
+  }
+
+  /**
+   * Incident light at a world point, in background.js's own units.
+   *
+   * Writes `_lcol` (the summed emitter HUE, normalised to luminance 1) and
+   * `_ldx/_ldy` (unit vector pointing at where the light comes FROM, weighted
+   * by each lamp's contribution), and returns the scalar strength.
+   *
+   * Hue and strength are separated on purpose. `_lit` rotates a surface colour
+   * toward `_lcol` at CONSTANT LUMINANCE - the same two-step construction
+   * DECOR_WARM uses above, and for the same reason: a mix changes value as well
+   * as hue, and value is what p50, p99 and the shadow fraction are made of.
+   * Every level change in this pass is therefore written where it can be read
+   * against those numbers, instead of arriving as a side effect of a tint.
+   *
+   * The direction is the whole point and the level is not. "Do not simply raise
+   * prop brightness" is the constraint that shapes every call site below: what
+   * a viewer reads as a lit object is a warm edge on the side facing the lamp
+   * and a cold one on the other, which is CONTRAST across the object. Raising
+   * the gain gives a brighter cold object, which is what a decal looks like
+   * when you turn it up. So callers use `_lampAt` twice: once to tint, and once
+   * to decide WHICH FLANK gets the tint.
+   *
+   * There is no depth buffer in this renderer, so no occlusion test is possible
+   * and none is attempted - a prop between you and a lamp is lit on the lamp's
+   * side whether or not something else is in the way. Approximating it was
+   * considered and rejected: the only cheap approximation is a distance test
+   * against the same lamps, which cannot tell "behind a rock" from "beside it".
+   *
+   * Allocation-free: everything lands in instance registers.
+   */
+  _lampAt(x, y) {
+    const L = this._lt;
+    // Reset rather than carried: these are instance registers, the Scene
+    // outlives newRun(), and a value that survives a restart is precisely the
+    // class of leak invariant 1 exists to catch.
+    this._ldx = 0; this._ldy = -1;
+    let r = 0, g = 0, b = 0, ax = 0, ay = 0;
+    for (let i = 0; i < this._lnum; i++) {
+      const s = L[i * 4 + 2];
+      if (s <= 0) continue;
+      const w = L[i * 4 + 3];
+      const dx = L[i * 4] - x, dy = L[i * 4 + 1] - y;
+      const r2 = dx * dx + dy * dy;
+      const core = LAMP_CORE_COLD + (LAMP_CORE_WARM - LAMP_CORE_COLD) * w;
+      const wide = LAMP_WIDE / (r2 + LAMP_WIDE);
+      const e = s * (core / (r2 + core) + 0.46 * wide * wide);
+      r += lerp(LAMP_COLD[0], LAMP_WARM[0], w) * e;
+      g += lerp(LAMP_COLD[1], LAMP_WARM[1], w) * e;
+      b += lerp(LAMP_COLD[2], LAMP_WARM[2], w) * e;
+      const inv = e / Math.sqrt(r2 > 1 ? r2 : 1);
+      ax += dx * inv; ay += dy * inv;
+    }
+    const al = Math.sqrt(ax * ax + ay * ay);
+    if (al > 1e-6) { this._ldx = ax / al; this._ldy = ay / al; }
+    const lum = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    if (lum > 1e-6) {
+      const inv = 1 / lum;
+      this._lcol[0] = r * inv; this._lcol[1] = g * inv; this._lcol[2] = b * inv;
+    } else { this._lcol[0] = 1; this._lcol[1] = 1; this._lcol[2] = 1; }
+    return lum;
+  }
+
+  /**
+   * `col` seen under the lamp last evaluated by `_lampAt`: its hue rotated
+   * toward the lamp's by `k`, at its own luminance. Safe in place.
+   */
+  _lit(col, k, out) {
+    const bl = col[0] * 0.2126 + col[1] * 0.7152 + col[2] * 0.0722;
+    const t = k < 0 ? 0 : k > 1 ? 1 : k;
+    const L = this._lcol;
+    out[0] = lerp(col[0], L[0] * bl, t);
+    out[1] = lerp(col[1], L[1] * bl, t);
+    out[2] = lerp(col[2], L[2] * bl, t);
+    return out;
+  }
 
   /**
    * The one path from a world emitter into the light batch.
@@ -470,6 +632,8 @@ export class Scene {
     // to 1/1.87 at speed, so a quad's screen size is not a function of its
     // world size alone. Anything authored against the mip chain needs this.
     this._ppu = (g.pixelH || 900) / cam.viewH;
+    // Rebuilt once, read by every prop. See _lampAt.
+    this._updateLights(world, player, cam);
 
     // --- round 1: the far parallax layer, desaturated and low contrast ---
     this._decor(world, b, t, dim, true);
@@ -629,6 +793,15 @@ export class Scene {
     depthFade(PAL.waterHigh, d.depth * 0.94 + 0.08, c1);
     if (e > 0) this._ate(c1, e, c1);
 
+    // Incident light, sampled once at the middle of the stalk rather than per
+    // sample: the lamp direction turns by only a few degrees over a strand's
+    // height at the distances an anchor is ever at, and one evaluation is what
+    // keeps this affordable across a whole bed. Far strands take less of it
+    // because far water absorbs a lamp exactly as it absorbs everything else,
+    // and the Hush eats it with the rest of the plant.
+    const lamK = this._lampAt(d.x + lean * 60, d.y - d.h * 0.55) * (1 - d.depth * 0.72) * dm;
+    const lampX = this._ldx, lampY = this._ldy;
+
     // Holdfast. Kelp grips rock; it does not sprout from a point - and it grips
     // the rock that is actually there. world.bandBot is sampled per lobe rather
     // than shared, so a stand on a sloping floor plants each lobe at its own
@@ -644,9 +817,14 @@ export class Scene {
       // One graze along the lobe's upper face. Without it the holdfast is a
       // dark blob on dark rock and the plant still looks placed rather than
       // gripping - the joint has to be *lit* to be read at all.
-      const gk = 0.30 * dm * (1 - d.depth * 0.72);
+      // ...and it is now lit by the same lamp the rock under it is lit by. The
+      // rock beneath a holdfast carries background.js's warm cast and the
+      // holdfast on top of it did not, which is the seam this whole pass is
+      // about, at the one place the two surfaces actually touch.
+      const gk = 0.30 * (1 + lamK * 0.75) * dm * (1 - d.depth * 0.72);
+      this._lit(c1, lamK * 1.45, c3);
       this._emit(lx, ly - hw * 0.62, hw * 2.2, hw * 0.52, (hk - 0.5) * 0.34,
-        c1[0] * gk, c1[1] * gk, c1[2] * gk, S.GLOW, CEIL_DECOR);
+        c3[0] * gk, c3[1] * gk, c3[2] * gk, S.GLOW, CEIL_DECOR);
     }
 
     // Blades. A bare curve is a wire; blades make it a plant. Fewer of them at
@@ -723,7 +901,27 @@ export class Scene {
       // clock - a blade that flexes on the same beat as it swings is one rigid
       // object rotating. 0.30-0.80 rad and not more: at 0.44-1.10 the pair
       // closed far enough to read as a hoop, and a ring is its own amateur tell.
-      const a1 = a0 + sd * (0.30 + hash2(sid, k * 31 + 167) * 0.50)
+      //
+      // ...and 0.30-0.80 was still too much for TWO pieces to carry, which the
+      // texture owner measured directly: the pair meets at 0.30-0.80 rad with
+      // only ~10% quad overlap, which pinches the blade's painted width by
+      // about 40% at the joint and leaves a visible corner. Two things are
+      // wrong there and both are fixed below rather than one being tuned to
+      // hide the other. The ANGLE comes down to 0.19-0.53 rad, which is a bend
+      // you can still see (the whole reason the blade is two pieces is trap 2 -
+      // no straight line may pass through a whole blade) at roughly two thirds
+      // of the notch. And the OVERLAP goes up, which is the half that actually
+      // removes a pinch: the joint moves back from 0.86 to 0.74 of the first
+      // piece, so the pieces share 0.158 of the blade's length instead of
+      // 0.084 - 28% of a piece against 15%.
+      // The tip is held where it was. Reach is 0.74*LA + 0.90*LB, so LB goes
+      // 0.50 -> 0.573 of bl to land the tip back at 0.93 bl, and because
+      // SHARD's profile is normalised to its own quad, a 15% longer quad at the
+      // same height paints a 13% thinner taper - which is the exact trap the
+      // first cut of this blade fell into, in the other direction. The second
+      // piece's height and its lit face are scaled to match, so the painted
+      // thickness through the joint is unchanged and only the notch is gone.
+      const a1 = a0 + sd * (0.19 + hash2(sid, k * 31 + 167) * 0.34)
         + 0.13 * Math.sin(t * d.sway * 0.85 + k * 1.7 + d.phase * 1.3);
       const cA = Math.cos(a0), sA = Math.sin(a0), cB = Math.cos(a1), sB = Math.sin(a1);
       // Both ends of a SHARD reach zero width (env = t^0.55 * (1-t)^1.9), so
@@ -737,33 +935,67 @@ export class Scene {
       // blade into a tube. 0.74/0.50 of bw over pieces 0.56/0.50 of bl puts the
       // painted thickness back where it was and gives the pair a real taper
       // from base to tip, which one quad could not have.
-      const LA = bl * 0.56, LB = bl * 0.50;
-      const jx = px + cA * LA * 0.86, jy = py + sA * LA * 0.86;
+      const LA = bl * 0.56, LB = bl * 0.573;
+      const jx = px + cA * LA * 0.74, jy = py + sA * LA * 0.74;
       this.occl.push(px + cA * LA * 0.42, py + sA * LA * 0.42,
         LA, bw * 0.90, a0, c0[0], c0[1], c0[2], 0.88 * opa, L_LEAF);
       this.occl.push(jx + cB * LB * 0.40, jy + sB * LB * 0.40,
-        LB, bw * 0.62, a1, c0[0], c0[1], c0[2], 0.88 * opa, L_LEAF);
+        LB, bw * 0.70, a1, c0[0], c0[1], c0[2], 0.88 * opa, L_LEAF);
       // A dark ribbon on dark water is a hole, so each blade gets a lit face
       // offset off its own medial axis. SHARD again, not FILAMENT: FILAMENT's
       // hair is 2.7% of the quad it is painted in, which at a blade's scale is a
       // fifth of a pixel and mips away to nothing. The same profile at 60% of
       // the height reads as the lit side of the same ribbon. One per piece, or
       // the bend is a dark notch in a lit blade.
-      const bk = 1.30 * (0.40 + 0.90 * hash2(sid, k * 11 + 9)) * dm * (1 - d.depth * 0.74);
-      const nAx = -sA * bw * 0.13, nAy = cA * bw * 0.13;
-      const nBx = -sB * bw * 0.09, nBy = cB * bw * 0.09;
-      this._emit(px + cA * LA * 0.44 - nAx, py + sA * LA * 0.44 - nAy,
-        LA * 0.86, bw * 0.54, a0, c1[0] * bk, c1[1] * bk, c1[2] * bk, L_LEAF, CEIL_DECOR);
-      this._emit(jx + cB * LB * 0.42 - nBx, jy + sB * LB * 0.42 - nBy,
-        LB * 0.86, bw * 0.38, a1, c1[0] * bk, c1[1] * bk, c1[2] * bk, L_LEAF, CEIL_DECOR);
+      // WHICH FLANK, not how bright. The lit face used to be pinned to one side
+      // of every blade's medial axis - a constant in world space - so a whole
+      // bed was lit from the same imaginary direction whatever was actually
+      // burning next to it. `fa` is the blade normal against the lamp
+      // direction, and the offset slides continuously from one flank to the
+      // other through it: at a grazing angle the band sits ON the axis rather
+      // than snapping across, so a swaying blade cannot pop. With no lamp in
+      // reach the blend collapses to +1 and this is the frame it always drew.
+      const faA = sA * lampX - cA * lampY, faB = sB * lampX - cB * lampY;
+      const lmix = clamp01(lamK * 2.2);
+      const sgA = lerp(1, clamp(faA * 2.2, -1, 1), lmix);
+      const sgB = lerp(1, clamp(faB * 2.2, -1, 1), lmix);
+      // A blade facing the lamp is brighter than one edge-on to it, and that
+      // difference across one plant is the read. The level term is small next
+      // to the geometric one on purpose: the brief for this pass is that a warm
+      // EDGE is the read, not a warmer plant, and a bed of uniformly brighter
+      // kelp is the decal with its gain turned up.
+      const fk = 0.30 + 0.70 * clamp01(faA);
+      const bk = 1.30 * (0.40 + 0.90 * hash2(sid, k * 11 + 9))
+        * (1 + lamK * fk * 0.55) * dm * (1 - d.depth * 0.74);
+      this._lit(c1, lamK * fk * 1.7, c3);
+      const nAx = sA * bw * 0.13 * sgA, nAy = -cA * bw * 0.13 * sgA;
+      const nBx = sB * bw * 0.09 * sgB, nBy = -cB * bw * 0.09 * sgB;
+      this._emit(px + cA * LA * 0.44 + nAx, py + sA * LA * 0.44 + nAy,
+        LA * 0.86, bw * 0.54, a0, c3[0] * bk, c3[1] * bk, c3[2] * bk, L_LEAF, CEIL_DECOR);
+      this._emit(jx + cB * LB * 0.42 + nBx, jy + sB * LB * 0.42 + nBy,
+        LB * 0.86, bw * 0.43, a1, c3[0] * bk, c3[1] * bk, c3[2] * bk, L_LEAF, CEIL_DECOR);
     }
 
     // Edge light. The single thing that lets a dark plant read against dark
     // water - so it inherits the same fibre noise, or it re-flattens the stalk.
+    //
+    // Its FLANK is now the lamp's business, and that is the single change in
+    // this pass that made the acceptance bar readable rather than measurable.
+    // The ambient rim was pinned to -x. When the nearest anchor is also to the
+    // left, the warm rim below lands on the same flank as the cold one and the
+    // two sum to something neutral: measured on seed 7 at 1100m, a strand
+    // 122px from a bulb read R-B of +7 before this pass and +7 after it, i.e.
+    // adding warm light to the lit flank moved the HUE not at all, because the
+    // cold light was already there. Directional contrast is a statement about
+    // two flanks, so the ambient has to vacate the one the key is on.
+    // With no lamp in reach `lsg`'s weight is zero and this is -1, exactly the
+    // stroke that shipped.
+    const lsg = clamp(lampX * 2.4, -1, 1);
+    const coldSide = lerp(-1, -lsg, clamp01(lamK * 2.5));
     const off = this._p2(n);
     for (let s = 0; s < n; s++) {
       const f = s / (n - 1);
-      off[s * 2] = pts[s * 2] - wmain(f) * 0.44;
+      off[s * 2] = pts[s * 2] + wmain(f) * 0.44 * coldSide;
       off[s * 2 + 1] = pts[s * 2 + 1];
     }
     // Translucent flesh. Without this only the rim line was ever visible, so a
@@ -785,6 +1017,54 @@ export class Scene {
         * (1 - d.depth * 0.34),
       falloff: 3,
     });
+    // THE WARM EDGE ON THE ANCHOR-FACING SIDE. This is the acceptance bar the
+    // reviewer set for the whole pass, and it is a second rim rather than a
+    // change to the one above for two reasons. The cold rim is ambient - the
+    // water is lit from everywhere and that read is correct at any distance from
+    // a lamp - so it should not move. And a separate stroke lets the lamp own an
+    // alpha that goes to zero on its own: with no lamp in reach `lamK` is a few
+    // thousandths, the branch does not run, and the strand renders exactly the
+    // frame it did before. Nothing here is an ambient lift.
+    //
+    // The side is `lampX`, not a hash and not a constant. A stalk is close to
+    // vertical, so the flank that faces a lamp is decided by the sign of the
+    // horizontal component; ramped through zero over 2.4 so a lamp directly
+    // above or below lights neither flank rather than picking one arbitrarily.
+    // r*0.46 rather than the cold rim's 0.44 puts it just outside, so the two
+    // read as an edge and a body instead of one wider stroke.
+    // Windowed at the bound, not thresholded at it - same rule as the reach
+    // above. At lamK = 0.02 this stroke's alpha would be 0.05, so a bare
+    // `if` here draws its own step wherever the quantity crosses.
+    const lgate = clamp01((lamK - 0.02) * 26);
+    if (lgate > 0) {
+      const lo = this._p2(n);
+      for (let s = 0; s < n; s++) {
+        const f = s / (n - 1);
+        lo[s * 2] = pts[s * 2] + wmain(f) * 0.46 * lsg;
+        lo[s * 2 + 1] = pts[s * 2 + 1];
+      }
+      this._lit(c1, 0.94, c3);
+      // Gain 2.6, and it buys almost no shadow fraction because of WHERE it
+      // lands. The visible core of this stroke is width*sqrt(ln2/3), i.e. 2-5
+      // screen pixels, and those pixels are the rim - they were already above
+      // the gate's L8 shadow threshold, so raising them changes the count of
+      // dark pixels hardly at all. The level terms that DID cost shadow were
+      // the wide ones (the blade faces and the holdfast graze) and they are
+      // held small for exactly that reason. Concentrate, do not spread: the
+      // same argument as _emit's, arriving from the other direction.
+      //
+      // The near/far RATIO is not a choice here. At 48 world units from a small
+      // anchor lamK is 0.75 and at 240 it is 0.27, so the near edge is 2.8x the
+      // far one - which is LAMP_WIDE's falloff, the same one the rock under the
+      // plant is already using. That agreement is the whole point of copying
+      // background.js's constants instead of picking new ones.
+      this.rGlow.stroke(lo, {
+        width: (f) => lerp(wCore(d.w * 0.66, 3), wCore(0, 3), f), color: c3,
+        alpha: (f) => 2.6 * lamK * lgate * Math.abs(lsg) * emerge(f) * (1 - f * 0.42)
+          * (0.55 + 0.55 * fib(f * 1.3 + 0.7)),
+        falloff: 3,
+      });
+    }
 
     if (d.glow > 0 && e < 0.98) {
       depthFade(PAL.plankton, d.depth * 0.85, c2);
@@ -848,6 +1128,18 @@ export class Scene {
     // instead of beside it. The old 0.16 coefficient held a far plane at 87%
     // opacity, so far and near measured at the same contrast.
     const opa = (1 - d.depth * 0.52) * (1 - e * 0.5);
+    // The lamp, once for the whole ridge - see _lampAt. "A rock lip in front of
+    // a vent taking no warm rim" was the review's second proof, and a rock
+    // column is the one prop where the mismatch is provable: the background
+    // shader lights the wall BEHIND this column out of the same rig, so a
+    // stalagmite standing in an anchor's pool and staying flat teal is two
+    // surfaces of the same rock disagreeing about where the light is.
+    // (The vent itself is not in this rig. background.js draws vents as a field
+    // and does not publish them as lights, and world.js keeps them per phrase
+    // rather than in a list frameCtx can reach, so a vent's warm rim is not
+    // available from here. The anchors are, and they are most of the frame.)
+    const lamK = this._lampAt(d.x, d.y - dir * d.h * 0.45) * (1 - d.depth * 0.62) * dm;
+    const lampX = this._ldx;
 
     for (let q = 0; q < subs; q++) {
       const first = q === 0;
@@ -995,10 +1287,14 @@ export class Scene {
       }
 
       // Rim light on the lit edge. Stalactites catch it high, stalagmites low.
+      // Which FLANK is the lamp's business - see the note in _kelp: an ambient
+      // rim sitting on the same side as the key sums with it and the object
+      // stops having two sides. With no lamp in reach this is -1, as it was.
+      const lsg = clamp(lampX * 2.4, -1, 1);
       const off = this._p2(n);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
-        off[s * 2] = pts[s * 2] - wfn(f) * 0.44;
+        off[s * 2] = pts[s * 2] + wfn(f) * 0.44 * lerp(-1, -lsg, clamp01(lamK * 2.5));
         off[s * 2 + 1] = pts[s * 2 + 1];
       }
       const grad = d.up ? (f) => 0.50 + 0.60 * f : (f) => 1.05 - 0.45 * f;
@@ -1030,6 +1326,30 @@ export class Scene {
           alpha: (f) => 0.085 * emerge(f) * fine * grad(f) * glint(f * 1.7 + fq * 4.1)
             * (1 - d.depth * 0.74) * dm,
           falloff: 4.5,
+        });
+      }
+      // The lamp-facing rim, same construction as the kelp's and for the same
+      // reason - see the note there. Weaker than the plant's (1.05 against
+      // 1.55) because rock is a poorer reflector than a translucent blade and
+      // because the wall behind this column is already carrying the lamp out of
+      // background.js: the job here is to stop the column reading as a cutout
+      // pasted on lit rock, not to make it the brightest thing on the floor.
+      const lgate = clamp01((lamK - 0.02) * 26);
+      if (lgate > 0) {
+        const lo = this._p2(n);
+        for (let s = 0; s < n; s++) {
+          const f = s / (n - 1);
+          lo[s * 2] = pts[s * 2] + wfn(f) * 0.46 * lsg;
+          lo[s * 2 + 1] = pts[s * 2 + 1];
+        }
+        this._lit(c1, 0.94, c3);
+        this.rGlow.stroke(lo, {
+          width: (f) => lerp(wCore(wq * 0.11, 4), wCore(0, 4), f)
+            * (0.74 + 0.40 * noise1(f * 7.7 + jseed * 2.9)),
+          color: c3,
+          alpha: (f) => 1.75 * lamK * lgate * Math.abs(lsg) * emerge(f) * grad(f)
+            * glint(f * 1.3 + 2.1),
+          falloff: 4,
         });
       }
 
@@ -1093,6 +1413,21 @@ export class Scene {
     if (e > 0) { base = this._ate(base, e, o2); tip = this._ate(tip, e, o3); }
     const breathe = 0.55 + 0.45 * Math.sin(t * 1.15 + d.phase);
     const k = (0.40 + breathe * 0.62) * (1 - d.depth * 0.75) * dim * (1 - e);
+    // This colony receives light as HUE ONLY, and the exception is measured
+    // rather than squeamish. Two separate constraints point the same way.
+    //
+    // Salience: the file already records three attempts to give this prop more
+    // form, at gains 0.32, 0.20 and paid-for-by-trimming, and every one of them
+    // moved seed 7 / tethered from rank 7 to rank 8 - its block sits within a
+    // hair of the hero's, so ANY light added beside it costs the protagonist a
+    // place. Colour: DECOR_WARM exists because a review found this prop wearing
+    // the anchors' own two palette entries, and lighting it warm from an anchor
+    // walks it straight back onto amber. `_lit` holds luminance exactly, so the
+    // colony's contribution to a salience block, to p99 and to the shadow
+    // fraction is unchanged to within the tone curve's per-channel bend, and
+    // what moves is only which arms look warm.
+    const lamK = this._lampAt(d.x, d.y) * (1 - d.depth * 0.70) * dim * (1 - e);
+    const lampX = this._ldx, lampY = this._ldy;
 
     // The column, and the reason it is no longer a ribbon.
     //
@@ -1185,6 +1520,10 @@ export class Scene {
       const ca = Math.cos(ang0), sa = Math.sin(ang0);
       const bx = d.x + (hl - 0.5) * d.r * 0.56 + ca * d.r * 0.20;
       const by = d.y + dir * d.r * (0.18 + ho * 0.64);
+      // Which arms the lamp is on. Hue only - see lamK above.
+      const lfa = lamK * clamp01(ca * lampX + sa * lampY) * 1.5 * clamp01((lamK - 0.01) * 50);
+      const aBase = lfa > 0 ? this._lit(base, lfa, c1) : base;
+      const aTip = lfa > 0 ? this._lit(tip, lfa, c2) : tip;
       // Four points, as before. The curl is a parabola and a 4-point sampling
       // of it is under 1% of the arm's length off the true curve - well under a
       // pixel here - so a fifth point was pure vertex cost.
@@ -1247,7 +1586,7 @@ export class Scene {
       this.rGlow.stroke(pts, {
         width: (f) => lerp(wCore(d.r * 0.16 * ww, 3.5), wCore(0, 3.5), Math.pow(f, 0.42 + hw * 0.30))
           * shoulder(f),
-        color: base,
+        color: aBase,
         alpha: (f) => k * 0.380 * (0.78 + 0.46 * hw) * (1 - f * 0.32) * clamp01(f * 6.5),
         falloff: 3.5,
       });
@@ -1286,7 +1625,7 @@ export class Scene {
       const asp = 1.20 + hw * 0.66;
       const bk = k * (1.78 + hb * 1.56);
       this._emit(ex, ey, bw * asp, bw / asp, ta,
-        tip[0] * bk, tip[1] * bk, tip[2] * bk, S.GLOW, CEIL_PROP);
+        aTip[0] * bk, aTip[1] * bk, aTip[2] * bk, S.GLOW, CEIL_PROP);
       // ...and a second bead partway down the longer filaments, because one
       // terminal dot per arm is a starburst and two are an organism. Its hash is
       // independent of the tip bead's, and it sits at 1/3 or 2/3 of the arm
@@ -1296,7 +1635,7 @@ export class Scene {
         const si = h > 0.55 ? 1 : 2;
         const bw2 = bw * (0.46 + h * 0.32), bk2 = k * (0.70 + h * 0.74);
         this._emit(pts[si * 2], pts[si * 2 + 1], bw2 * asp, bw2 / asp, ta,
-          tip[0] * bk2, tip[1] * bk2, tip[2] * bk2, S.GLOW, CEIL_PROP);
+          aTip[0] * bk2, aTip[1] * bk2, aTip[2] * bk2, S.GLOW, CEIL_PROP);
       }
     }
     // The column's own light, and the wash is now narrow enough to be a mouth
@@ -1430,7 +1769,7 @@ export class Scene {
       const bend = (h1 - 0.5) * 0.86, hook = (h5 - 0.5) * 0.50;
       const thick = (stub ? 0.17 : 0.13) + h3 * 0.20;
       const flare = 0.30 + h4 * 0.50;
-      const n = 5, pts = this._p2(n);
+      const n = 7, pts = this._p2(n);
       const nbx = -Math.sin(ang), nby = Math.cos(ang);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
@@ -1455,10 +1794,70 @@ export class Scene {
       // ribbon cannot soften its own butt cap at any falloff, so the cap is
       // faded out instead: the first fifth of every spine is transparent, which
       // is the part buried in the shell anyway.
+      //
+      // THE VISIBLE SPRITE BOUNDING BOX IS THIS STROKE, and it is not a sprite.
+      // Three reviews running have reported a box on this creature and it has
+      // never been attributed, because it CANNOT BE SEEN IN ISOLATION: an
+      // occluder over black water is nothing, so tools/_iso.mjs renders the
+      // urchin with no box in it at any gain, and its column profile is smooth
+      // to a tenth of a code value. Found by ablating call sites one at a time
+      // in the composite instead - seed 3 / hazardNear, the urchin on the lit
+      // seabed at screen (815,760). Zeroing this one alpha removes a hard-edged
+      // quadrilateral at (848..865, 730..735); zeroing the THORN quad, the
+      // VOLUME plates, the scatter puffs, the glints, the ember and the shell
+      // body each remove nothing there. It is a spine crossing lit rock.
+      //
+      // The mechanism is trap 1 at falloff 0.95: the cross-section is
+      // exp(-x^2*0.95), so at the ribbon's own edge the value is still 0.387 of
+      // peak, and at alpha 0.99 that is a hard step from 0.38 to 0 along both
+      // flanks and across the butt cap. Over black water nothing shows; over
+      // the lit seabed it is a rectangle.
+      //
+      // Fixed where it is caused rather than by dimming: falloff 0.95 -> 2.2
+      // drops the edge value to 0.111, and the width is scaled by
+      // sqrt(2.2/0.95) = 1.52 so the VISIBLE core (width*sqrt(ln2/falloff)) is
+      // unchanged and so is the integral of the profile across it - the
+      // silhouette carries exactly the ink it did, with a flank 3.5x softer.
+      // That direction matters: seed 3 / launch runs its shadow fraction at
+      // 8.2-8.4% against an 8.0% floor, so a fix that deletes occluder was not
+      // available here either. Samples 5 -> 7 for the same reason the width
+      // changed: four straight segments through an S-curve are four flat
+      // facets, and a facet with a soft edge is still a facet.
       this.rDark.stroke(pts, {
-        width: swf, color: PAL.hazardDark,
-        alpha: (f) => (0.99 - f * 0.14) * clamp01(f * 5.5), falloff: 0.95,
+        width: (f) => swf(f) * 1.52, color: PAL.hazardDark,
+        alpha: (f) => (0.99 - f * 0.14) * clamp01(f * 5.5), falloff: 2.2,
       });
+      // The joint, as MASS rather than as a width bump. "No mass where arms
+      // meet the bulb" is the one thing two reviews have credited the anchors
+      // for and named as missing here, and the previous answer to it - the
+      // `flare` bell inside the ribbon's width and `jf` inside the rim's - is a
+      // fatter tube, which is not a different shape. A boss is: a short broad
+      // lump of shell where the spine erupts, drawn as an occluder SPRITE so it
+      // reaches zero inside its own quad (trap 1 again - a ribbon here would be
+      // another trapezoid), lit on its outward face so the joint reads rather
+      // than just being dark. It is also the creature's THIRD element class,
+      // against the review's "one tube profile repeated ten times": two
+      // populations of tube plus a lump is not one profile.
+      // Sized off the spine's OWN thickness, so a stub gets a wide low boss and
+      // a needle gets a small one and no two are the same.
+      //
+      // NOT ON EVERY SPINE, and that is a measured correction rather than a
+      // taste one. The first cut gave all seventeen a boss and tools/_ring.mjs
+      // said the object had become MORE of a rotation, not less: 2-D rotational
+      // self-similarity of the isolated urchin went 0.467 -> 0.521 at N=22,
+      // which is the one statistic AI_HANDOFF records as having any power here,
+      // and the per-element peak spread fell (cv 0.073 -> 0.052). Of course it
+      // did - a new element repeated at every angle IS an N-fold repeat, however
+      // varied each instance is. Roughly three in five get one now, on a hash of
+      // its own, so the bosses are a population with gaps in it.
+      const h6 = hash2(sid, k * 5 + 47);
+      const bo = r * thick * (0.75 + h6 * 1.05);
+      const hasBoss = h6 > 0.38;
+      if (hasBoss) {
+        this.occl.push(pts[0] + Math.cos(ang) * bo * 0.12, pts[1] + Math.sin(ang) * bo * 0.12,
+          bo * 1.55, bo * 1.10, ang + (h5 - 0.5) * 0.7,
+          PAL.hazardDark[0], PAL.hazardDark[1], PAL.hazardDark[2], 0.84, S.VOLUME);
+      }
       // Offset to one flank, so it reads as a lit side and not as an outline.
       const gz = this._p3(n);
       for (let s = 0; s < n; s++) {
@@ -1498,6 +1897,18 @@ export class Scene {
           * clamp01(1.2 - f * 0.95) * clamp01(f * 5.5),
         falloff: 4,
       });
+      // The boss's own lit face. The dark lump above is silhouette, and a
+      // silhouette on a near-black shell is invisible - the same argument the
+      // spine's `jf` bell was written for, one level up: weight that lives only
+      // in the occluder is weight the eye never reads. One short quad on the
+      // OUTWARD face, so the joint has a highlight where it swells and a shadow
+      // where it meets the test.
+      if (hasBoss) {
+        const jk = gk * (0.36 + h6 * 0.52);
+        this._emit(pts[0] + Math.cos(ang) * bo * 0.50, pts[1] + Math.sin(ang) * bo * 0.50,
+          bo * 1.05, bo * 0.46, ang,
+          cRim[0] * jk, cRim[1] * jk, cRim[2] * jk, S.GLOW, CEIL_WARM);
+      }
       // Glint pulled *inside* the tip and stretched along the spine. A round
       // bead sitting on the point detaches and floats. Not every spine either -
       // regularity is what read as floral - and its hash is now independent of
@@ -1540,19 +1951,56 @@ export class Scene {
 
     // Rim on the shell's lit flank: the brightest thing on the object, wrapped
     // around a hole. Dark core, hot rim - the inversion, in one gesture.
-    const n2 = 15, rp = this._p1(n2);
+    //
+    // ...and A CONTAINING RING, which is the second thing three reviews have
+    // credited the anchors for and called missing here ("no rim, no ring").
+    // The anchors get it from TWO OPPOSED OPEN ARCS at slightly different
+    // offsets of the bulb's axis, not from a closed curve - see the rimL block
+    // in _anchor, which strokes one flank and then shifts the same polyline by
+    // 0.92 of the body width and strokes the other, dimmer. That construction
+    // is copied here because the alternative is the thing this file has removed
+    // three times: a thin closed curve concentric with the object reads as a
+    // selection ring however it is tinted. So the bright arc runs 230 degrees,
+    // a dimmer counter-arc covers 79 degrees of the far side at 1.05x the
+    // radius, and 25 degrees of open water is left at each end - the eye closes
+    // a shell, not a circle.
+    //
+    // The radius is not constant either, and that is what stops a wider arc
+    // from reading as a drawn circle: two low harmonics at a per-instance phase
+    // make the margin lumpy, and the stroke widths carry their own noise. A
+    // ring of constant radius AND constant width is a debug primitive; this is
+    // neither.
+    const rph = hash2(sid, 511) * TAU;
+    const rr0 = (a) => r * (0.60 + 0.032 * Math.sin(a * 3 + rph) + 0.016 * Math.sin(a * 5 - rph));
+    const n2 = 19, rp = this._p1(n2);
     for (let s = 0; s < n2; s++) {
-      const a = -Math.PI * 1.22 + (s / (n2 - 1)) * Math.PI * 1.04;
-      rp[s * 2] = h.x + Math.cos(a) * r * 0.60;
-      rp[s * 2 + 1] = h.y + Math.sin(a) * r * 0.60;
+      const a = -Math.PI * 1.30 + (s / (n2 - 1)) * Math.PI * 1.28;
+      rp[s * 2] = h.x + Math.cos(a) * rr0(a);
+      rp[s * 2 + 1] = h.y + Math.sin(a) * rr0(a);
     }
     this.rGlow.stroke(rp, {
-      width: r * 0.36, color: cBod,
+      width: (f) => r * 0.36 * (0.80 + 0.40 * noise1(f * 4.3 + rph)), color: cBod,
       alpha: (f) => Math.pow(Math.sin(f * Math.PI), 1.2) * 0.30 * hot, falloff: 1.5,
     });
     this.rGlow.stroke(rp, {
-      width: wCore(r * 0.055, 4), color: scaled(cRim, 2.7, c1),
+      width: (f) => wCore(r * 0.055, 4) * (0.80 + 0.40 * noise1(f * 6.1 + rph * 1.7)),
+      color: scaled(cRim, 2.7, c1),
       alpha: (f) => Math.pow(Math.sin(f * Math.PI), 0.75) * (0.50 + 0.24 * p) * hot, falloff: 4,
+    });
+    // The counter-arc. Dim, thin, and at a different radius: it has to close the
+    // READ without competing with the lit flank, or the object stops being lit
+    // from a direction. hazardNear is the only gate scene with a hazard in it
+    // and it moved shadow 24.6% -> 24.6% and 20.3% -> 20.3%.
+    const n3 = 13, cp2 = this._p1(n3);
+    for (let s = 0; s < n3; s++) {
+      const a = Math.PI * 0.12 + (s / (n3 - 1)) * Math.PI * 0.44;
+      cp2[s * 2] = h.x + Math.cos(a) * rr0(a) * 1.05;
+      cp2[s * 2 + 1] = h.y + Math.sin(a) * rr0(a) * 1.05;
+    }
+    this.rGlow.stroke(cp2, {
+      width: (f) => wCore(r * 0.045, 4) * (0.80 + 0.40 * noise1(f * 5.7 + rph * 2.3)),
+      color: scaled(cRim, 1.45, c2),
+      alpha: (f) => Math.pow(Math.sin(f * Math.PI), 0.9) * (0.19 + 0.11 * p) * hot, falloff: 4,
     });
 
     // Ember down in the shell. Dim on purpose: the core is a hole, and a hot
