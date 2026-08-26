@@ -363,8 +363,40 @@ export class Scene {
    * _plankton alone took seed 7 / fast from p99 0.268 to 0.224 against a contract
    * floor of 0.250 - and concentrating rather than spreading protects that too:
    * the area lost to w^2 comes back through ln(P/T) at the higher peak.
+   *
+   * IT ALSO FLOORS EVERY CHANNEL AT ZERO, and that is a fix rather than
+   * defensive habit. This batch is flushed ONE,ONE: a negative colour on an
+   * additive quad subtracts light. It cancels whatever else lit those pixels,
+   * the tonemap clamps the sum at black, and what lands in the frame is a
+   * hard-edged pure-black disc with no glow around it - over lit content only,
+   * and nothing at all over black water. That is round nine's "solid black
+   * polygons composited over the scene". Measured on the linear HDR target,
+   * seed 3 / 120m, screen (762,452): rgb (-0.026, -0.020, +0.012), and killing
+   * *this* batch alone took that pixel from display L2 to L67.
+   *
+   * The cause was three pulse gains of the form `a + b*sin` with b > a, so each
+   * spent 27-32% of its cycle below zero (_kelp nodes, _anchor stalk nodes,
+   * _anchor tendril nodes). All three are rectified where they are written, so
+   * this floor is unreached today. Measured, not assumed: a probe hooked
+   * UPSTREAM of this floor as well as on both sprite batches and both ribbon
+   * batches, over 90 frames x 3 seeds, reports nothing negative anywhere - and
+   * the same probe against the previous commit reports all six call sites, so
+   * it is an instrument that can tell the two apart rather than one that always
+   * says clean. The floor stays because it is three compares and it makes the
+   * next one a no-op instead of a hole.
+   *
+   * The reason this was mis-attributed to an occluder is worth keeping: under
+   * ?noSprites=1 the polygons vanish (they ARE sprites) and under ?noRibbons=1
+   * they get BIGGER, which reads exactly like an occluder the ribbon glow was
+   * covering. It is the opposite. Removing the ribbons removes positive light
+   * from the neighbourhood, so the sum crosses zero further out and the black
+   * region grows. An occluder's silhouette would not have changed size at all,
+   * and that is the cheap test if this ever comes back.
    */
   _emit(x, y, w, h, rot, r, g, b, layer, ceil) {
+    if (r < 0) r = 0;
+    if (g < 0) g = 0;
+    if (b < 0) b = 0;
     const pk = r > g ? (r > b ? r : b) : (g > b ? g : b);
     if (pk > ceil) {
       const px = (w > h ? w : h) * this._ppu;
@@ -594,7 +626,49 @@ export class Scene {
 
     // Blades. A bare curve is a wire; blades make it a plant. Fewer of them at
     // distance: detail density is a depth cue as much as value is.
-    const nb = d.depth >= FAR ? 5 : 7;
+    //
+    // This loop is the "barbed wire or frost, not plant" a blind review found
+    // across the lower third of every frame, and the stalks it blamed are
+    // innocent - a strand's bow over its chord is a median 9.3% through the
+    // real camera, a 32px sagitta on a 280px chord. ?noSprites=1 settles it:
+    // the same crop with the ribbons alone is a stand of curved reeds, and the
+    // barbs come back with the sprites. Three properties did it, each a trap
+    // this file already has a name for:
+    //
+    //   1. ONE straight quad per blade. A stretched quad's medial axis IS a
+    //      segment (trap 2), so a dozen of them per strand is a dozen ruled
+    //      lines whatever profile is painted in them - and SHARD's profile is a
+    //      straight taper to a point, which is a thorn.
+    //   2. sd = (k & 1), a locked parity. That is a comb, not a plant.
+    //   3. a FIXED 0.52 rad off the tangent with NO per-instance term. The only
+    //      variation was a temporal sine shared by every blade on the strand,
+    //      so in a still frame every blade on every strand left at one angle.
+    //
+    // Each is fixed at its cause. A blade is two overlapping shards with a curl
+    // between them, so no straight line passes through a whole blade; the side
+    // is hashed with a bias toward alternation instead of locked to it; and the
+    // leaving angle carries +-0.42 rad per blade on top of a base that opens
+    // from 0.40 at the holdfast to 0.98 near the tip, because a blade low on
+    // the strand stands out of the current and one at the tip is dragged along
+    // it. Count is down 7 -> 5 (5 -> 4 far) so the piece cost is +43% rather
+    // than +100%, and fewer larger fronds is the right direction anyway: the
+    // review's complaint was density as well as shape.
+    //
+    // WHAT IS STILL WRONG, and it is not fixable in this file. In a dense bed
+    // this now reads as a tangle rather than a comb, but a lone strand against
+    // black water still reads spiky, because SHARD is a straight taper to a
+    // POINT and a point is a thorn however it is oriented. A kelp blade wants a
+    // broad strap: soft-edged, near-constant width over most of its length,
+    // rounded rather than sharpened at the tip. Nothing in the kit is that.
+    // FILAMENT is the only layer whose medial axis is not a segment (its spine
+    // is 0.17*sin(5.4t) + 0.055*sin(11t) of the half-height) and it cannot be
+    // used here: its half-width is 0.013 of the quad, so a blade of thickness T
+    // needs a quad 77T tall and the curve then wanders +-6.5T - the quad, and
+    // its overdraw, would be an order of magnitude bigger than the blade.
+    // L_LEAF already resolves through LY('LEAF', S.SHARD), so the moment
+    // textures.js grows a LEAF layer this picks it up with no change here.
+    // That is the request to make of the textures owner; it is not ours.
+    const nb = d.depth >= FAR ? 4 : 5;
     for (let k = 0; k < nb; k++) {
       const f = 0.11 + 0.82 * ((k + hash2(sid, k * 5 + 1) * 0.78) / nb);
       const si = Math.min(n - 2, (f * (n - 1)) | 0), lf = f * (n - 1) - si;
@@ -602,26 +676,61 @@ export class Scene {
       const py = lerp(pts[si * 2 + 1], pts[si * 2 + 3], lf);
       let tx = pts[si * 2 + 2] - pts[si * 2], ty = pts[si * 2 + 3] - pts[si * 2 + 1];
       const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
-      const sd = (k & 1) ? 1 : -1;
-      const bl = d.w * (5.4 + Math.pow(hash2(sid, k * 7 + 3), 1.5) * 6.6) * (1 - f * 0.40);
+      // Alternation is the natural bias - blades really do leave a stipe in
+      // rough opposition - but a locked parity draws a comb. A quarter of them
+      // break it, which buys clumps and gaps without losing the two-sided read.
+      // The three new hash indices are 23k+101, 29k+137, 31k+167 - deliberately
+      // out of range of every index already used here (1..53 plus 61) so no
+      // blade's side, angle or curl is the same draw as another blade's length
+      // or lit gain. k*17+11 collided with k*5+1 at k=0/k=2 on the first cut.
+      const sd = ((k & 1) ? 1 : -1) * (hash2(sid, k * 23 + 101) > 0.74 ? -1 : 1);
+      const bl = d.w * (5.9 + Math.pow(hash2(sid, k * 7 + 3), 1.5) * 6.9) * (1 - f * 0.40);
       // SHARD's visible ribbon is 13% of the quad it is painted in, so a quad
       // two units tall renders a quarter-unit thread - which is exactly why
       // these blades read as twigs. Height now comes from the blade's own
       // length, so a blade is a ribbon whose taper you can see.
       const bw = bl * (0.58 + hash2(sid, k * 11 + 5) * 0.54);
-      const ang = Math.atan2(ty, tx) + sd * (0.52 + 0.34 * Math.sin(t * d.sway * 1.3 + k * 2.1 + d.phase));
-      this.occl.push(px + Math.cos(ang) * bl * 0.42, py + Math.sin(ang) * bl * 0.42,
-        bl, bw, ang, c0[0], c0[1], c0[2], 0.88 * opa, L_LEAF);
+      const open = lerp(0.40, 0.90, f) + (hash2(sid, k * 29 + 137) - 0.5) * 0.84;
+      const a0 = Math.atan2(ty, tx)
+        + sd * (open + 0.26 * Math.sin(t * d.sway * 1.3 + k * 2.1 + d.phase));
+      // The curl carries the side's sign, so a frond bends further away from
+      // the stalk rather than kinking back across it, and it has its own slower
+      // clock - a blade that flexes on the same beat as it swings is one rigid
+      // object rotating. 0.30-0.80 rad and not more: at 0.44-1.10 the pair
+      // closed far enough to read as a hoop, and a ring is its own amateur tell.
+      const a1 = a0 + sd * (0.30 + hash2(sid, k * 31 + 167) * 0.50)
+        + 0.13 * Math.sin(t * d.sway * 0.85 + k * 1.7 + d.phase * 1.3);
+      const cA = Math.cos(a0), sA = Math.sin(a0), cB = Math.cos(a1), sB = Math.sin(a1);
+      // Both ends of a SHARD reach zero width (env = t^0.55 * (1-t)^1.9), so
+      // two of them overlapped at 0.86 of the first's length join without a
+      // waist and without a step. Lengths are set so the tip still lands at
+      // 0.93 of bl: the envelope is unchanged, only its medial axis bends.
+      //
+      // The widths are NOT bw. SHARD's profile is normalised to its quad, so
+      // halving the quad's length while keeping its height doubles how fat the
+      // painted taper looks - the first cut of this kept bw and turned every
+      // blade into a tube. 0.74/0.50 of bw over pieces 0.56/0.50 of bl puts the
+      // painted thickness back where it was and gives the pair a real taper
+      // from base to tip, which one quad could not have.
+      const LA = bl * 0.56, LB = bl * 0.50;
+      const jx = px + cA * LA * 0.86, jy = py + sA * LA * 0.86;
+      this.occl.push(px + cA * LA * 0.42, py + sA * LA * 0.42,
+        LA, bw * 0.90, a0, c0[0], c0[1], c0[2], 0.88 * opa, L_LEAF);
+      this.occl.push(jx + cB * LB * 0.40, jy + sB * LB * 0.40,
+        LB, bw * 0.62, a1, c0[0], c0[1], c0[2], 0.88 * opa, L_LEAF);
       // A dark ribbon on dark water is a hole, so each blade gets a lit face
       // offset off its own medial axis. SHARD again, not FILAMENT: FILAMENT's
       // hair is 2.7% of the quad it is painted in, which at a blade's scale is a
       // fifth of a pixel and mips away to nothing. The same profile at 60% of
-      // the height reads as the lit side of the same ribbon.
-      const bn = ang + Math.PI * 0.5;
+      // the height reads as the lit side of the same ribbon. One per piece, or
+      // the bend is a dark notch in a lit blade.
       const bk = 1.30 * (0.40 + 0.90 * hash2(sid, k * 11 + 9)) * dm * (1 - d.depth * 0.74);
-      this._emit(px + Math.cos(ang) * bl * 0.44 - Math.cos(bn) * bw * 0.17,
-        py + Math.sin(ang) * bl * 0.44 - Math.sin(bn) * bw * 0.17,
-        bl * 0.84, bw * 0.58, ang, c1[0] * bk, c1[1] * bk, c1[2] * bk, L_LEAF, CEIL_DECOR);
+      const nAx = -sA * bw * 0.13, nAy = cA * bw * 0.13;
+      const nBx = -sB * bw * 0.09, nBy = cB * bw * 0.09;
+      this._emit(px + cA * LA * 0.44 - nAx, py + sA * LA * 0.44 - nAy,
+        LA * 0.86, bw * 0.54, a0, c1[0] * bk, c1[1] * bk, c1[2] * bk, L_LEAF, CEIL_DECOR);
+      this._emit(jx + cB * LB * 0.42 - nBx, jy + sB * LB * 0.42 - nBy,
+        LB * 0.86, bw * 0.38, a1, c1[0] * bk, c1[1] * bk, c1[2] * bk, L_LEAF, CEIL_DECOR);
     }
 
     // Edge light. The single thing that lets a dark plant read against dark
@@ -664,7 +773,14 @@ export class Scene {
         const si = Math.min(n - 2, (f * (n - 1)) | 0), lf = f * (n - 1) - si;
         const px = lerp(pts[si * 2], pts[si * 2 + 2], lf);
         const py = lerp(pts[si * 2 + 1], pts[si * 2 + 3], lf);
-        const pk = 0.40 + 0.60 * Math.sin(t * (1.3 + hk * 1.1) + k * 2.3 + d.phase * 2.1);
+        // Rectified. b > a here, so the raw pulse is below zero for 27% of its
+        // cycle, and a negative gain on an additive quad is light SUBTRACTION -
+        // see the floor in _emit and the frame it was found in. Clamping rather
+        // than rescaling is deliberate: the positive lobe is left exactly as it
+        // was authored, so every frame that was already correct is unchanged to
+        // the bit and the diff is only the holes. The node rests dark and
+        // swells, which is the read this pulse was reaching for anyway.
+        const pk = Math.max(0, 0.40 + 0.60 * Math.sin(t * (1.3 + hk * 1.1) + k * 2.3 + d.phase * 2.1));
         const kk = lit * pk;
         this._emits(px, py, d.w * 6.2, c2, kk * 0.24, S.GLOW, CEIL_DECOR);
         // The lamp. GLOW rather than CORE for the minification reason at
@@ -783,6 +899,21 @@ export class Scene {
         // surface and some debris or it reads as an end rather than as damage.
         // SMOKE's mask dies inside its own tile in every direction, so these
         // cannot themselves become the rectangle they exist to hide.
+        //
+        // NEGATIVE RESULT, measured, so nobody spends the round again. These
+        // three always land on top of each other and premultiplied occluders
+        // multiply, so on paper the trio is 45x more opaque than the column it
+        // caps (0.985*opa for the body against 1 - 0.36*0.50*0.50 = 0.91 for
+        // the trio) and looked like the cause of the remaining black patches.
+        // Dropping them to 0.62/0.34 - a third of the occlusion - moved 15844
+        // pixels by 2 levels and 242 by 8, and moved the hole count by NINE:
+        // seed 7 / 120m 483 -> 474, seed 3 121 -> 62 -> 62, seed 11 283 -> 279.
+        // The arithmetic overstates the stack because alpha is m*a and the
+        // masks are nowhere near 1 where they overlap; measured on the linear
+        // target the whole occluder pass attenuates that pixel 5x, not 1400x.
+        // So the patches are not this, the caps keep the opacity that hides the
+        // ribbon's butt cap, and the remaining holes are the blade sprites
+        // (layer L_LEAF) - see _kelp.
         const tx2 = pts[(n - 1) * 2], ty2 = pts[(n - 1) * 2 + 1];
         const tw = wq * tipw * 1.55;
         this.occl.push(tx2, ty2 - dir * tw * 0.16, tw * 2.05, tw * 0.94,
@@ -1548,7 +1679,10 @@ export class Scene {
       const nx = lerp(sp[si * 2], sp[si * 2 + 2], lf);
       const ny = lerp(sp[si * 2 + 1], sp[si * 2 + 3], lf);
       const nr = r * (0.20 + hash2(sid, q * 5 + 1) * 0.15);
-      const np = 0.38 + 0.62 * Math.sin(t * (1.5 + hash2(sid, q * 5 + 2) * 1.2) + q * 2.2 + a.phase);
+      // Rectified: b > a, so 29% of this cycle was negative gain on an additive
+      // quad, which is a black hole punched through the anchor's own spill. See
+      // _emit's floor.
+      const np = Math.max(0, 0.38 + 0.62 * Math.sin(t * (1.5 + hash2(sid, q * 5 + 2) * 1.2) + q * 2.2 + a.phase));
       this._emits(nx, ny, nr * 4.4, cRim, k * np * 0.20, S.GLOW, CEIL_WARM);
       // nr is r*0.20..0.35, so a CORE quad at nr*1.25 was 3-17 world units -
       // the flat-block size band described at CORE_PX. Every small hot CORE in
@@ -1682,6 +1816,12 @@ export class Scene {
       const ff = 0.16 + hash2(sid, q * 17 + 3) * 0.72;
       const px = bx + stx(ff) + u * bw(ff) * 0.32;
       const py = lerp(axTop, axBot, ff) + sty(ff);
+      // Negative result, so it stays written down: sk reads like the same
+      // sign-crossing pulse as the two above and it is NOT one. It is consumed
+      // as 0.45 + sk*0.85, which bottoms out at 0.144, so the gain never
+      // crosses zero. A grep for `a + b*Math.sin` with b > a flags this line
+      // and is wrong about it; hooking the batch and looking at what actually
+      // arrives is what separated the three real sites from this one.
       const sk = 0.32 + 0.68 * Math.sin(t * (1.3 + hash2(sid, q * 7 + 1) * 2.0) + q * 2.4 + a.phase);
       const kk = k * (0.45 + sk * 0.85);
       this._emits(px, py, r * 1.5, cRim, kk * 0.26, S.GLOW, CEIL_WARM);
@@ -1716,7 +1856,9 @@ export class Scene {
         const si = Math.min(nq - 2, (fj * (nq - 1)) | 0), lf = fj * (nq - 1) - si;
         const nx = lerp(tp[si * 2], tp[si * 2 + 2], lf);
         const ny = lerp(tp[si * 2 + 1], tp[si * 2 + 3], lf);
-        const np = 0.35 + 0.65 * Math.sin(t * (1.9 + hq) + q * 2.7 + a.phase);
+        // Rectified: b > a, 32% of this cycle was negative. Same defect, same
+        // fix, and this is the one the review's (762,452) landed on.
+        const np = Math.max(0, 0.35 + 0.65 * Math.sin(t * (1.9 + hq) + q * 2.7 + a.phase));
         this._emits(nx, ny, r * 1.0, cMid, k * np * 0.42, S.GLOW, CEIL_WARM);
         this._emits(nx, ny, r * 0.52, cLive, k * np * 0.58, S.GLOW, CEIL_WARM);
       }
