@@ -479,7 +479,25 @@ class Game {
       // +0.025 linear to every pixel and welding the frame's black floor shut.
       // That made this scene the only one in the build that could never reach
       // black, and sent two agents looking for the cause in the environment.
-      tethered: () => this.player.attached && this.player.holdTime > 0.25 && this.flash < 0.01,
+      // ...and 0.01 was picked BY EYE and is about 20x too loose, which is why
+      // this scene spent many rounds as the only frame in the build that could
+      // not reach black. The tell is that the sampled frame has flash = 0.0097
+      // on seed 7 AND on seed 3 -- two different worlds, two different depths,
+      // identical to four decimals -- because the predicate resolves on the
+      // first step the flash clears its own gate. It was measuring the
+      // threshold, not the moment, which is also why the number was *stable* at
+      // 6.5-6.7% across many rounds instead of drifting.
+      //
+      // The arithmetic closes. postfx adds `flashCol * flash * 0.85`
+      // pre-tonemap, and flashCol's Rec.709 luminance is 0.797, so a residual
+      // 0.0097 lifts every pixel by 0.0066 linear -- against this frame's own
+      // HDR p10 of 0.0048. A 137% lift exactly where the L8 boundary lives.
+      // Proved by poking the identical frame: flash forced to 0 takes seed 3
+      // from 6.56% to 16.24% and seed 7 from 10.78% to 20.85%.
+      //
+      // 0.0006 leaves 0.0004 linear, under a tenth of p10. Do not loosen it
+      // without re-measuring blacks on all ten gate frames.
+      tethered: () => this.player.attached && this.player.holdTime > 0.25 && this.flash < 0.0006,
       launch: () => this.player.launchGlow > 0.55,
       // `fast` used to be satisfied by the same frame as `launch` (a launch is
       // when you are fastest), so on some seeds two of the named moments were
