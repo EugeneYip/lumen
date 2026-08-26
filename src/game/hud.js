@@ -23,22 +23,140 @@ import { clamp, clamp01, lerp, smoothstep, easeOutCubic, easeOutQuint, easeOutBa
 
 const FONT = `-apple-system, "SF Pro Display", "Helvetica Neue", Inter, "Segoe UI", system-ui, sans-serif`;
 
+/**
+ * The white ceiling, and why the interface is not allowed to be the brightest
+ * thing on screen.
+ *
+ * The hero is the mote. It is the only cold emitter in a warm-anchored frame
+ * and the grade work that made it so put it at the top of the value ladder on
+ * purpose; an interface sitting above it undoes that at the one place it
+ * matters. Measured on the twelve gate frames (seeds 7 and 3 x the six gated
+ * scenes) on the DELIVERED pixels — the GL canvas with this canvas composited
+ * over it — before any of this existed:
+ *
+ *   mote   max channel 248-254   luma 0.944-0.978   (and the mote is the GL
+ *                                                    layer's peak pixel in all
+ *                                                    twelve, so "scene peak"
+ *                                                    and "hero peak" coincide)
+ *   HUD    max channel 255       luma 1.000         in all twelve, 678-20217
+ *                                                    pixels per frame
+ *
+ * So the HUD out-valued the protagonist in every frame of the round, and the
+ * only pixels clipping to 255 anywhere in the image were these. Two independent
+ * reports landed on it the same day: a blind reviewer, and a peak-brightness
+ * probe that read the score numerals and nearly filed a clipping bug against
+ * the scene.
+ *
+ * NOTE, because it matters for anyone re-deriving this: `check.mjs` cannot see
+ * any of it. The gate samples `document.getElementById('gl')` only, so its
+ * `clipped 0.00%` was never a statement about the delivered image, and no
+ * number this file moves appears in the gate at all. Measure the composite.
+ *
+ * 0.85 is measured against that floor rather than adopted from the review: the
+ * dimmest the mote ever gets in a gate frame is 0.944, so the ceiling sits
+ * 0.094 luma — about 24 code values at the top end — below the worst case.
+ * Legibility is not the constraint it looks like. A neutral at 0.85 is sRGB
+ * 219, and the readouts sit on their own scrims at sRGB 25-40, which is over
+ * 11:1 — WCAG AAA is 7:1.
+ *
+ * The cap is applied AT THE SOURCES, not as a pass over the finished canvas,
+ * for two reasons. It is free, where a full-canvas pass is not; and Canvas2D
+ * has no min-blend that leaves transparent pixels alone — `darken` composites
+ * with source-over alpha semantics, so it would paint the ceiling colour over
+ * the whole frame. What makes source capping sufficient is that the overlay
+ * composites source-over: a composited pixel is a lerp between this canvas and
+ * the scene and can never exceed the brighter of the two. Hold every pixel on
+ * THIS canvas under the ceiling and the frame's peak is necessarily the scene's
+ * peak, which is the mote.
+ *
+ * Measured after, same twelve frames: HUD ink peaks at 0.834-0.845 luma / max
+ * channel 218-226, the composite's brightest pixel is the mote's own pixel in
+ * all twelve, and the count of pixels at 255 anywhere in the image went from
+ * 678-20217 to zero. Two frames still carry one 255 pixel each and both are in
+ * the GL layer, not here. Worst-case headroom is 0.099 luma, on seed 3 hushNear
+ * where the mote is dimmest; typical is 0.12. The HUD's own peak has also moved
+ * off the type: in ten of the twelve it is now the speed rail's handle, a 3px
+ * mark, rather than a block of numerals.
+ *
+ * Two states are deliberately exempt and should stay that way. `_paused` and
+ * `_death` both dim the whole frame under a scrim, which puts the mote below
+ * the readouts by construction — in a modal state the interface IS the subject.
+ * The ceiling still holds in both; nothing clips. It is only the ordering that
+ * inverts, and that is the right ordering there.
+ */
+const CEIL = 0.85;
+/**
+ * Body ink under an additive core. The core is what actually clipped: a body at
+ * 232 plus `lighter` white at alpha 0.36 is 324, and 324 clamps to 255 — which
+ * is also why the old core was invisible as shape. Splitting the ceiling into
+ * a body level and a reserved additive headroom means body + core lands ON the
+ * ceiling instead of through it, and the core reads as a lift for the first
+ * time (183 -> 219 is a visible 20%; 232 -> 255 was 10% and clipped).
+ */
+const BODY = 0.72;
+const CORE_K = (CEIL - BODY) / 0.36;   // largest call site asks 0.36; keep the relative weighting
+
+const LUMA = (c) => (c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722) / 255;
+/** Scale an sRGB triple down to at most `l` luma. Hue and saturation ratio survive. */
+const capL = (c, l) => { const y = LUMA(c); return y <= l ? c : c.map((v) => Math.round(v * l / y)); };
+/**
+ * A colour about to be used as body ink under an additive core. Accent colours
+ * are allowed all the way to CEIL as graphic marks — a tier diamond, a bracket,
+ * the speed handle — but the same accent inside a letterform has a core coming
+ * on top of it and has to leave the headroom. Missing this is what kept the
+ * score numerals at 0.884 after the first pass: `acc` is the gradient's MIDDLE
+ * stop, so mid-glyph was CEIL plus the core rather than CEIL.
+ */
+const asBody = (c) => capL(c, BODY);
+
 // --- sRGB UI palette. Three accents with one job each, plus the alarm. -------
-const INK      = [234, 247, 255];   // primary readout
-const ICE      = [182, 232, 252];
-const CYAN     = [104, 206, 244];
+// Every constant that could reach the ceiling is passed through `capL`, with
+// its authored value left in view so the intent is still readable. The dim end
+// of the palette is untouched — capping the ceiling must not flatten the ramp
+// underneath it, which is how you lose the labels.
+const PEAK     = capL([234, 247, 255], CEIL);   // hottest ink allowed: cores, the speed handle
+const INK      = capL([234, 247, 255], BODY);   // primary readout body
+const ICE      = capL([182, 232, 252], CEIL);
+const CYAN     = [104, 206, 244];               // 0.733 — under the ceiling already
 const STEEL    = [ 58, 138, 176];
 const DIM      = [134, 166, 184];   // secondary labels
 const FAINT    = [ 74, 104, 120];   // structure, rules, off states
-const WARM     = [255, 188,  98];   // records only
-const WARM_HI  = [255, 236, 198];
-const MINT     = [128, 252, 194];   // the chain
-const MINT_HI  = [228, 255, 242];
+const WARM     = [255, 188,  98];   // records only — 0.768, under
+const WARM_HI  = capL([255, 236, 198], CEIL);
+const MINT     = capL([128, 252, 194], CEIL);   // the chain
+const MINT_HI  = capL([228, 255, 242], BODY);   // only ever a body top, under a core
 const VIO      = [162, 108, 255];   // the Hush
-const VIO_HI   = [238, 224, 255];
+const VIO_HI   = capL([238, 224, 255], BODY);   // ditto: the Hush figure's body top
 const NIGHT    = [  2,   7,  12];   // scrims and contact shadows
 
+/**
+ * The bottom band the play HUD owns, in design units (multiply by `k`).
+ * Everything the rail draws lives inside it and the scrim covers all of it.
+ * Exported because only half of a safe area can live here: props are placed in
+ * `world.js`, which cannot see this file, so this is the number to enforce
+ * against. See `hudSafeBottom`.
+ */
+const SAFE = 118;
+
 const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a < 0 ? 0 : a > 1 ? 1 : a})`;
+
+/** The UI scale the HUD lays out on. One definition, so callers agree with it. */
+export const hudScale = (W, H) => clamp(Math.min(W / 1440, H / 810), 0.62, 1.34);
+
+/**
+ * Height in CSS pixels of the bottom safe area, measured up from the frame
+ * edge. A blind review found foreground corals growing through the words SPEED
+ * and M/S; the scrim added here fixes the contrast half of that, but a prop
+ * that occupies the band is still a prop in the way of the readout. Nothing in
+ * `hud.js` can move a prop, so this export exists for whoever does.
+ *
+ * 131px at 1600x900, 14.6% of the frame. Measured on the scene layer inside it,
+ * all twelve gate frames: peak luma 0.336-0.838, so there is bright geometry in
+ * the band in EVERY one of them, and behind the word SPEED specifically it runs
+ * to mean 0.628 / peak 0.759 (seed 7 `launch`, a coral colony). The scrim and
+ * the local plates below make that legible; they cannot make it uncluttered.
+ */
+export const hudSafeBottom = (W, H) => Math.round(SAFE * hudScale(W, H));
 
 // --- glyph library ----------------------------------------------------------
 // Centrelines on a 100-unit cap height, inset by half the stroke weight so a
@@ -150,6 +268,37 @@ export class Hud {
     try { ctx.letterSpacing = '0px'; } catch { /* ignore */ }
     ctx.textAlign = 'left';
     return w;
+  }
+
+  /**
+   * A centred line assembled from runs that each carry their own tracking.
+   *
+   * Micro-cap tracking is what makes a word read as an instrument label, and it
+   * is exactly wrong on figures: at 5.0k tracking on a 9.5k face the gap
+   * between two digits is more than half a glyph, so the number stops being a
+   * number. A blind review read the score's `21 M` sub-label as "2 1  M" —
+   * three tokens where there are two. Words keep the tracking; figures get
+   * almost none. Each run's own tracking is taken back off its width because
+   * `letterSpacing` applies after the final glyph too.
+   */
+  _runs(parts, cx, y, size, weight, col, a) {
+    const ctx = this.ctx;
+    ctx.textAlign = 'left';
+    let total = 0;
+    for (const p of parts) {
+      this._font(size, weight, p.t);
+      p.w = ctx.measureText(p.s).width - p.t;
+      total += p.w;
+    }
+    let x = cx - total / 2;
+    for (const p of parts) {
+      this._font(size, weight, p.t);
+      ctx.fillStyle = rgba(p.c || col, p.a == null ? a : p.a);
+      ctx.fillText(p.s, x, y);
+      x += p.w;
+    }
+    try { ctx.letterSpacing = '0px'; } catch { /* older engines */ }
+    return total;
   }
 
   /** Fixed-advance system-font digits, for the few strings the vector set lacks. */
@@ -305,11 +454,26 @@ export class Hud {
     return g;
   }
 
-  /** Top-weighted highlight, drawn additively inside the stroke. */
+  /**
+   * Top-weighted highlight, drawn additively inside the stroke — light falls
+   * from the roof here, so it falls on the type too.
+   *
+   * The requested alpha is scaled by `CORE_K` so that the largest call site
+   * (0.36) adds exactly the headroom reserved between `BODY` and `CEIL`, and
+   * every other call site keeps its weighting relative to it. Unscaled, this
+   * was the single source of every clipped pixel in the delivered frame: 255 x
+   * 0.36 on top of a body already at 232.
+   */
   _core(y, cap, a) {
+    // Clamped to the reference weight as well as scaled by it, so the ceiling
+    // is a property of this primitive and not of every call site remembering:
+    // the chain figure asked for 0.30 + 0.22 * hot, which reaches 0.52 at x24
+    // and would have put one readout back through the ceiling at exactly the
+    // moment a player is looking at it.
+    const w = Math.min(a, 0.36) * CORE_K;
     const g = this.ctx.createLinearGradient(0, y - cap, 0, y);
-    g.addColorStop(0, `rgba(255,255,255,${a})`);
-    g.addColorStop(0.42, `rgba(255,255,255,${a * 0.42})`);
+    g.addColorStop(0, `rgba(255,255,255,${w})`);
+    g.addColorStop(0.42, `rgba(255,255,255,${w * 0.42})`);
     g.addColorStop(1, 'rgba(255,255,255,0)');
     return g;
   }
@@ -402,7 +566,7 @@ export class Hud {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
 
-    const k = clamp(Math.min(W / 1440, H / 810), 0.62, 1.34);
+    const k = hudScale(W, H);
     const d = Math.min(dt, 1 / 20);
 
     if (s.mode === 'title') { this._title(s, W, H, k); return; }
@@ -416,6 +580,7 @@ export class Hud {
     if (fade > 0.004) {
       ctx.save();
       ctx.globalAlpha = fade;
+      this._floor(W, H, k);
       this._strip(s, W, H, k);
       this._score(s, W, H, k);
       this._chain(s, W, H, k);
@@ -519,10 +684,15 @@ export class Hud {
     // --- the wordmark ---
     this._streak(cx, mid + cap * 0.04, mw * 0.96, cap * 0.40, CYAN, 0.20 + 0.26 * swell);
 
+    // Authored values, run through the ceiling. The top two stops were 0.999
+    // and 0.951 luma, and the wordmark was 20217 pixels of pure 255 — by a wide
+    // margin the largest clipped region in any frame of the round. The mote is
+    // on screen and drifting at 0.968 on the title too, so the same rule holds
+    // here: the light is the subject, not the lettering that names it.
     const wg = ctx.createLinearGradient(0, base - cap, 0, base);
-    wg.addColorStop(0, 'rgba(253,255,255,0.99)');
-    wg.addColorStop(0.20, 'rgba(219,248,255,0.99)');
-    wg.addColorStop(0.62, 'rgba(122,208,242,0.98)');
+    wg.addColorStop(0, rgba(capL([253, 255, 255], BODY), 0.99));
+    wg.addColorStop(0.20, rgba(capL([219, 248, 255], BODY), 0.99));
+    wg.addColorStop(0.62, rgba(capL([122, 208, 242], BODY), 0.98));
     wg.addColorStop(1, 'rgba(34,120,164,0.97)');
     const wopt = { align: 'center', track: 30, kern: KERN, weight: 0.142 };
     this._vtext('LUMEN', cx, base, cap, {
@@ -531,29 +701,34 @@ export class Hud {
       shadow: 0.30, glow: 0.95 + 1.5 * swell, glowCol: CYAN,
       glowR: 0.62, glowRamp: [[1.9, 0.05], [1.32, 0.085]],
     });
-    // caustics: light through moving water, always alive on the letterforms
+    // caustics: light through moving water, always alive on the letterforms.
+    // Source-over toward the ceiling colour rather than `lighter`: additive on
+    // top of a body that is already near the ceiling has no headroom by
+    // construction, and a lerp toward PEAK reads as the same travelling
+    // highlight while being bounded by PEAK whatever it lands on.
     const cph = Math.sin(t * 0.21) * 0.5 + 0.5;
     ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < 2; i++) {
       const px = lerp(cx - mw * 0.58, cx + mw * 0.58, i === 0 ? cph : 1 - cph * 0.7);
       const cg = ctx.createLinearGradient(px - cap * 0.46, base - cap, px + cap * 0.46, base);
-      cg.addColorStop(0, rgba(ICE, 0));
-      cg.addColorStop(0.5, rgba(ICE, i === 0 ? 0.20 : 0.12));
-      cg.addColorStop(1, rgba(ICE, 0));
+      cg.addColorStop(0, rgba(PEAK, 0));
+      cg.addColorStop(0.5, rgba(PEAK, i === 0 ? 0.40 : 0.24));
+      cg.addColorStop(1, rgba(PEAK, 0));
       this._vtext('LUMEN', cx, base, cap, { ...wopt, body: cg });
     }
     ctx.restore();
 
-    // a band of light travelling through the letterforms
+    // a band of light travelling through the letterforms. Same reasoning as the
+    // caustics: a lerp toward a mint at the ceiling, not 0.85 of MINT_HI added
+    // on top of a body at 0.99 — which is 1.8x white and clipped a whole
+    // letterform at a time.
     if (sweepA > 0.01) {
       const px = lerp(cx - mw * 0.70, cx + mw * 0.70, sweep);
       ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
       const g = ctx.createLinearGradient(px - cap * 0.58, 0, px + cap * 0.58, 0);
-      g.addColorStop(0, rgba(MINT_HI, 0));
-      g.addColorStop(0.5, rgba(MINT_HI, 0.85 * sweepA));
-      g.addColorStop(1, rgba(MINT_HI, 0));
+      g.addColorStop(0, rgba(MINT, 0));
+      g.addColorStop(0.5, rgba(MINT, 0.88 * sweepA));
+      g.addColorStop(1, rgba(MINT, 0));
       this._vtext('LUMEN', cx, base, cap, {
         align: 'center', track: 30, kern: KERN, weight: 0.142, body: g,
       });
@@ -660,8 +835,28 @@ export class Hud {
     const pop = easeOutCubic(this.recordPop) * 0.5 + this.mile * 0.4;
 
     const numW = this._measure(str, cap);
-    this._plate(cx, base - cap * 0.42, numW * 0.80 + 100 * k, cap * 1.5, 0.34);
-    if (this.mile > 0.01) this._streak(cx, base - cap * 0.40, numW * 0.9 + 120 * k, cap * 0.38, acc, 0.32 * this.mile);
+    // The scrim and the streak are sized from a FLOOR, not from the digits, and
+    // that is the fixable half of a real complaint: a reviewer found the score
+    // block's left margin moving between builds. It is not jitter — figures are
+    // fixed-advance, so a changing readout cannot move within a build. It is
+    // that the block is centre-aligned and every part of it is sized from the
+    // FIGURE COUNT, and the figure count at a named scene is whatever that
+    // build's run happened to have banked. Computed at cap 54k on a 1600x900
+    // frame, where one figure is 50.4px: 3 figures -> 4 adds the group space
+    // too, so the numerals' left edge steps 32.4px and the plate's steps
+    // 51.8px; 4 -> 5 is 18.0px and 28.8px. The counts really do differ across
+    // the frames a reviewer is handed — seed 7 is at 448 when `fast` resolves
+    // and 1552 at the 400m depth mark, three figures against four, and which
+    // side of that a named moment falls on is decided by the physics and the
+    // routing, not by this file. Flooring the plate and the streak at a
+    // four-figure block removes the larger of the two steps for every score
+    // under 10 000. The numerals themselves
+    // still move, and they cannot be made not to while the headline is centred
+    // — the only real fix is to anchor the block, which is a composition change
+    // and not one to make unilaterally.
+    const blockW = Math.max(numW, this._measure('0 000', cap));
+    this._plate(cx, base - cap * 0.42, blockW * 0.80 + 100 * k, cap * 1.5, 0.34);
+    if (this.mile > 0.01) this._streak(cx, base - cap * 0.40, blockW * 0.9 + 120 * k, cap * 0.38, acc, 0.32 * this.mile);
 
     this._label(rec ? 'NEW BEST' : 'SCORE', cx, labY, 10 * k, 700, 5.8 * k,
       rec ? WARM : DIM, rec ? 0.98 : 0.82, 'center');
@@ -670,14 +865,18 @@ export class Hud {
     for (let i = 0; i < this.dfx.length; i++) this.liftBuf[i] = -this.dfx[i] * numCap * 0.15;
     this._vtext(str, cx, base, numCap, {
       align: 'center', weight: 0.15, dfx: this.liftBuf,
-      body: this._grad(base, cap, rgba(INK, 0.99), rgba(acc, 0.98), rgba(rec ? [186, 118, 44] : STEEL, 0.97)),
+      body: this._grad(base, cap, rgba(INK, 0.99), rgba(asBody(acc), 0.98), rgba(rec ? [186, 118, 44] : STEEL, 0.97)),
       core: this._core(base, cap, 0.36),
       shadow: 0.52, glow: 0.55 + pop * 0.9, glowCol: acc,
     });
 
-    const dm = Math.round(Math.max(0, s.depth || 0)) + ' M';
-    this._label(s.best > 0.5 ? dm + '   ·   ' + (rec ? 'PASSED ' : 'BEST ') + group(Math.round(s.best)) : dm,
-      cx, base + 20 * k, 9.5 * k, 600, 5 * k, rec ? WARM : FAINT, rec ? 0.85 : 1, 'center');
+    const parts = [{ s: String(Math.round(Math.max(0, s.depth || 0))), t: 1.4 * k }, { s: ' M', t: 3.4 * k }];
+    if (s.best > 0.5) {
+      parts.push({ s: '   ·   ', t: 3.0 * k },
+        { s: rec ? 'PASSED ' : 'BEST ', t: 5.0 * k },
+        { s: group(Math.round(s.best)), t: 1.4 * k });
+    }
+    this._runs(parts, cx, base + 20 * k, 9.5 * k, 600, rec ? WARM : FAINT, rec ? 0.85 : 1);
     ctx.textAlign = 'left';
   }
 
@@ -702,6 +901,13 @@ export class Hud {
 
     const numW = this._measure(txt, cap);
     this._plate(rx - numW * 0.45, base - cap * 0.40, numW * 0.8 + 92 * k, cap * 1.5, 0.34);
+    // The pop streak used to be drawn last, additively, ON TOP of the figure —
+    // 0.32 of MINT added to a body already at the ceiling is the same clipping
+    // mechanism as the core. Behind the number it is a lens artefact rather
+    // than a wash, which is what the rest of the frame's streaks already are.
+    if (pop > 0.02 && s.mult > 1) {
+      this._streak(rx - numW * 0.5, base - cap * 0.36, numW * 0.9 + 70 * k, cap * 0.34, acc, 0.32 * pop);
+    }
 
     // tier diamonds, left of the label
     for (let i = 0; i < tier; i++) {
@@ -718,9 +924,9 @@ export class Hud {
     // plankton make a step. The figure joins it once there is one to show.
     if (s.mult > 1) this._vtext(txt, rx, base, cap, {
       align: 'right', weight: 0.15,
-      body: this._grad(base, cap, rgba(MINT_HI, 0.99), rgba(acc, 0.98),
+      body: this._grad(base, cap, rgba(MINT_HI, 0.99), rgba(asBody(acc), 0.98),
         rgba([Math.round(acc[0] * 0.40), Math.round(acc[1] * 0.62), Math.round(acc[2] * 0.50)], 0.97)),
-      core: this._core(base, cap, 0.30 + 0.22 * hot),
+      core: this._core(base, cap, 0.30 + 0.06 * hot),
       shadow: 0.52, glow: 0.5 + pop * 1.3 + hot * 0.7, glowCol: acc,
     });
 
@@ -765,10 +971,57 @@ export class Hud {
         ctx.fillRect(x, sy, segW * part, sh);
       }
     }
-    if (pop > 0.02 && s.mult > 1) {
-      this._streak(rx - numW * 0.5, base - cap * 0.36, numW * 0.9 + 70 * k, cap * 0.34, acc, 0.32 * pop);
-    }
     ctx.textAlign = 'left';
+  }
+
+  // =========================================================== bottom scrim ==
+  /**
+   * `_strip`'s counterpart at the other edge, and the contrast half of a bottom
+   * safe area.
+   *
+   * The seabed is where the level's geometry is: kelp, reeds, coral and the
+   * trench floor all grow up into the band the speed rail lives in, and a blind
+   * review found a coral arm passing straight through the word SPEED — already
+   * the lowest-contrast text in the frame, because the only scrim under it was
+   * an ellipse that had faded to nothing by the time it reached that label.
+   *
+   * Full width and constant in x on purpose. `tools/_hair.mjs` scores
+   * column-to-column steps, and AI_HANDOFF §8 already records this file's
+   * "THE HUSH" panel as the largest one in every hushNear frame. A band with no
+   * horizontal variation adds exactly zero to that statistic, where a
+   * partial-width or feathered-at-the-ends scrim would have added two more
+   * vertical edges to a seam hunt that has been misdirected by this file
+   * before.
+   *
+   * `SAFE` is the same constant `hudSafeBottom` exports, so the darkened band
+   * and the band props are asked to stay out of are the same band by
+   * construction rather than by two numbers agreeing for now.
+   *
+   * Cost, because a full-width fill every frame is not free. Interleaved
+   * old/new/old/new with `tools/_perf.mjs` at 1600x900 on `fast`: the HUD pass
+   * goes 0.188ms -> 0.200ms, +0.012ms, and ablating just this method is below
+   * that instrument's own 0.0125ms quantum — four ablation pairs both bottomed
+   * out at 0.200ms. Geometrically it is one fillRect of 1600x131 = 210k pixels,
+   * 79% of the area of the `_strip` fill this file has always done at the top
+   * edge, so at worst it doubles a cost that already fits.
+   *
+   * A negative result worth not repeating: forcing rasterisation with a
+   * `getImageData` per iteration, to measure what `gl.finish()` does not flush,
+   * reports `hud.draw` at 30ms. That is 150x the whole HUD pass and it is the
+   * readback, not the draw — headless Chrome software-rasterises this canvas.
+   * Only the ratio it gives is usable (+10.5%, stable over three pairs). There
+   * is no instrument here that measures 2D rasterisation honestly; do not build
+   * a budget on one.
+   */
+  _floor(W, H, k) {
+    const ctx = this.ctx;
+    const b = SAFE * k;
+    const g = ctx.createLinearGradient(0, H - b, 0, H);
+    g.addColorStop(0, rgba(NIGHT, 0));
+    g.addColorStop(0.44, rgba(NIGHT, 0.30));
+    g.addColorStop(1, rgba(NIGHT, 0.62));
+    ctx.fillStyle = g;
+    ctx.fillRect(0, H - b, W, b);
   }
 
   // ============================================================ speed rail ===
@@ -777,33 +1030,66 @@ export class Hud {
     const p = s.player || {};
     const rw = Math.round(clamp(380 * k, 190, W * 0.42));
     const rx = Math.round(W * 0.5 - rw / 2), ry = Math.round(H - 44 * k);
-    const h = Math.max(2, 3 * k);
+    const h = Math.max(3, 4.4 * k);
     const f = clamp01((s.speed || 0) / 2800);
     const tf = clamp01((s.topSpeed || 0) / 2800);
     const hair = Math.max(1, 1 / this.dpr);
 
-    this._plate(W * 0.5, ry - 6 * k, rw * 0.72, 56 * k, 0.34);
+    // The elliptical plate stays, but at two thirds of its old weight: `_floor`
+    // now carries the contrast and two scrims stacked crush the seabed. It was
+    // never enough on its own and the geometry says why — it is an ellipse
+    // centred on the rail at 0.72 of the rail's half-width, so SPEED at the
+    // left end and M/S at the right end sit at the horizontal extremes where it
+    // has already fallen to zero. Those are exactly the two labels the review
+    // named as lowest-contrast, and exactly the two a coral was growing through.
+    this._plate(W * 0.5, ry - 6 * k, rw * 0.72, 56 * k, 0.22);
+    // ...and the two ends get plates of their own, which is the other half of
+    // why they were the worst text in the frame: every figure in this file is
+    // drawn through `_vtext` with a contact shadow under it, and these two
+    // labels go through `_label`, which has none. Measured on the scene layer
+    // behind the word SPEED, seed 7 `launch`: mean luma 0.628, peak 0.759 — a
+    // warm coral colony growing straight through it, so FAINT ink at 0.395 was
+    // DARKER than its own background. Every one of the twelve gate frames has
+    // geometry in this band peaking at 0.34-0.84, so this is not one bad seed.
+    this._plate(rx + 30 * k, ry - 19 * k, 62 * k, 19 * k, 0.55);
+    this._plate(rx + rw - 46 * k, ry - 21 * k, 76 * k, 22 * k, 0.50);
 
     // labels sit above, so the rail is the last thing before the frame edge
-    this._label('SPEED', rx, ry - 14 * k, 9.5 * k, 700, 5 * k, FAINT, 1);
+    this._label('SPEED', rx, ry - 14 * k, 9.5 * k, 700, 5 * k, DIM, 1);
     const ms = String(Math.round((s.speed || 0) / 10));
-    const uw = this._label('M/S', rx + rw, ry - 14 * k, 9 * k, 700, 2.8 * k, FAINT, 1, 'right');
+    const uw = this._label('M/S', rx + rw, ry - 14 * k, 9 * k, 700, 2.8 * k, DIM, 1, 'right');
     this._vtext(ms, rx + rw - uw - 7 * k, ry - 12 * k, 19 * k, {
       align: 'right', body: rgba(DIM, 0.96), core: this._core(ry - 12 * k, 19 * k, 0.2),
       shadow: 0.34, weight: 0.16,
     });
 
-    ctx.fillStyle = rgba(FAINT, 0.34);
+    // The unfilled track. It was 3.3px of FAINT at 0.34, which measured on the
+    // `fast` frame at x=1000 as composite [39,53,59] against rock at [26,29,31]
+    // — 13-28 code values of separation, so wherever the seabed is pale it is
+    // simply not there. A blind review called it a 1px hairline; that is what a
+    // 3px smear at that contrast looks like, and the height was never the
+    // problem on its own. It is now 4.4k on a dark groove of its own, at close
+    // to twice the ink, which is what makes an empty track read as a track
+    // rather than as a scratch.
+    ctx.fillStyle = rgba(NIGHT, 0.55);
+    ctx.fillRect(rx - hair, ry - hair, rw + hair * 2, h + hair * 2);
+    ctx.fillStyle = rgba(STEEL, 0.42);
     ctx.fillRect(rx, ry, rw, h);
     for (let i = 0; i <= 8; i++) {
       const x = Math.round(rx + (rw * i) / 8);
       const th = (i % 4 === 0 ? 6 : 3.5) * k;
-      ctx.fillStyle = rgba(FAINT, i % 4 === 0 ? 0.6 : 0.34);
+      ctx.fillStyle = rgba(FAINT, i % 4 === 0 ? 0.7 : 0.42);
       ctx.fillRect(x, ry - th - 2 * k, hair, th);
     }
+    // The handle's streak goes UNDER the fill, not over it. Additively on top
+    // it was 0.34 of ICE landing on a bar whose hot end is at the ceiling;
+    // underneath, the part that shows is the halo spilling past the bar's end,
+    // which is the whole point of an anamorphic streak anyway.
+    const hx = Math.round(rx + rw * f);
+    this._streak(hx, ry + h * 0.5, 26 * k, 9 * k, ICE, 0.34);
     const g = ctx.createLinearGradient(rx, 0, rx + rw, 0);
-    g.addColorStop(0, rgba(STEEL, 0.6));
-    g.addColorStop(0.55, rgba(CYAN, 0.9));
+    g.addColorStop(0, rgba(STEEL, 0.88));
+    g.addColorStop(0.55, rgba(CYAN, 0.95));
     g.addColorStop(1, rgba(WARM_HI, 0.99));
     ctx.fillStyle = g;
     ctx.fillRect(rx, ry, rw * f, h);
@@ -811,9 +1097,7 @@ export class Hud {
       ctx.fillStyle = rgba(ICE, 0.38);
       ctx.fillRect(Math.round(rx + rw * tf), ry - 6 * k, Math.max(1, 1.4 * k), 6 * k);
     }
-    const hx = Math.round(rx + rw * f);
-    this._streak(hx, ry + h * 0.5, 26 * k, 9 * k, ICE, 0.34);
-    ctx.fillStyle = rgba(INK, 0.97);
+    ctx.fillStyle = rgba(PEAK, 0.97);
     ctx.fillRect(hx - Math.max(1, 1.4 * k), ry - 4 * k, Math.max(2, 2.8 * k), h + 8 * k);
 
     // --- release window: the wordless timing teacher ---
@@ -835,8 +1119,11 @@ export class Hud {
         ctx.fillStyle = gg;
         ctx.fillRect(W * 0.5 - w / 2, gy - 1 * k, w, Math.max(2, 3 * k));
         if (rwin > 0.7) {
-          ctx.globalCompositeOperation = 'lighter';
-          ctx.fillStyle = rgba(MINT_HI, 0.6 * (rwin - 0.7) / 0.3);
+          // Measured: this was the last thing in the file over the ceiling, at
+          // [168,255,225] on seed 7 hazardNear — additive MINT_HI on top of a
+          // mint bar that was already lit. Source-over toward a mint AT the
+          // ceiling is the same white-hot tick and cannot stack.
+          ctx.fillStyle = rgba(MINT, 0.92 * (rwin - 0.7) / 0.3);
           ctx.fillRect(W * 0.5 - 1 * k, gy - 6 * k, Math.max(2, 2.2 * k), 13 * k);
         }
       }
@@ -1035,7 +1322,7 @@ export class Hud {
       ctx.globalAlpha = land;
       this._vtext(str, cx, cy, numCap, {
         align: 'center', weight: 0.148,
-        body: this._grad(cy, numCap, rgba(INK, 0.99), rgba(acc, 0.99), rgba(isRec ? [184, 116, 40] : STEEL, 0.98)),
+        body: this._grad(cy, numCap, rgba(INK, 0.99), rgba(asBody(acc), 0.99), rgba(isRec ? [184, 116, 40] : STEEL, 0.98)),
         core: this._core(cy, numCap, 0.34),
         shadow: 0.55, glow: 0.7 + (1 - land) * 1.5, glowCol: acc,
       });
@@ -1088,7 +1375,7 @@ export class Hud {
       const off = unit ? 8 * k : 0;
       const vw = this._vtext(val, x - off, vy, 26 * k, {
         align: 'center', weight: 0.155,
-        body: rgba(warm ? WARM : INK, 0.95), core: this._core(vy, 26 * k, 0.22),
+        body: rgba(asBody(warm ? WARM : INK), 0.95), core: this._core(vy, 26 * k, 0.22),
         shadow: 0.42, glow: 0.32, glowCol: warm ? WARM : CYAN,
       });
       if (unit) this._label(unit, x - off + vw / 2 + 7 * k, vy, 9 * k, 700, 2.4 * k, FAINT, 1);
@@ -1097,8 +1384,10 @@ export class Hud {
     if (!isRec && s.best > 0.5) {
       ctx.save();
       ctx.globalAlpha = st(0.5, 0.3) * 0.85;
-      this._label('BEST ' + group(Math.round(s.best)) + '   ·   ' + group(Math.max(0, Math.round(s.best - (s.score || 0)))) + ' SHORT',
-        cx, sy + 92 * k, 10 * k, 600, 5.6 * k, DIM, 0.85, 'center');
+      this._runs([{ s: 'BEST ', t: 5.6 * k }, { s: group(Math.round(s.best)), t: 1.5 * k },
+        { s: '   ·   ', t: 3.2 * k },
+        { s: group(Math.max(0, Math.round(s.best - (s.score || 0)))), t: 1.5 * k },
+        { s: ' SHORT', t: 5.6 * k }], cx, sy + 92 * k, 10 * k, 600, DIM, 0.85);
       ctx.restore();
     }
 
