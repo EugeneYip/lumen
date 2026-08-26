@@ -722,6 +722,28 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **An objective acceptance bar can still be unreachable — check it against a
+  control before adopting it.** A reviewer proposed "no stroke may have a
+  neighbour within 100px sharing its angle to within 5°", which is exactly the
+  kind of measurable target this project wants, and I adopted it. It has **no
+  zero available**: a control of 234 strokes at *independent random angles over
+  76°* still fails it at **95.3%**, because the shipped density puts 11.5 other
+  strokes within 100px of the average one and twelve strokes cannot be pairwise
+  5° apart inside less than 55° of range. Pigeonhole, not tuning.
+  The bar is still useful — it separates ruled (100%) from scattered (95%) — but
+  the *target* has to be a quantity that can actually move, and here that was
+  **twins per stroke** (4.06 → 2.71). **Run a deliberately-good control through
+  any new acceptance bar and see what it scores**, before anyone spends a round
+  chasing a number that cannot be reached.
+
+- **The rock's remaining angle regularity is the FAULT planes, not the joints.**
+  Measured through the same tracer: faults account for 1.38 twins per stroke,
+  **34% of everything left** after the joint families were fixed. `FAULTW` is
+  global and `faultShear` is a function of `y` alone, so within one plane every
+  fault at a given height has *exactly* the same angle — which is the joint set's
+  old construction, still standing. Fixing it is a structural change to
+  `bedFrame`'s `fu`, not a tuning job.
+
 - **Ablate the CALL SITE, not the pass.** The kill switches (`?noSprites=1`,
   `?noRibbons=1`, `?bgNo*=1`) narrow an artefact to a *system*, and that is where
   most attributions here have stopped — and where three of mine this session were
