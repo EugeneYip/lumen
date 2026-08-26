@@ -696,6 +696,31 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **`_hair.mjs` was built for ruled lines and cannot see an orientation
+  distribution — which is what "ruled" actually means.** It samples neighbours a
+  few *columns* away on a horizontal scanline, so it detects near-vertical lines
+  and is blind to horizontal ones, and "no two strokes share an angle" is a
+  statement about orientation that a single-direction scan cannot reach at all.
+  `tools/_hairdir.mjs` is the same statistic swept over 0-175° in 5° steps.
+  Validated against 90 strokes of identical length, width and contrast at angle
+  jitters of 0/6/12/18/25/40/90°, it reads 0.617 / 0.530 / 0.478 / 0.441 / 0.393
+  / 0.291 / 0.085 — monotone, both halves agreeing in sign. **Looking at those
+  same controls by eye, ±18° still reads as hatch**, which is a useful number to
+  have: scattering an angle a little is not enough.
+  `tools/_lean.mjs` goes further and traces the joint cores through all four
+  layers to report the angle distribution directly. Prefer it for anything cut
+  from a level set: a *frame* dilutes an angle statistic with grain, camera roll,
+  bedding and four superposed populations, and the level set has none of that.
+
+- **A notch statistic counts ink, so it can move against the art and be right.**
+  When the far-wall hatch was warped into curves, notch energy *rose* at 400m and
+  *fell* at 900m — consistently in two independent instruments, so not noise. The
+  warp varies the gradient of the field the lattice is cut from, joints are wider
+  where it stretches, and the deep-pixel count is convex in width. Neither
+  statistic measures the angle distribution, which was the actual defect. **If a
+  measurement and a 3x crop disagree, say so and keep both** rather than tuning
+  until the number agrees.
+
 - **BEFORE TRUSTING AN INSTRUMENT, BUILD A CONTROL IT MUST BE ABLE TO SEE.** This
   is the single highest-return habit in this project and it has now caught three
   instruments in a row, each of which would otherwise have cost a round:
