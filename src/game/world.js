@@ -1237,13 +1237,87 @@ export class World {
   }
 
   // ---- decor: ecosystems, not scatter -------------------------------------
-  /** A stand of kelp: dense at the heart, one prevailing lean, one light level. */
+  /**
+   * A stand of kelp: dense at the heart, one prevailing lean, one light level.
+   *
+   * NEGATIVE RESULT, and it is the important part of this function's history.
+   * A blind reviewer called the kelp field "barbed wire or frost, not plant" -
+   * "every reed a perfectly straight stroke, zero curvature anywhere in a
+   * 240x160 crop" - and prescribed a per-segment curvature term here. DO NOT
+   * ADD ONE. The curvature is already in the data and it is large:
+   *
+   *   render.js lays the stalk on x = f*f*(lean*205 + wave*168), y = -h*f,
+   *   a parabola. Measured on the frames the reviewer saw (seed 7 `fast`,
+   *   31 strands on screen, projected through the real camera at 0.833 px/wu):
+   *     bow / chord            p10  5.3%   med  9.3%   p90 14.0%
+   *     bow in screen px       p10 14.7    med 32.2    p90 48.1
+   *   and sampling the RENDERED pixels along each predicted medial axis says
+   *   the ink is spread over the whole strand, not hidden in a faint tip:
+   *     90% of a strand's ink lies below f=0.83, and the bow of the part you
+   *     can actually see is med 18px over a med 280px chord - a 25 degree turn.
+   *
+   * So the stalks are not straight, and nothing downstream flattens them: the
+   * ribbon renderer plants its vertices exactly on the polyline (its miter
+   * only compensates width), and drawing the same polylines as plain strokes
+   * at the same widths and the same scale reads unmistakably as bent grass.
+   *
+   * What makes the frame read ruled is drawn ON TOP of that curve. Isolated by
+   * elimination, per AI_HANDOFF s7: `?noSprites=1` keeps the stalks (ribbons)
+   * and removes the blades (sprites), and with it the same seed-7 crop reads as
+   * a stand of curved reeds. Put the blades back and it is barbed wire again.
+   * The blades are ~12 straight S.SHARD quads per strand (dark plus lit), 36-80
+   * px long, on strictly alternating sides, at 0.52 +- 0.34 rad off the local
+   * tangent with no per-instance angle term at all - the second shape trap in
+   * AGENTS.md, a dozen times per plant. They out-number and out-length the one
+   * curve they sit on, and the eye reads the barbs.
+   *
+   * That is `render.js` territory and this file cannot reach it: _kelp consumes
+   * only x, y, h, w, phase, sway, lean, glow, depth (it ignores `segs`), the
+   * f*f profile and the blade angles are constants in that file, and `lean`
+   * only scales the SAME parabola - more lean is a strand lying further over,
+   * not a strand with a different shape. Do not spend a round here on it.
+   *
+   * The population reading was checked too, since "no two strokes share an
+   * angle" is a claim about the field rather than one strand. It holds already:
+   * over six seeds, per-bed s.d. of stroke angle is 11-17 deg with a 30-53 deg
+   * range, and adjacent strands differ by 12-18 deg. Beds are not ruled.
+   *
+   * And do not gate this on `_hair.mjs`. It measures how much thin-line stuff
+   * is present, not whether the lines are straight, so it has no power over
+   * curvature at all - the same failure `_comb.mjs` had against a radial
+   * asterisk (AI_HANDOFF s8). Controlled by drawing these very strands twice at
+   * identical widths and endpoints, once on their real curve and once on their
+   * endpoint chords: the perfectly ruled control scored notch 79.5 against the
+   * curved version's 86.2, i.e. LOWER, while its deep>3 count went the other
+   * way, 49286 against 39403. The two halves disagree in sign. What has power
+   * here is the sprite/ribbon ablation and a 4x crop.
+   */
   _kelpBed(D, r, p, cx, halfW, n, lum) {
     const lean = r.range(-0.30, 0.30);
     const tall = r.range(0.75, 1.30);
+    // Fit the bed inside the phrase BEFORE placing strands. Placing at
+    // cx + u*halfW and clamping each strand to the phrase bound afterwards is
+    // not a nudge, it is a projection: every strand that overflowed landed on
+    // EXACTLY p.x0+8 or p.x1-8. render.js keys every hashed detail of a strand
+    // off sid = (d.x*3.11)|0, so a coincident x is the same plant drawn twice -
+    // same holdfast lobes, same blade lengths and widths, same fibre noise -
+    // planted on the same bandBot(x). Measured over eight seeds, every
+    // coincident group sat on a phrase bound; seed 5 stacked SEVEN strands on
+    // one point (22% of its kelp) and seed 2 stacked six. Moving the centre
+    // draws no extra RNG value, which is the constraint that matters:
+    // reshuffling the stream would make every A/B capture compare two
+    // different worlds (AI_HANDOFF s4).
+    const hw = Math.min(halfW, Math.max(1, (p.len - 16) * 0.5));
+    const bx = clamp(cx, p.x0 + 8 + hw, p.x1 - 8 - hw);
     for (let i = 0; i < n; i++) {
-      const u = clamp(r.normal() * 0.42, -1, 1);
-      const kx = clamp(cx + u * halfW, p.x0 + 8, p.x1 - 8);
+      // ...and the same argument applies to the shape clamp. r.normal() is real
+      // Box-Muller, so |z| > 2.381 happens about 1.7% of the time and clamping
+      // parked every one of those on u = +-1 exactly - a second plateau, and
+      // two hits in one bed coincide just as hard. tanh saturates without ever
+      // arriving, and inside the body (|z*0.42| < 0.42, 68% of draws) it moves
+      // a strand by under 6% of the bed half-width.
+      const u = Math.tanh(r.normal() * 0.42);
+      const kx = bx + u * hw;
       const h = r.range(190, 560) * tall * (1 - 0.5 * Math.abs(u)) + 95;
       const far = r.chance(0.26);
       D.push({
