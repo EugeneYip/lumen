@@ -107,9 +107,22 @@ async function assertNotBlank(file) {
 const SHELL = (body, w, h) => `<!doctype html><meta charset=utf-8><style>
  *{margin:0;padding:0;box-sizing:border-box}
  html,body{width:${w}px;height:${h}px;background:#000;overflow:hidden}
- .wrap{display:flex;width:100%;height:100%}
- .cell{position:relative;flex:1;height:100%;overflow:hidden}
+ /* THE TWO HALVES MUST SIT ON AN EXACT TOTAL/2 PITCH. They did not: the
+    divider used to take layout space, so cellW = (TOTAL - 3) / 2 was 1198.5 at
+    a 2400 total -- a FRACTIONAL cell width, putting the right frame at a 1201.5px
+    pitch while every critic brief tells the reviewer to crop at 1200. A blind
+    reviewer measured the offset at +2px, retracted three verdicts it had already
+    written, and said "I read ruled straight stalks on one side and curved on the
+    other at 4x -- that was my crops being 2px out of registration". A systematic
+    shift manufactures a difference in every fine detail in the frame, which is
+    the exact class of defect these pairs exist to detect.
+    The divider is now painted OVER the seam and takes no layout space, so each
+    half is exactly TOTAL/2 and a reviewer's crop arithmetic is correct. */
+ .wrap{display:flex;width:100%;height:100%;position:relative}
+ .cell{position:relative;width:50%;height:100%;overflow:hidden;flex:0 0 50%}
  .cell img{display:block;width:100%;height:100%;object-fit:contain}
+ .seam{position:absolute;left:50%;top:0;width:3px;height:100%;
+       margin-left:-1.5px;background:#fff2;pointer-events:none}
  .tag{position:absolute;left:0;top:0;padding:7px 16px;background:#000c;
    font:600 15px/1 -apple-system,"SF Pro Display",Helvetica,sans-serif;letter-spacing:.28em;color:#fff}
  .div{width:3px;height:100%;background:#fff2;flex:0 0 3px}
@@ -225,11 +238,12 @@ if (MODE === 'pair') {
     const left = flip ? join(B, bf) : join(A, af);
     const right = flip ? join(A, af) : join(B, bf);
     // assume 16:9 sources; the cell keeps aspect via object-fit anyway
-    const cellW = (TOTAL - 3) / 2, cellH = Math.round(cellW * 9 / 16);
+    const cellW = TOTAL / 2, cellH = Math.round(cellW * 9 / 16);
     const html = SHELL(`<div class=wrap>
       <div class=cell><img src="${rel(left)}"><div class=tag>LEFT</div></div>
-      <div class=div></div>
+      
       <div class=cell><img src="${rel(right)}"><div class=tag>RIGHT</div></div>
+      <div class=seam></div>
     </div>`, TOTAL, cellH);
     const out = join(OUT, `pair-${String(i).padStart(2, '0')}-${scene}.png`);
     await shoot(html, TOTAL, cellH, out);
