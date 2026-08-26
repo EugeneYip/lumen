@@ -419,84 +419,60 @@ Verify each against the current code before acting; some may be fixed. The
 authoritative snapshot of quality is whatever `node tools/check.mjs --seeds 7,3`
 says today, plus a blind review per `tools/CRITIC.md`.
 
-**Most recent blind review** — eight pairs, two seeds x four matched depths,
-captured per `CRITIC.md` from a detached worktree at the baseline commit. **The
-current build won all eight pairs** (two decisive, six clear), which is the
-reliable signal a blind A/B produces. Nine-axis mean **6.2**, ship verdict **No**.
+**Most recent blind review** — round nine, eight depth-matched pairs, two seeds.
+**The current build won all eight pairs again**, and the reviewer verified its own
+consistency after judging blind: every ruled line and every pinwheel hazard it
+found independently landed on the losing side. Nine-axis mean **4.8**, ship
+verdict **No**.
 
 | axis | | axis | |
 |---|---|---|---|
-| Composition | 7 | Object craft | 6 |
-| Value structure | 7 | Detail & texture | 6 |
-| Colour | 7 | **Motion legibility** | **4** |
-| **Light behaviour** | **5** | UI | 7 |
-| Cohesion | 7 | | |
+| Composition | 5 | Object craft | 4 |
+| Value structure | 5 | Detail & texture | 4 |
+| **Colour** | **6** | Motion legibility | 5 |
+| Light behaviour | 4 | UI | 5 |
+| Cohesion | 5 | | |
 
-**Read the axis scores with care and the win/loss without.** The previous review
-scored light behaviour 7 and motion 5; this one scores them 5 and 4. That is a
-different reviewer looking at a different frame set (eight depth-matched pairs
-rather than five named scenes), so **absolute axis scores are not comparable
-across rounds** and no regression should be inferred from them. What *is*
-comparable is that one build beat the other on every pair.
+**Do not read the drop from 6.2 to 4.8 as a regression.** It is a different, and
+much harsher, reviewer on the same protocol — this is the third round in a row
+where axis scores moved more between reviewers than between builds. The only
+comparison that has ever held up is which build won each pair, and that was 8-0
+in both rounds. Motion legibility is the one axis that rose (4 → 5), and the near
+field was the one thing changed to move it.
 
-The reviewer independently confirmed the far-wall fracture fix without being told
-about it: it described the losing build as carrying "ruled parallel hatching in
-five of eight frames" and the winner as having "one faint shallow diagonal and
-nothing else" in the same region.
+Its three ranked problems, all open:
 
-Its three ranked problems:
+1. **Ruled lines nobody drew — now structural rather than incidental.** Kelp
+   stems are straight strokes with straight thorns at a fixed acute angle ("it
+   reads as barbed wire or frost, not plant", and it fills the lower third); the
+   rock face carries parallel diagonal hatch strokes of near-identical length and
+   angle; the tether is a constant-width hard-edged beam with no scatter cone;
+   the near-field drift is a uniform-angle uniform-length dash pattern that
+   "reads as scratches on the lens". *(world, environment, vfx.)* Note the last
+   of those is a consequence of tripling that layer's amplitude — making it
+   visible revealed that it is uniform.
+2. **The wake is quads, not fluid.** The tail separates into five or six stacked
+   laminae with straight edges and blunt square cut-offs, and at 400m becomes a
+   polyline with a hard chevron kink where it doubles back. *(vfx.)*
+3. **The HUD out-values the hero, and the foreground eats the HUD.** "The only
+   pixels clipping to 255 in any frame are the HUD numerals" while the player
+   core peaks at 246 — **independently confirming a discovery made the same day
+   from the other direction**, when a peak-brightness probe read the score
+   numerals and nearly filed a clipping bug against the scene. Meanwhile
+   foreground corals grow through the words SPEED and M/S with no scrim and no
+   bottom safe area, and the unfilled speed track is a 1px hairline that
+   vanishes. *(ui, with a white cap in postfx.)*
 
-1. **The frame does not move.** *(vfx — motion legibility 4/10, the lowest axis
-   and the most persistent complaint across eight rounds.)* The near-field streak
-   layer is "the right idea at the wrong amplitude" — the reviewer had to zoom to
-   4x to confirm it existed in one pair, and it vanishes at some depths. It also
-   is not tied to velocity and has no parallax. Its warning matters: lengthening
-   strokes *without taper* produces ruled hatching, which is worse than nothing.
-2. **Light is a blur filter, not light.** *(postfx — 5/10.)* "Glows are radial
-   gaussians. Bloom bars are hard-terminated straight streaks. Cores clip to flat
-   255. No light wrap on silhouettes, no scatter around occluders." The single
-   most important item in the whole review: **the hero and the anchors both clip
-   to flat 255, so the two most important objects read as the same material** —
-   which is the gap between a statistic and a perception, since the gate already
-   measures the hero as the brightest highlight peak in every frame. Also: the
-   anchor's flare bar is a uniform-width streak that stops dead in open water,
-   and the Hush is a flat fill with a hard crenellated edge and no internal
-   density variation.
-3. **Objects show their primitives.** *(scene/world — object craft 6/10.)* "The
-   magenta creature is a procedural asterisk — sixteen near-identical spokes at
-   near-equal angular spacing. The amber coral is one ball-tipped stalk rotated N
-   times at even radius." It named the anchors as the standard to match: "rim,
-   ring, tapered tendrils, weight change at the joints."
+**A bug, not a note:** solid hard-edged pure-black polygons are being composited
+over the scene — around (565,338) and (537,447) in one pair and (601,418) in
+another, present in **both** builds. *(scene.)*
 
-Also flagged, and a bug rather than a craft call: **a 550px dead-straight
-uniform-width segment lying across the wake** — a stale trail sample that never
-faded — plus a visible polyline kink and butt-cut trail quads you can count.
-
-Carried forward from the previous review and **independently confirmed still open
-by this one — and now located.** Round seven called it "the anamorphic streaks
-read as a filter, not light"; round eight, independently, called it "a
-dead-straight, uniform-width blue line running horizontally 550px across its own
-wake, a stale trail sample that never faded". **Two reviewers, two rounds apart,
-describing one quad.** It is neither stale nor a sample: it is the mote's own
-anamorphic bleed in `render.js`, one `S.ANAMORPH` quad at
-`alen = R * (2.2 + sk*40 + lg*44)` centred at `p.x - dx*alen*0.40`, so it reaches
-0.9 of its length behind the mote and 0.1 ahead — which is why it reads as a
-trail with a little overshoot. Its length is proportional to speed, which is why
-the two builds in one review showed it at "550px" and "about half the length".
-Attributed by elimination: it survives `?noRibbons=1`, dies under
-`?noSprites=1`, false-colours as atlas layer 19 under `?debugLayers=1`, and
-silencing `particles.js` entirely leaves it exactly where it was.
-It is **the stretched-quad trap** (§6) in a file that documents that trap. There
-is no depth buffer, so approximating occlusion is not available; the standing
-prescription is a short emitter-oriented anisotropic bloom that falls off to zero
-alpha rather than terminating in open water.
-The same review's "hard angular kink — a polyline showing its vertices" and
-"butt-cut trail quads you can count" are the ribbon in `render.js`'s `_trail()`,
-visible alone under `?noSprites=1`, and follow from a ribbon being unable to draw
-a soft edge at any falloff.
-Not re-raised this round: "the hero is the weakest-crafted object in its own
-frame", which may have been addressed by the tether-convergence and salience work
-— verify before assuming either way.
+Also worth acting on: the brightest, most saturated amber in the seed 7 frames is
+a corner coral rather than an anchor, which breaks the "amber means anchor"
+contract the palette rests on; anchors put no light on the rock or kelp beneath
+them, so "every object is self-lit and none receives"; and the speed cue "falls
+off a cliff, not a curve" — it sells completely at 155-171 m/s and is absent at
+31 and 90.
 
 Runners-up from the same review: geometry floats (kelp and reeds terminate on a
 flat horizontal baseline instead of intersecting the seabed — `world.bandBot(x)`
