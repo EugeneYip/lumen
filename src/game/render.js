@@ -387,6 +387,7 @@ export class Scene {
     this._lnum = 0;                      // how many of them are live this frame
     this._lcol = [0, 0, 0];              // incident colour x strength at a point
     this._ldx = 0; this._ldy = -1;       // ...and the direction it arrives from
+    this._lg = new Float32Array(MAXP);   // per-sample lamp response - see _lampAlong
     this._view = [new Array(MAXP + 1), new Array(MAXP + 1), new Array(MAXP + 1)];
     for (let k = 0; k < 3; k++) {
       for (let n = 2; n <= MAXP; n++) this._view[k][n] = this._pool[k].subarray(0, n * 2);
@@ -514,6 +515,122 @@ export class Scene {
     out[1] = lerp(col[1], L[1] * bl, t);
     out[2] = lerp(col[2], L[2] * bl, t);
     return out;
+  }
+
+  /**
+   * Per-sample lamp response along a stroked path. Fills `_lg[0..n-1]` and
+   * returns the maximum, so a caller can window a whole stroke off the field
+   * rather than off a coordinate.
+   *
+   * This is the half of the rig the round-twelve review was right about. The
+   * warm rim it accepted was evaluated ONCE at the middle of a strand and
+   * applied at constant intensity over the whole height of it - "an ink
+   * keyline, not a lamp" - and there are two distinct things wrong with that,
+   * both fixed here:
+   *
+   * ATTENUATION. `_lampAt` is evaluated at the sample rather than at the
+   * strand's midpoint, so the near end of a stem genuinely reads brighter than
+   * the far end. It is worth doing: a kelp stem is 250-720 world units tall and
+   * an anchor within reach is 120-500 away, so the two ends of one strand are
+   * routinely 2-4x apart in `core/(r2+core) + 0.46*wide^2`. Measured on seed 3
+   * at 400m, the stem 117 units from the r=37 bulb runs 0.79 at the end nearest
+   * the lamp against 0.24 at the far end - a 3.3:1 gradient that the shipped
+   * build drew as one flat value.
+   *
+   * TERMINATOR. A stem is a cylinder and its rim is not a plane. At lateral
+   * fraction p of the silhouette the surface normal is p*e + sqrt(1-p^2)*z,
+   * where e is the local lateral axis and z points at the viewer; the lamps all
+   * live in the xy plane, so N.L is exactly p*(e.L). `e.L` is what dies as the
+   * surface turns away, and it is computed here from the LOCAL tangent, so a
+   * stem that bends has its rim die where it bends. The caller supplies the p
+   * it drew at (it is already `lsg` there). Consequence worth stating plainly:
+   * with the lamp directly overhead a vertical cylinder has NO edge light at
+   * all, and this correctly deletes the rim in that case - which is most of
+   * what the change costs and all of what makes it read as a lamp.
+   *
+   * `side` is +1 when the band was offset along +x for an upward tangent.
+   * Allocation-free; clobbers `_lcol`/`_ldx`/`_ldy`, so resolve any tint with
+   * `_lit` BEFORE calling this.
+   */
+  _lampAlong(pts, n, side, scale) {
+    const G = this._lg;
+    let mx = 0;
+    for (let s = 0; s < n; s++) {
+      const i0 = s > 0 ? s - 1 : 0, i1 = s < n - 1 ? s + 1 : n - 1;
+      let tx = pts[i1 * 2] - pts[i0 * 2], ty = pts[i1 * 2 + 1] - pts[i0 * 2 + 1];
+      const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
+      // Lateral axis on `side`. For a stalk running up the screen (ty < 0) and
+      // side +1 this is +x, which is the flank the caller offset toward.
+      const ex = -ty * side, ey = tx * side;
+      const k = this._lampAt(pts[s * 2], pts[s * 2 + 1]) * scale;
+      const nd = ex * this._ldx + ey * this._ldy;
+      const g = nd > 0 ? k * nd : 0;
+      G[s] = g;
+      if (g > mx) mx = g;
+    }
+    return mx;
+  }
+
+  /** `_lg` at a stroke parameter. `stroke()` only ever asks at sample points. */
+  _lgAt(f, n) { const i = Math.round(f * (n - 1)); return this._lg[i < 0 ? 0 : i > n - 1 ? n - 1 : i]; }
+
+  /**
+   * A prop's shadow on the rock it is standing on. "Eight frames, zero
+   * shadows" was the review's second ask and this is the honest half of it.
+   *
+   * WHAT IS AND IS NOT REACHABLE HERE. There is no depth buffer, so no general
+   * shadow exists: this renderer cannot tell whether a rock column is in front
+   * of a kelp bed or behind it, and any test that tried would be a distance
+   * test against the same lamps, which cannot separate "behind a rock" from
+   * "beside it". Two things ARE known exactly and neither needs a depth test.
+   * First, a plant stands ON world.bandBot - that is where world.js planted it
+   * and where its holdfast is drawn - so its contact with the floor is not an
+   * approximation at all. Second, the rock under it is lit by the SAME lamps
+   * out of background.js (priced by its own owner at ~90000 pixels moved two
+   * display levels or more near an anchor), so there is something there to take
+   * a shadow out of. Beyond a plant's own footprint this stops being true and
+   * the shadow would be a smear, so this is a contact and not a cast: it is
+   * scaled off the plant's own width and it never leaves the floor line.
+   *
+   * The alpha is proportional to the lamp, so where nothing is lit nothing is
+   * shadowed. That is not defensive - it is what stops it reading as dirt: a
+   * fixed dark patch under every plant is an ambient-occlusion decal, and this
+   * project has already been burned once by a dark quad that read as a
+   * bounding box because it did not vanish with the light that justified it.
+   * Windowed to zero at its own bound for the same reason `lgate` is.
+   *
+   * LENGTH keys off how grazing the light is, DARKNESS does not, and getting
+   * that the wrong way round is what made the first cut of this invisible. The
+   * floor is seen nearly edge-on in this game, so what is actually visible at a
+   * plant's base is the rock being occluded from the lamp by the plant's own
+   * mass - an occlusion term, which does not care about the angle - while the
+   * angle only decides how far the smear reaches sideways. Priced by ablation
+   * on seed 3 / 400m: the graze-weighted first cut moved 4103 pixels by two
+   * display levels, at alpha 1.0 and 2.4x the footprint it moves 23428 with a
+   * peak of 40 levels, so the rock plainly IS lit enough to take a shadow and
+   * the first cut was simply too timid. This lands between them.
+   *
+   * `floor` selects which surface the prop grips; a roof prop's shadow falls
+   * upward onto the roof, which is the same construction with one sign.
+   */
+  _contact(world, x, w, lamK, lx, ly, col, opa, floor) {
+    const g = clamp01((lamK - 0.02) * 26);
+    if (g <= 0) return;
+    const graze = 1 - (ly < 0 ? -ly : ly);
+    const len = w * (0.45 + 2.3 * graze);
+    const cx = x - lx * len * 0.55;
+    const dn = floor ? 1 : -1;
+    // On the surface under itself, and lying along that surface's own slope - a
+    // horizontal smear on a sloping seabed is the same "flat baseline" tell the
+    // holdfast lobes were fixed for.
+    const y0 = floor ? world.bandBot(x) : world.bandTop(x);
+    const y1 = floor ? world.bandBot(cx) : world.bandTop(cx);
+    const ya = floor ? world.bandBot(x + w) : world.bandTop(x + w);
+    const yb = floor ? world.bandBot(x - w) : world.bandTop(x - w);
+    this.occl.push(cx, (y0 + y1) * 0.5 + dn * w * 0.34,
+      (w * 1.35 + len * 1.6) * 1.45, w * 1.12,
+      Math.atan(clamp((ya - yb) / (2 * w), -1.1, 1.1)),
+      col[0], col[1], col[2], 0.86 * g * opa * (0.42 + 0.58 * graze), L_ROCK);
   }
 
   /**
@@ -802,6 +919,11 @@ export class Scene {
     const lamK = this._lampAt(d.x + lean * 60, d.y - d.h * 0.55) * (1 - d.depth * 0.72) * dm;
     const lampX = this._ldx, lampY = this._ldy;
 
+    // Its shadow on the rock it grips, drawn before the holdfast so the lobes
+    // sit on top of it. See _contact for why this is the only shadow in the
+    // build and what was measured before settling for it.
+    this._contact(world, d.x, d.w * 3.4, lamK, lampX, lampY, c0, opa, true);
+
     // Holdfast. Kelp grips rock; it does not sprout from a point - and it grips
     // the rock that is actually there. world.bandBot is sampled per lobe rather
     // than shared, so a stand on a sloping floor plants each lobe at its own
@@ -1032,18 +1154,52 @@ export class Scene {
     // above or below lights neither flank rather than picking one arbitrarily.
     // r*0.46 rather than the cold rim's 0.44 puts it just outside, so the two
     // read as an edge and a body instead of one wider stroke.
+    // A CORRECTION FIRST, because the brief this pass came from was wrong about
+    // where the defect is and it matters that the record says so. The review
+    // reported "three kelp stems sit one bulb-width from a fully-lit anchor and
+    // receive nothing". They receive it. Measured with the real rig on six
+    // frames over two seeds: EVERY kelp in view has this stroke's gate at 1.0
+    // (one frame has a single strand at 0.95), lamK runs 0.057-0.77, and the
+    // closest case on seed 3 at 400m is a strand 117 units - 1.58 bulb-widths -
+    // from an r=37 anchor at lamK 0.485. Ablating the stroke moves 56609 /
+    // 63604 / 45029 pixels by two display levels or more on the three nearest
+    // gate frames, peak delta 36-52 levels, and those stems go from tan to teal
+    // in a 3x crop. It is neither a reach cutoff, a strength floor, nor the
+    // stems being outside the lit set: there is no such case in the build.
+    //
+    // What IS true, and is the rest of the same sentence, is that it ran at
+    // constant width and constant intensity. Both are now fixed at the cause:
+    //
+    // WIDTH. `wCore(d.w*0.66, 3)` and `wCore(0, 3)` were the same number for
+    // every strand thinner than d.w = 6.4, because wCore floors at CORE_MIN and
+    // d.w runs 3.4-15 - so on most strands the taper was a no-op and the rim
+    // was 8.74 world units root to tip. The anchor tentacles carried the
+    // identical bug, which is why one reviewer described two different objects
+    // in the same words. An honest width with wFloor/aFloor replaces it.
+    //
+    // INTENSITY. `lamK` was one evaluation at the strand's MIDPOINT, so a
+    // 250-720 unit stem took one number over its whole height. It is now
+    // `_lampAlong` - per-sample attenuation and a per-sample terminator; see
+    // the derivation there.
+    //
+    // _lit runs BEFORE _lampAlong on purpose: _lampAlong re-evaluates _lampAt
+    // and clobbers _lcol, so the tint has to be resolved off the midpoint
+    // sample while it is still the live one.
+    this._lit(c1, 0.94, c3);
+    const lo = this._p2(n);
+    for (let s = 0; s < n; s++) {
+      const f = s / (n - 1);
+      lo[s * 2] = pts[s * 2] + wmain(f) * 0.46 * lsg;
+      lo[s * 2 + 1] = pts[s * 2 + 1];
+    }
+    const lgmax = this._lampAlong(lo, n, lsg >= 0 ? 1 : -1, (1 - d.depth * 0.72) * dm);
     // Windowed at the bound, not thresholded at it - same rule as the reach
-    // above. At lamK = 0.02 this stroke's alpha would be 0.05, so a bare
-    // `if` here draws its own step wherever the quantity crosses.
-    const lgate = clamp01((lamK - 0.02) * 26);
+    // above. At 0.02 this stroke's alpha would be 0.05, so a bare `if` here
+    // draws its own step wherever the quantity crosses. It gates on the PEAK of
+    // the field rather than on a midpoint sample, so the bound sits where every
+    // sample inside it is already zero.
+    const lgate = clamp01((lgmax - 0.02) * 26);
     if (lgate > 0) {
-      const lo = this._p2(n);
-      for (let s = 0; s < n; s++) {
-        const f = s / (n - 1);
-        lo[s * 2] = pts[s * 2] + wmain(f) * 0.46 * lsg;
-        lo[s * 2 + 1] = pts[s * 2 + 1];
-      }
-      this._lit(c1, 0.94, c3);
       // Gain 2.6, and it buys almost no shadow fraction because of WHERE it
       // lands. The visible core of this stroke is width*sqrt(ln2/3), i.e. 2-5
       // screen pixels, and those pixels are the rim - they were already above
@@ -1053,15 +1209,15 @@ export class Scene {
       // held small for exactly that reason. Concentrate, do not spread: the
       // same argument as _emit's, arriving from the other direction.
       //
-      // The near/far RATIO is not a choice here. At 48 world units from a small
-      // anchor lamK is 0.75 and at 240 it is 0.27, so the near edge is 2.8x the
-      // far one - which is LAMP_WIDE's falloff, the same one the rock under the
-      // plant is already using. That agreement is the whole point of copying
-      // background.js's constants instead of picking new ones.
+      // `(1 - f*0.42)` used to stand in for the falloff along the stem and is
+      // gone: it is double counting now that the real one is measured, and it
+      // had the wrong SIGN whenever the lamp was above the plant, which is most
+      // of the time - anchors hang from the roof and kelp grows off the floor.
+      const wrim = (f) => lerp(d.w * 0.92, d.w * 0.16, Math.pow(f, 0.8))
+        * (0.60 + 0.55 * fib(f * 1.3 + 0.7));
       this.rGlow.stroke(lo, {
-        width: (f) => lerp(wCore(d.w * 0.66, 3), wCore(0, 3), f), color: c3,
-        alpha: (f) => 2.6 * lamK * lgate * Math.abs(lsg) * emerge(f) * (1 - f * 0.42)
-          * (0.55 + 0.55 * fib(f * 1.3 + 0.7)),
+        width: (f) => wFloor(wrim(f)), color: c3,
+        alpha: (f) => aFloor(wrim(f), 2.6 * this._lgAt(f, n) * lgate * Math.abs(lsg) * emerge(f)),
         falloff: 3,
       });
     }
@@ -1353,6 +1509,11 @@ export class Scene {
         });
       }
 
+      // ...and its shadow on the rock it grows out of, first column only: three
+      // stacked smears at one base is a blot, and the sub-columns share the
+      // main one's footprint anyway.
+      if (first) this._contact(world, sx, wq * 1.25, lamK, lampX, this._ldy, c0, opa, d.up);
+
       // Skirt: without it the spire floats instead of growing out of the rock.
       // EVERY column gets one, not just the first - a sub-column had neither
       // skirt nor rubble, so its joint was the bare ribbon cap described above.
@@ -1467,6 +1628,12 @@ export class Scene {
     // the block and the protagonist loses a place. Scenery does not get to buy
     // form out of the hero's salience: the trunk is narrow, the foot is wide,
     // and that silhouette is free.
+    // Its shadow on the rock, before the foot so the foot sits on top of it.
+    // The colony is the one prop in this file forbidden light (see the note at
+    // lamK), and a shadow is the half of the rig it can take: it REMOVES value
+    // beside the hero rather than adding it, so the salience block that three
+    // earlier attempts lost cannot be lost this way.
+    this._contact(world, d.x, rr * 1.15, lamK, lampX, lampY, c0, 1 - d.depth * 0.6, d.up);
     this.occl.push(d.x + (hc - 0.5) * rr * 0.24, fy + dir * rr * 0.02,
       rr * 2.25, rr * 0.60, (hc2 - 0.5) * 0.42, c0[0], c0[1], c0[2], 0.76, L_ROCK);
     this.occl.push(d.x, fy + dir * rr * 0.30, rr * 1.70, rr * 1.50,
@@ -2455,31 +2622,140 @@ export class Scene {
       this._emits(px, py, r * 0.72, cLive, kk * 0.62, S.GLOW, CEIL_WARM);
     }
 
-    // Tendrils: secondary motion, and the reason it reads as alive.
-    const nt = a.big ? 9 : 6;
+    // Tentacles: secondary motion, and the reason it reads as alive.
+    //
+    // WHAT WAS HERE was six to nine ribbons of dead constant width, evenly
+    // pitched, every one of them rooted at the same y on a butt cap. Two
+    // reviews circled it without naming it. Three separate causes, and the
+    // first is arithmetic rather than taste:
+    //
+    // 1. `wCore(r*0.075, 3)` and `wCore(0, 3)` ARE THE SAME NUMBER. wCore
+    //    floors its argument at CORE_MIN = 4.2 and anchor radii run 19-39, so
+    //    r*0.075 is 1.4-2.9 and both ends of that lerp evaluated to
+    //    4.2*sqrt(3/0.693) = 8.74 world units. The taper was a no-op on every
+    //    anchor in the game and the stroke was 8.74 units wide root to tip.
+    //    The kelp rim below had the identical bug - see the note there - which
+    //    is why one reviewer described two different objects the same way.
+    // 2. `oy = by + r*1.22` for EVERY tentacle, so all of them began on one
+    //    horizontal line, and a ribbon's first sample is a butt cap. At |u| = 1
+    //    the root sat r*0.88 off the axis where the membrane is only r*0.61
+    //    wide, so the outer caps were outside the bulb: a row of flat-topped
+    //    stubs, which is exactly what a 5x crop of seed 3 / 400m shows.
+    // 3. `u = (q/(nt-1))*2 - 1` is an even pitch, and the path was
+    //    `y = oy + f*L` - linear in y, quadratic in x with one coefficient -
+    //    so the family was near-parallel parabolas at even spacing. A set of
+    //    near-parallel constant-width ribbons is a set of drawn lines however
+    //    it is tuned; AGENTS.md's first two shape traps, both at once.
+    //
+    // Rebuilt against the bar the bulb and the containing arc already meet:
+    // weight at the joint, taper along the length, no two elements sharing an
+    // angle. Each tentacle is rooted ON the teardrop's own outline at its own
+    // parameter, leaves along the membrane's outward NORMAL there, and turns to
+    // hang over its first third. So the leaving angle is a property of where it
+    // grew rather than a constant, and the roots trace the bulb's margin
+    // instead of a ruled line. The count is per-instance too: nine tentacles on
+    // every big anchor is one primitive stamped repeatedly, the same defect the
+    // stalk's node placement was fixed for two rounds ago.
+    const nt = 5 + ((hash2(sid, 201) * 3.99) | 0) + (a.big ? 1 : 0);   // 5..9
     for (let q = 0; q < nt; q++) {
       const hq = hash2(sid, q * 11 + 5);
-      const u = nt === 1 ? 0 : (q / (nt - 1)) * 2 - 1;
-      const ox = bx + u * r * 0.88 + stx(1);
-      const oy = by + r * 1.22 + sty(1);
-      const L = r * (1.7 + hq * 2.4) * (isHeld ? 1.22 : 1);
-      const nq = 7, tp = this._p3(nq);
+      const h1 = hash2(sid, q * 4 + 205), h2 = hash2(sid, q * 4 + 206);
+      const h3 = hash2(sid, q * 4 + 207), h4 = hash2(sid, q * 4 + 208);
+      // Where on the margin this one grew. Ordered but NOT evenly pitched: the
+      // jitter is 0.9 of a slot, so neighbours crowd and gap without ever
+      // swapping places - the fan stays legible and the comb is gone.
+      const u = ((q + 0.5) / nt) * 2 - 1 + (h1 - 0.5) * (1.8 / nt);
+      const su = u < 0 ? -1 : 1;
+      // ...and how far down the teardrop. Outer tentacles attach further up the
+      // flank, inner ones near its point, which is what puts the roots on a
+      // curve instead of on a line. 0.46 of the full width is just inside the
+      // dark body's own half-width (0.50), so the joint is under the membrane
+      // rather than stuck to it.
+      //
+      // 0.80-0.97, and the range is measured rather than chosen: the outline's
+      // own normal there runs 34 deg below horizontal at f=0.80 to 58 deg at
+      // f=0.97, which is the whole of the angle spread and is why no two of
+      // these can share a leaving angle. Taking it further up the flank (0.64
+      // was the first cut) puts the normal within 20 deg of horizontal and the
+      // skirt splays into a starburst - a radial asterisk being one of the
+      // debug-primitive reads this project has removed twice already.
+      const fb = 0.96 - 0.16 * u * u + (h3 - 0.5) * 0.07;
+      const rx0 = bx + stx(fb) + su * bw(fb) * 0.46;
+      const ry0 = lerp(axTop, axBot, fb) + sty(fb);
+      // Outward normal of that outline, by central difference. This is the
+      // whole of "no two share an angle": the outline's slope runs from nearly
+      // horizontal at the widest point to nearly vertical at the tip, so the
+      // leaving angles are spread by the bulb's own geometry and cannot
+      // collapse however the jitter falls.
+      const oX = (f) => bx + stx(f) + su * bw(f) * 0.46;
+      const oY = (f) => lerp(axTop, axBot, f) + sty(f);
+      const f0 = fb - 0.02, f1 = Math.min(1, fb + 0.02);
+      let ex = oX(f1) - oX(f0), ey = oY(f1) - oY(f0);
+      const el = Math.hypot(ex, ey) || 1; ex /= el; ey /= el;
+      const nx0 = ey * su, ny0 = -ex * su;
+      // Shorter at the edges of the skirt. Equal reach on every tentacle makes
+      // the outer pair a symmetric arch, which is the spider read; a skirt has
+      // an envelope, and this is what gives it one.
+      const L = r * (1.5 + hq * 2.6) * (0.74 + 0.48 * (1 - u * u)) * (isHeld ? 1.22 : 1);
+      const nq = 9, tp = this._p3(nq);
+      const a0 = Math.atan2(ny0, nx0);
+      const aEnd = Math.PI * 0.5 + (h2 - 0.5) * 0.86;   // near-down, never the same down
+      const curl = (h3 - 0.5) * 0.80;                   // which way it bows over its length
+      const wob = (h4 - 0.5) * 0.34;                    // a second, faster crook - trap 2
+      const ds = L / (nq - 1);
+      // Start INSIDE the membrane. There is no depth buffer, so this is not
+      // burial: the tentacle's first sample is drawn over the bulb's own dark
+      // body at the same colour and under its own light, which is where a butt
+      // cap costs nothing. r*0.30 in from an attachment at 0.46 of the width
+      // leaves the cap at roughly 0.7 of the half-width on the widest ones.
+      let px2 = rx0 - nx0 * r * 0.30, py2 = ry0 - ny0 * r * 0.30;
       for (let s = 0; s < nq; s++) {
         const f = s / (nq - 1);
-        const drift = Math.sin(t * (0.7 + hq * 0.8) - f * 2.3 + q * 1.9 + a.phase) * r * (0.34 + hq * 0.30) * f;
-        tp[s * 2] = ox + drift + u * r * 1.15 * f * f + pdx * strain * r * 0.7 * f * f;
-        tp[s * 2 + 1] = oy + f * L + pdy * strain * r * 0.7 * f * f;
+        tp[s * 2] = px2 + pdx * strain * r * 0.7 * f * f;
+        tp[s * 2 + 1] = py2 + pdy * strain * r * 0.7 * f * f;
+        // The joint is the first THIRD, not the first half. A tentacle leaves
+        // its membrane perpendicular and then hangs; spreading that turn over
+        // the whole length is what made the first cut of this read as a splayed
+        // asterisk rather than a skirt.
+        const bend = smoothstep(clamp01(f * 3.2));
+        const an = a0 + (aEnd - a0) * bend
+          + curl * Math.sin(Math.PI * f)
+          + wob * Math.sin(f * 5.1 + h4 * TAU)
+          + Math.sin(t * (0.7 + hq * 0.8) - f * 2.3 + q * 1.9 + a.phase) * (0.18 + hq * 0.22) * f;
+        px2 += Math.cos(an) * ds; py2 += Math.sin(an) * ds;
       }
+      // Weight at the joint. The dark body is thickest where it leaves the
+      // membrane and is gone by mid-length - deliberately, because a falloff of
+      // 1.6 still leaves 0.20 of peak at the ribbon's own edge (trap 1), so the
+      // only place a hard edge can land is over the bulb's own light. Past
+      // mid-length there is no dark body at all and the tentacle is pure glow.
+      const wdk = (f) => lerp(r * 0.24, 0, Math.pow(f, 0.50))
+        * (0.82 + 0.36 * noise1(f * 3.7 + sid * 0.011 + q * 1.7));
       this.rDark.stroke(tp, {
-        width: (f) => lerp(r * 0.17, 0, Math.pow(f, 0.4)), color: PAL.voidDeep,
-        alpha: (f) => 0.70 * (1 - f), falloff: 1.2,
+        width: (f) => wFloor(wdk(f)), color: PAL.voidDeep,
+        alpha: (f) => aFloor(wdk(f), 0.76 * Math.pow(1 - f, 1.25)), falloff: 1.6,
       });
+      // ...and the glow tapers over the WHOLE length instead of not at all.
+      // r*0.42 at the joint to r*0.06 at the tip is 15.5 -> 2.2 world units on
+      // an r=37 bulb - a 4.9px visible core narrowing to under a pixel, against
+      // the 8.74-unit constant this replaces. The MEAN width is held near what
+      // shipped (integral r*0.42 - (r*0.36)/1.85 = r*0.225, i.e. 8.3 units at
+      // r=37) because p99 is a COUNT above a linear threshold and the core of
+      // this stroke sits at 0.54*alpha, straddling it: spending area here is
+      // spending p99, in either direction. wFloor/aFloor take the last fifth -
+      // below WMIN a tip fades rather than thins, which is what stops it
+      // aliasing into a dotted line under a moving camera.
+      const wgl = (f) => lerp(r * 0.42, r * 0.06, Math.pow(f, 0.85))
+        * (0.86 + 0.28 * noise1(f * 2.9 + sid * 0.023 + q * 2.3));
       this.rGlow.stroke(tp, {
-        width: (f) => lerp(wCore(r * 0.075, 3), wCore(0, 3), Math.pow(f, 0.6)), color: cMid,
-        alpha: (f) => (0.22 + 0.40 * live) * pulse * Math.pow(1 - f, 0.75), falloff: 3,
+        width: (f) => wFloor(wgl(f)), color: cMid,
+        alpha: (f) => aFloor(wgl(f), (0.22 + 0.40 * live) * pulse * Math.pow(1 - f, 0.75)),
+        falloff: 3,
       });
       if (hq > 0.42) {
-        const fj = 0.62;
+        // Hashed, for the reason the stalk's bells are: one lamp at exactly
+        // 0.62 of every tentacle is a bead stuck on at a marked position.
+        const fj = 0.40 + h2 * 0.36;
         const si = Math.min(nq - 2, (fj * (nq - 1)) | 0), lf = fj * (nq - 1) - si;
         const nx = lerp(tp[si * 2], tp[si * 2 + 2], lf);
         const ny = lerp(tp[si * 2 + 1], tp[si * 2 + 3], lf);
