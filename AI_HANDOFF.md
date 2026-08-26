@@ -773,6 +773,28 @@ Longer-standing items:
   old construction, still standing. Fixing it is a structural change to
   `bedFrame`'s `fu`, not a tuning job.
 
+- **The terrain depth ramp is not a ramp — it is an arch, and in the Hush it
+  inverts.** Recovered by running `tools/_vs.mjs`, which segments a frame by
+  which terrain layer drew each pixel and reports the *delivered* display
+  luminance of each. Delivered means, near to far:
+
+  | scene | water | far1 (s.58) | far2 (s.36) | far3 (s.23) | far4 (s.14) | nearRock |
+  |---|---|---|---|---|---|---|
+  | s7 fast | 0.037 | 0.071 | 0.084 | **0.091** | 0.069 | 0.138 |
+  | s3 tethered | 0.047 | 0.076 | 0.095 | **0.097** | 0.072 | 0.145 |
+  | s3 hushNear | 0.076 | **0.088** | 0.076 | **0.054** | 0.082 | **0.078** |
+
+  The four receding walls do **not** order by depth. In the first two the middle
+  planes are the brightest and the nearest and furthest are nearly equal — an
+  arch. In `hushNear` the ordering is destroyed outright: **nearRock is darker
+  than three of the four far walls**, and far3 is darker than open water.
+  That is why a reviewer called it "functionally a two-value picture: dark and
+  emitter, with nothing organised in between" — near-vs-far separation exists
+  (nearRock is 1.5-2x the far band) but *within* the far band the ordering
+  carries no depth information at all, so overlap is the only cue left.
+  **Fix the ordering before touching the separation.** A bigger gap between two
+  bands that are already in the wrong order buys nothing.
+
 - **A clamp can make a taper a no-op, and three reviewers described it as three
   different defects.** `wCore(d.w * 0.66, 3)` and `wCore(0, 3)` return the *same
   number* for any strand thinner than `d.w = 6.4`, because `wCore` floors at
