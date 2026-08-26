@@ -473,7 +473,27 @@ uniform-width segment lying across the wake** — a stale trail sample that neve
 faded — plus a visible polyline kink and butt-cut trail quads you can count.
 
 Carried forward from the previous review and **independently confirmed still open
-by this one**: the anamorphic streak reading as a filter rather than as light.
+by this one — and now located.** Round seven called it "the anamorphic streaks
+read as a filter, not light"; round eight, independently, called it "a
+dead-straight, uniform-width blue line running horizontally 550px across its own
+wake, a stale trail sample that never faded". **Two reviewers, two rounds apart,
+describing one quad.** It is neither stale nor a sample: it is the mote's own
+anamorphic bleed in `render.js`, one `S.ANAMORPH` quad at
+`alen = R * (2.2 + sk*40 + lg*44)` centred at `p.x - dx*alen*0.40`, so it reaches
+0.9 of its length behind the mote and 0.1 ahead — which is why it reads as a
+trail with a little overshoot. Its length is proportional to speed, which is why
+the two builds in one review showed it at "550px" and "about half the length".
+Attributed by elimination: it survives `?noRibbons=1`, dies under
+`?noSprites=1`, false-colours as atlas layer 19 under `?debugLayers=1`, and
+silencing `particles.js` entirely leaves it exactly where it was.
+It is **the stretched-quad trap** (§6) in a file that documents that trap. There
+is no depth buffer, so approximating occlusion is not available; the standing
+prescription is a short emitter-oriented anisotropic bloom that falls off to zero
+alpha rather than terminating in open water.
+The same review's "hard angular kink — a polyline showing its vertices" and
+"butt-cut trail quads you can count" are the ribbon in `render.js`'s `_trail()`,
+visible alone under `?noSprites=1`, and follow from a ribbon being unable to draw
+a soft edge at any falloff.
 Not re-raised this round: "the hero is the weakest-crafted object in its own
 frame", which may have been addressed by the tether-convergence and salience work
 — verify before assuming either way.
