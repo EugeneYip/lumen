@@ -722,6 +722,36 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **The branch-locus trap has a TEMPORAL form, and `background.js` still carries
+  it.** A hard test on a *camera* coordinate — `reach = cam.viewW * 0.6` — made
+  the renderer non-deterministic in a way `_det3.mjs` could not see. The state
+  fingerprint rounds to 1e-3, and the light *set* decides every prop's lamp
+  *direction*, so an anchor sitting within a float of that boundary flips a rim
+  from one flank to the other: identical state, different pixels, while a frozen
+  state re-rendered five times stayed stable. Fixed by windowing the strength to
+  zero over the last 12% of the reach — "gate on the field, not on a coordinate"
+  applied in time rather than in space. **`background.js` has the identical hard
+  test.** It has not bitten there because a marginal anchor contributes ~0.007 of
+  peak to the rock, but it is the same latent hazard and wants the same windowing.
+
+- **`_iso.mjs` cannot see a defect that needs a lit background.** The "visible
+  sprite bounding box" three reviews reported on the hazard is the dark spine
+  ribbon's own edge — falloff 0.95 leaves 0.387 of peak at the edge, so it draws
+  a hard quadrilateral wherever a spine crosses **lit rock**. Over black water an
+  occluder is nothing, and **isolating the object removes exactly the background
+  the defect requires**, so the rig showed no box at any gain. It was found by
+  ablating call sites one at a time *in the composite*. Isolation is the right
+  instrument for shape and the wrong one for anything that only exists against
+  what is behind it.
+
+- **A prescription and a statistic can point opposite ways, and both can be
+  right.** A reviewer asked for a containing ring on the hazard, to match the
+  anchors. A ring is rotationally self-similar *by construction*, so `_ring.mjs`
+  scores the improved object as **more** of a rotation — the shell band's r rose
+  0.247 → 0.301 and the whole rise is the ring, while the spines it was actually
+  measuring were unchanged. Keep both readings and say so; do not tune until the
+  number agrees, and do not discard the number because it is inconvenient.
+
 - **An objective acceptance bar can still be unreachable — check it against a
   control before adopting it.** A reviewer proposed "no stroke may have a
   neighbour within 100px sharing its angle to within 5°", which is exactly the
