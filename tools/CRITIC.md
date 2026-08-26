@@ -89,6 +89,24 @@ Finish with:
   system owns it (environment / scene / postfx / textures / world / vfx / ui).
 - **Ship verdict**: would you put this frame on a store page? Yes / No, one line.
 
+## Which instruments a blind reviewer may use
+
+Some of this project's instruments read the game's own source or shader maths.
+**Those are off-limits to a blind reviewer** — using one breaks the protocol just
+as surely as opening `key.json`. A reviewer working this out for itself is a good
+sign, and one did: it declined `_lean.mjs` on exactly these grounds.
+
+- **Allowed** (image-space only, they see nothing but the PNG): `crop.mjs`,
+  `_hair.mjs`, `_hairdir.mjs`, `_comb.mjs`, `_dif.mjs`.
+- **Not allowed**: `_lean.mjs` (traces level-set maths out of the shader),
+  `_iso.mjs` (renders the game), `_ring.mjs` (needs an isolated render), anything
+  that boots the game or reads `src/`.
+
+And a caution learned twice: **a global ruled-line count is swamped by the
+legitimate verticals and horizontals** — kelp stems, strata, HUD rules. It is the
+*diagonal* bands that carry the defect. `_hairdir.mjs` sweeps orientation so those
+can be read off directly; do not spend the review's budget rebuilding it.
+
 ## Rules for the critic
 - Be brutal. Grade inflation is worse than harshness here, because the score is
   used to decide whether to keep iterating. If both sides are mediocre, say both
