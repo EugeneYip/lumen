@@ -9,16 +9,17 @@
 //     -> field        local floor + local range in stops, 3 separable passes
 //     -> composite    spectral CA / astigmatic edge / edge-weighted speed smear
 //                     + chromatic stretch, water medium,
-//                     cos^4 vignette, hue-preserving filmic, split tone,
-//                     per-layer black point, tracking midtone ramp, grain, TPDF
+//                     cos^4 vignette, hue-preserving filmic split at the hero
+//                     band, three-leg split tone, per-layer black point,
+//                     tracking midtone ramp, grain, TPDF
 //
 // Two bloom characters with independent weights is the whole point: a single
 // blur radius for everything reads as a filter, not as light in a room. And the
 // tonemap runs on the peak channel, not per-channel, so a hot cyan core lands
 // on cyan-white and a hot amber core on amber-white instead of both on grey.
 //
-// Seven things in here were wrong for a long time and are worth naming so they
-// do not come back:
+// Nine things in here were wrong for a long time and are worth naming so they
+// do not come back (this line said "seven" while listing eight; count them):
 //   1. Dispersion and the speed smear shared one radial excursion, so the
 //      spectral weights rode the smear. A 2px fringe is a lens; a 20px one is
 //      confetti. They are now separate displacements - see the composite.
@@ -64,7 +65,17 @@
 //      crushed the other. The window now follows the level of whatever layer it
 //      is sitting on, and the veil and the toe are driven by the same field -
 //      see FIELD_PRE_FS for what that field is and, importantly, what it is not.
-//   8. A defect that is not this file's got measured, twice, with a statistic
+//   8. One response curve was serving both the protagonist and the lamps it is
+//      supposed to be distinguished from. Above linear 7.6 - the ceiling
+//      render.js enforces on every world-layer emitter so that the band above
+//      belongs to the mote - hable at white 11 has 0.09 of display range left
+//      for a 4x span of light, so the hero and the anchors arrived 0.065 apart
+//      in display luminance. Worse, the split tone's one highlight leg is warm,
+//      so the mote's core measured (246,244,233) - R above G above B - on an
+//      object authored 0xf6ffff. The grade was inverting the hue of the only
+//      cold emitter in the game. There is a third leg now, and the curve spends
+//      its last stop inside a band nothing but the mote can enter. See heroK.
+//   9. A defect that is not this file's got measured, twice, with a statistic
 //      that could not see it. Both times the conclusion was right and the
 //      evidence was noise, which is worse than being wrong quickly: it reads as
 //      settled and it is not. The tell is in the numbers themselves - if an
@@ -510,10 +521,11 @@ uniform vec2  uSmearOrg;
 uniform float uSmearCore, uSmearFeather, uSmearEdge, uSmearChroma;
 uniform float uVignette, uVigFocal, uVigCorner;
 uniform float uWhite, uHueKeep, uSat, uContrast, uLift, uBlack;
+uniform float uHeroLo, uHeroHi, uHeroGain, uHeroHue, uColdLo, uColdHi;
 uniform float uShelf, uShelfCentre, uShelfWidth;
 uniform float uFieldC, uRangeLo, uRangeHi, uOcclSpan, uOcclCut;
 uniform float uToeRange, uOcclToe, uShelfTrack, uShelfBias, uShelfLo, uShelfHi, uShelfGate, uShelfClean;
-uniform vec3  uShadowTint, uHighTint, uLiftCol;
+uniform vec3  uShadowTint, uHighTint, uCoolTint, uLiftCol;
 uniform vec3  uAbsorb, uScatterCol;
 uniform float uScatter, uScatterEdge, uScatterBase;
 uniform float uGrain, uGrainChroma, uGrainCoarse, uGrainNear, uGrainFar;
@@ -562,11 +574,22 @@ const float WHITE_REF = 12.3;
 // toward white only as the shoulder runs out. Per-channel curves send every
 // bright thing to the same grey-white; this sends amber to amber-white and
 // cyan to cyan-white, and never clips a channel on the way.
-vec3 tonemapHue(vec3 c, float white, float keep){
+//
+// 'hero' is the band split - see the note at its call site for why one curve
+// cannot serve both ends of this scene. Two things happen inside the band and
+// neither of them is an exposure change: what is left of the display range
+// above the shoulder is spent there, and the walk to white is slowed so the
+// mote's own hue survives further up than an anchor's does.
+vec3 tonemapHue(vec3 c, float white, float keep, float hero, float gain, float hue){
   float pk = max(max(c.r, c.g), max(c.b, 1e-5));
   vec3 ratio = c / pk;
   float y = min(hable(pk * (WHITE_REF / max(white, 1.0))) / HB_INF, 1.0);
-  return mix(ratio, vec3(1.0), pow(y, keep)) * y;
+  // Monotone in pk for any gain <= 1: d/dpk = y'(1 - gain*hero) + (1-y)*gain*hero',
+  // and both terms are non-negative. It also cannot reach 1.0 from below, so
+  // this cannot introduce a clip - it approaches display white the same way
+  // the shoulder does.
+  y += (1.0 - y) * gain * hero;
+  return mix(ratio, vec3(1.0), pow(y, keep * (1.0 + hue * hero))) * y;
 }
 
 // L*L/(L+k) is asymptotically L-k but goes into zero quadratically, so the
@@ -705,6 +728,109 @@ void main(){
   float soft = clamp((caK + smK + defK) * uRes.x / 2.2 - 0.35, 0.0, 1.0);
   vec3 col = mix(sceneTap, acc, soft) * uExposure;
 
+  // --- the hero band, and why one response curve cannot serve this scene. ---
+  //
+  // The blind critic's weakest axis was light behaviour, and its first note was
+  // that the hero and the anchors read as the same material. The literal claim
+  // it made - that both clip to flat 255 - is FALSE and was measured: across all
+  // twelve gate frames, zero pixels have all three channels at 250 or above, the
+  // mote's core peaks at 239-251 / 238-247 / 228-238 and an anchor's at
+  // 240-249 / 213-230 / 155-194. Nothing in this image clips.
+  //
+  // What is true is worse, and it is this file's doing. Measured at 1:1 on the
+  // mote's core, seed 7 tethered: (246,244,233), i.e. R > G > B. The mote is
+  // authored 0xf6ffff, R *below* G and B. The grade was inverting the hue of the
+  // one cold emitter in the game, because uHighTint (1.000, 0.950, 0.868) is
+  // applied to everything above L 0.72 regardless of what colour it already is.
+  // Two near-white cores, both tinted warm, differing only in degree: that is
+  // exactly "the same material", and it is the counter-note the whole palette is
+  // built on - cold mote against warm anchors - being thrown away at the two
+  // brightest points in the frame.
+  //
+  // The curve cannot fix that globally. hable at white 11 spends its range like
+  //   linear    1.3    3.0    5.0    7.6    11     21     30
+  //   display   0.51   0.72   0.81   0.87   0.91   0.95   0.96
+  // so above the world layer's own emitter ceiling (render.js CEIL_WARM = 7.6)
+  // there is 0.09 of display left for a 4x range of light. render.js already
+  // paid its half of this - it caps every world-layer sprite at 7.6 precisely so
+  // the band above belongs to the mote - and the response curve is the other
+  // half, which nothing had done.
+  //
+  // So: gate on the field, not on an object. The gate is the SCENE tap's own
+  // luminance, before this frame's bloom and before uExposure, and the band is
+  // measured rather than chosen. Hottest linear scene luminance outside the
+  // mote's body, all twelve gate frames:
+  //   5.35 5.94 6.27 6.28 6.44 6.85 7.69 7.94 8.07 9.18 10.18 10.42
+  // against the mote's 25.66 - 38.69. Counting pixels above a candidate
+  // threshold, per frame, as mote / other-cool / other-warm:
+  //   >= 4   57-66 /  4-85 / 20-160
+  //   >= 6   39-50 /  0-5  /  0-52
+  //   >= 8   26-38 /   0   /  0-26
+  //   >= 12  13-17 /   0   /   0        <- every frame, both seeds
+  // uHeroLo is 12 because that is where the second and third columns go to zero
+  // and stay there, so the VALUE half of this - uHeroGain, below - is provably
+  // inert on every pixel in every gate frame that is not the protagonist.
+  // Verified after the fact as well: the brightest anchor's peak RGB is
+  // BIT-IDENTICAL in all twelve frames, before and after.
+  //
+  // The size of that table is the honest scale of the value half and it should
+  // be reported rather than hidden. The mote's core above 12 linear is 13-17
+  // pixels, so on its own it moves about 15 pixels of 1.44M. That is not a
+  // disappointment, it is the measurement: a peak is a peak, and this scene's
+  // is fifteen pixels wide. What made the change visible at all is the hue half
+  // below, which is a different question with a different gate.
+  //
+  // Deliberately luminance and not the peak channel, which is what the tonemap
+  // itself keys on. A saturated amber carries ~0.79 of luminance per unit of its
+  // peak channel and a near-white core ~0.99, so gating on luminance makes a
+  // warm lamp have to be a third hotter than a white one to enter the band. The
+  // band is "near-white light of extreme intensity", which is what the mote is
+  // and what nothing else in the game is allowed to be.
+  //
+  // A negative result that stopped this going further, and it is the reason
+  // there is no wavelength-dependent bloom spread in here. The obvious next move
+  // was to widen the cold source's halo and tighten the warm one - real optics,
+  // since water eats red in a metre and scatters blue - so the two objects would
+  // differ over their whole extent rather than only where they are hot. Measured
+  // first: the maximum over each annulus around the two objects, seed 7
+  // hushNear, B minus R in code values, is +79 for the mote at r 10-20px and
+  // -104 for the anchor at the same radius. The halos are already opposite
+  // signed and about 180 code values apart. They do not need help, and spending
+  // shadow-fraction headroom - seed 3 launch sits at 9.1% against an 8% floor -
+  // to fix something that is not broken is how several rounds here were lost.
+  //
+  // It is read off the sharp scene tap rather than off 'col' on purpose: 'col'
+  // already carries the bloom, and an anchor's own halo stacked on its own core
+  // reaches into the band on the brightest frames. A halo is not an emitter.
+  // Same reasoning as cleanK further down, which exists for the same hazard.
+  float sLum = dot(sceneTap, LUMA);
+  float heroK = smoothstep(uHeroLo, uHeroHi, sLum);
+
+  // ...and the second gate, which is a hue and not a level, because the first
+  // one alone made things worse in a way only a 24x crop showed.
+  //
+  // uHighTint warms EVERYTHING above display L 0.72, and the mote's whole
+  // nucleus - linear 4 to 38, about 60 pixels - is above it. Cooling only the
+  // top of that (linear 12 and up, 15 pixels) left a cold pip inside a cream
+  // annulus inside a cyan body: a bullseye, on the one object in the game that
+  // must not read as a debug primitive. The band was right and it was being
+  // asked to do a job it is the wrong shape for.
+  //
+  // The level gate answers "is this the protagonist", which is what a change to
+  // VALUE has to ask, because the value ladder between mote, plankton and lamps
+  // is load-bearing and render.js built it deliberately. A change to HUE has to
+  // ask something else entirely: is this light warm? A split tone that warms
+  // cold light is not a split tone, it is a colour cast - and it was one, on the
+  // only cold emitter in the game.
+  //
+  // Chroma normalised by level so the gate is scale free, measured on the scene
+  // before any of this file touches it: the mote's core sits at +0.035, its body
+  // and the plankton well above that, an anchor core at -0.815, amber decor
+  // lower still. The gate is wide on purpose - a narrow one puts its own
+  // transition somewhere in the frame, and the place two objects' glows mix is
+  // exactly where a hue boundary would be visible.
+  float coldK = smoothstep(uColdLo, uColdHi, (sceneTap.b - sceneTap.r) / max(sLum, 1e-4));
+
   // --- the depth-ordering field. See FIELD_PRE_FS for what it is, what it is
   //     not, and the three absolute depth cues that were measured and failed.
   //     rangeK: 0 in a structureless fill, 1 in geology. This is the near/far
@@ -721,7 +847,7 @@ void main(){
   // range, not as an absolute number of stops. An absolute threshold calls the
   // lit half of a low-contrast far plane an occluder and the shaded half of a
   // high-contrast near one open water.
-  float above = log2((dot(sceneTap, LUMA) + uFieldC) / (fBase + uFieldC));
+  float above = log2((sLum + uFieldC) / (fBase + uFieldC));
   float occlK = rangeK * (1.0 - smoothstep(0.0, uOcclSpan * max(fld.g, 0.06), above));
   // The one number the toe and the ramp are both allowed to act on: there is
   // structure here AND this pixel is part of it rather than the hole it is
@@ -804,12 +930,21 @@ void main(){
   col *= vigM;
 
   // --- filmic ---
-  col = tonemapHue(max(col, 0.0), uWhite, uHueKeep);
+  col = tonemapHue(max(col, 0.0), uWhite, uHueKeep, heroK, uHeroGain, uHeroHue);
 
   // --- split tone: the palette is cold water against warm anchors, so the
-  //     grade takes a side in the shadows and the other in the highlights. ---
+  //     grade takes a side in the shadows and the other in the highlights.
+  //
+  //     ...and the highlight leg now has two, chosen by what colour the light
+  //     already is rather than by how bright it is. uCoolTint is the cold
+  //     counterpart of uHighTint, and the pair is deliberately matched in LEVEL
+  //     - neutral luminance 0.960 against 0.955, within 0.6% - so this is a hue
+  //     operator and nothing else. It is still where a good part of the mote's
+  //     peak separation comes from, because uHighTint was taking 13% of the
+  //     hero's blue and giving it back raises the mote without raising exposure
+  //     and without touching a warm pixel anywhere. ---
   float L = dot(col, LUMA);
-  col *= mix(uShadowTint, uHighTint, smoothstep(0.0, 0.72, L));
+  col *= mix(uShadowTint, mix(uHighTint, uCoolTint, coldK), smoothstep(0.0, 0.72, L));
 
   // --- the black point, and the reason this file used to have no blacks.
   //     The shadow colour was ADDED here: uLiftCol's green channel alone left
@@ -1012,6 +1147,23 @@ export const GRADE = {
   // of measured focal contrast per 1.0.
   white: 11.0,            // linear value the shoulder is built around
   hueKeep: 7.0,           // higher = hue survives further up the shoulder
+  // The hero band. See the long note at heroK in the composite for the
+  // measurement: the hottest non-mote pixel in any of the twelve gate frames is
+  // 10.42 linear scene luminance and the mote runs 25.66-38.69, so 13 is inert
+  // on everything but the protagonist and 22 is reached by the mote's core in
+  // every frame. Widened rather than tightened deliberately - the transition is
+  // a smoothstep on a value field, so its level set is a contour inside the
+  // mote's own radial falloff, and a wide band keeps it from reading as a ring.
+  heroLo: 12.0,
+  heroHi: 20.0,
+  heroGain: 0.30,         // display range spent above the world layer's ceiling
+  heroHue: 0.55,          // ...and how much longer the mote's hue survives there
+  // The hue gate on the split tone's highlight leg. Chroma is (b-r)/luminance
+  // on the scene tap: the mote's core measures +0.035, an anchor core -0.815,
+  // amber decor below that. Wide, because a narrow gate draws its own boundary
+  // wherever two glows mix.
+  coldLo: -0.250,
+  coldHi: 0.050,
   saturation: 1.06,
   contrast: 0.145,
   // The blacks: subtract, do not add. uBlack is the soft black point in display
@@ -1060,6 +1212,12 @@ export const GRADE = {
   scatterEdge: 2.40,
   shadowTint: [0.860, 1.000, 0.985],
   highTint: [1.000, 0.950, 0.868],
+  // The cold leg of the split tone, and it is a mirror of highTint rather than
+  // a free choice: highTint's neutral luminance is 0.9547 and this is 0.9602,
+  // so the two legs are within 0.6% of each other in LEVEL and differ almost
+  // entirely in HUE. That split matters for reading the change: cold light is
+  // not made brighter by this, it is made blue.
+  coolTint: [0.875, 0.980, 1.000],
   liftCol: [0.030, 0.190, 0.520],
   scatterCol: [0.075, 0.420, 0.440],
   streakTint: [0.980, 1.000, 1.020],
@@ -1275,6 +1433,16 @@ export class Post {
       // instead of just getting brighter.
       white: G.white * (1 - lg * 0.14 - bg * 0.04),
       hueKeep: G.hueKeep,
+      // Static. The band is a claim about what the SCENE contains - nothing in
+      // the world layer above 7.6 linear - and that claim does not change with
+      // speed, launch or depth, so nothing here may move it. A band that drifted
+      // under a launch would be a band that occasionally catches an anchor.
+      heroLo: G.heroLo,
+      heroHi: G.heroHi,
+      heroGain: G.heroGain,
+      heroHue: G.heroHue,
+      coldLo: G.coldLo,
+      coldHi: G.coldHi,
       saturation: G.saturation * (1 - slow * 0.20) * (1 - deadK * 0.35),
       contrast: G.contrast + sk * 0.05 + deadK * 0.06 + diff * 0.03,
       // Deep water has less to bounce around in it, so the floor closes a
@@ -1320,6 +1488,12 @@ export class Post {
       shadowTint: G.shadowTint,
       // Tethered, you are sitting in an anchor's light: highlights go warmer.
       highTint: mix3(G.highTint, [1.0, 0.905, 0.760], att * 0.35 + lg * 0.40),
+      // Sitting in an anchor's light warms the WARM highlights; it does not
+      // warm the mote, which is its own light source and is the thing that
+      // warmth is supposed to be read against. The cold leg deliberately does
+      // not follow `att`/`lg` - if it did, the two objects would converge again
+      // at exactly the moment they are closest together on screen.
+      coolTint: G.coolTint,
       liftCol: G.liftCol,
       streakTint: G.streakTint,
       halationTint: G.halationTint,
@@ -1442,6 +1616,9 @@ export class Post {
     f('uSmearEdge', g.smearEdge); f('uSmearChroma', g.smearChroma);
     f('uVignette', g.vignette); f('uVigFocal', g.vigFocal); f('uVigCorner', g.vigCorner);
     f('uWhite', g.white); f('uHueKeep', g.hueKeep);
+    f('uHeroLo', g.heroLo); f('uHeroHi', g.heroHi);
+    f('uHeroGain', g.heroGain); f('uHeroHue', g.heroHue);
+    f('uColdLo', g.coldLo); f('uColdHi', g.coldHi);
     f('uSat', g.saturation); f('uContrast', g.contrast);
     f('uLift', g.lift); f('uBlack', g.black);
     f('uShelf', g.shelf); f('uShelfCentre', g.shelfCentre); f('uShelfWidth', g.shelfWidth);
@@ -1452,7 +1629,8 @@ export class Post {
     f('uShelfLo', g.shelfLo); f('uShelfHi', g.shelfHi);
     f('uShelfGate', g.shelfGate); f('uShelfClean', g.shelfClean);
     f('uGrainCoarse', g.grainCoarse);
-    v3('uShadowTint', g.shadowTint); v3('uHighTint', g.highTint); v3('uLiftCol', g.liftCol);
+    v3('uShadowTint', g.shadowTint); v3('uHighTint', g.highTint);
+    v3('uCoolTint', g.coolTint); v3('uLiftCol', g.liftCol);
     v3('uAbsorb', g.absorb); v3('uScatterCol', g.scatterCol);
     f('uScatter', g.scatter); f('uScatterBase', g.scatterBase); f('uScatterEdge', g.scatterEdge);
     f('uGrain', g.grain); f('uGrainChroma', g.grainChroma);
