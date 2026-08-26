@@ -399,7 +399,21 @@ colour names its source). Between them, four separate ring artefacts on the
 player were each attributed to the right file, twice overturning a confident
 wrong guess — including one of mine.
 
-**Distrust your own harness before you distrust the art.** A blind reviewer once
+**Distrust your own harness before you distrust the art — it has now cost two
+review rounds.** The second: for its entire history `montage.mjs` placed the two
+halves of a blind pair on a **1201.5px pitch** rather than 1200, because the
+divider took layout space and `(2400 - 3) / 2` is fractional. Every brief tells
+the reviewer LEFT is x 0-1200 and RIGHT is x 1200-2400, so every 1:1 and 4x crop
+comparison was **2px out of registration**, which manufactures an apparent
+difference in every fine detail — the exact class of defect the pairs exist to
+detect. A reviewer caught it, retracted three verdicts it had already written,
+and noted that "the lesson from the ruled-diagonal that survived four rounds
+applies to reviewers too."
+The test is cheap and worth re-running if the layout is ever touched: sweep the
+horizontal offset between the halves and find the minimum mean absolute
+difference. It was 3.02 at shift 0 and 0.945 at shift +2; it is now 0.943 at
+shift 0. **A blind pair whose halves do not minimise at shift 0 is not a
+comparison.** A blind reviewer once
 diffed the panels it had been handed and found that four of five "comparisons"
 showed the same frame twice, because a filename-tagging regex collapsed five
 distinct frames to one key. It cost an entire review round, and the symptom was
