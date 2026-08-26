@@ -703,6 +703,29 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **`_comb.mjs` has almost no power against a radial asterisk, and I sent an
+  agent after one with it.** I briefed "use `_comb.mjs`, it is the right
+  instrument for one primitive rotated N times at even radius". It is not. It
+  autocorrelates COLUMN means, so it can only see a period that is a period *in
+  x* — and N spokes evenly spaced in ANGLE project onto x at `R·cos(θ)`, which is
+  arccos-distributed and not periodic in x at all. Proved by building a
+  deliberately perfect control (all jitter deleted, 17 identical spines at exactly
+  even angles): **`_comb.mjs` scored the perfect asterisk as *less* regular than
+  the shipped build**, 4.76x against 4.32x, at moving lags.
+  Two instruments exist now for this class. `tools/_ring.mjs` runs the same
+  spectral machinery resampled in θ about the creature's own centre, which is the
+  axis the defect actually lives on. `tools/_iso.mjs` renders one creature alone,
+  centred, at a fixed on-screen radius — necessary because at 1600x900 an urchin
+  is ~100px across and any annulus around it contains an anchor stalk, a colony
+  and rock, all larger signals than the thing being measured. **Isolate first,
+  then measure.**
+  A caution that generalises: an angular spectrum showed the shipped creatures
+  were *already* at their noise floor while the perfect control landed on m=17 at
+  21-57x — so the angular period was already dead, and the remaining regularity
+  was in element class, origin, curvature and joint weight, which no 1-D
+  statistic sees. What finally had power was 2-D rotational self-similarity of
+  the isolated object at its true element count.
+
 - **The pendant/spire cell widths do NOT draw a comb — measured, not assumed.**
   After the far-wall fracture work, the obvious next suspect was a module-width
   tooth in the silhouette, since `ragged()`, the benches and the pendant/spire
