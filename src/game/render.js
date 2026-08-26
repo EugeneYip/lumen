@@ -92,6 +92,31 @@ const L_MEMB = LY('MEMBRANE', S.BLOB);
 const SKIN = [PAL.moteOuter[0] * 0.55, PAL.moteOuter[1] * 0.78, PAL.moteOuter[2] * 1.06];
 const FLESH = [PAL.moteInner[0] * 0.62, PAL.moteInner[1] * 0.88, PAL.moteInner[2] * 1.00];
 
+// Warm DECOR, which is not the anchors' amber - see _anemone. The palette gives
+// each accent one job and amber's is "aim here"; the warm anemone wore
+// PAL.anchorMid and PAL.anchorLive verbatim, so a frame with a colony in it had
+// six or seven amber objects that are not anchors. The cold variant was already
+// rotated off mint for the same reason and this is the same construction, in two
+// steps so that only the HUE moves:
+//
+//   1. rotate toward plankton, which desaturates and swings the hue up out of
+//      the anchors' band without going anywhere near a cool colour;
+//   2. scale back to the source's exact luminance, because a mix changes value
+//      as well as hue and value is what p99 and the mean are made of.
+//
+// Measured, sRGB and HSV of the result:
+//   base  #ffb347  35deg sat 0.72  ->  #d1c37a  50deg sat 0.42   luminance 0.5396 both
+//   tip   #ffd76e  43deg sat 0.57  ->  #dfe08c  61deg sat 0.37   luminance 0.7099 both
+//
+// So the plant is a pale straw and the anchor is a saturated gold: 15-18 degrees
+// of hue and a 40% cut in saturation apart, at identical value, and about 90
+// degrees from the plankton it must also not be mistaken for. Holding luminance
+// is what makes this safe to land - `fast` p99 is documented below as
+// load-bearing on this colony's wash, and a mix without step 2 would have moved
+// it by 15%.
+const DECOR_WARM = scaled(mixCol(PAL.anchorMid, PAL.plankton, 0.34), 0.856);
+const DECOR_WARM_TIP = scaled(mixCol(PAL.anchorLive, PAL.plankton, 0.30), 0.961);
+
 const MAXP = 96;         // longest polyline any shape here needs
 const FAR = 0.44;        // decor depth that moves an object into the far round
 const CORE_MIN = 4.2;    // world units: below this a ribbon core aliases to dots
@@ -846,10 +871,51 @@ export class Scene {
       // seed 7 / 1000m before this. A fracture is angled and it spalls, so the
       // top two samples shear off the axis, the width collapses across them,
       // and the face itself is capped with rock.
+      // ...and the SLENDER half of that split had none of it, which is the
+      // defect this pass exists to fix. `brk` was 1.01 for a non-blunt column,
+      // so `gb` was identically zero and neither the shear nor the width
+      // collapse ever ran; `tipw` was 0.045, so the last third of the column was
+      // a narrow stroke of slowly-falling width ending on a bare butt cap.
+      //
+      // ATTRIBUTED, not guessed, and the attribution overturned the brief.
+      // The artefact was reported to me as an anchor's mooring stalk at
+      // (1252, 110-192) on seed 7 / 400m. Zeroing the anchor stalk's own alpha
+      // changes NOTHING in that column - the diff has no differing pixel between
+      // x=1092 and x=1270 - while early-returning _spire removes it entirely.
+      // It is column q=0 of the stalactite at world x 4798, depth 0.60, hanging
+      // 469 units from the roof and stopping in open water at world y -152.
+      // Measured against a build with _spire ablated: a 7px-wide notch about 9
+      // code values deep on a 19-30 background, dead straight for 130px, gone
+      // between screen y 190 and 200. Both shape traps at once - a taper this
+      // slow is a stretched quad, and a butt cap is a butt cap.
+      //
+      // Three changes, and all three ADD dark ink rather than removing it,
+      // which is deliberate: seed 3 / launch runs a shadow fraction of 8.1%
+      // against an 8.0% floor, so a fix that deletes occluder was not available.
       const blunt = hash2(sid, q * 9 + 7) > 0.60;
-      const tipw = blunt ? 0.22 + hash2(sid, q * 9 + 8) * 0.16 : 0.045;
-      const shear = (hash2(sid, q * 9 + 11) - 0.5) * 2;
-      const brk = blunt ? 0.84 : 1.01;
+      const tipw = blunt ? 0.22 + hash2(sid, q * 9 + 8) * 0.16
+        : 0.10 + hash2(sid, q * 9 + 8) * 0.07;
+      const shear = (hash2(sid, q * 9 + 11) - 0.5) * (blunt ? 2 : 1.15);
+      const brk = blunt ? 0.84 : 0.90 + hash2(sid, q * 9 + 19) * 0.05;
+      // The dogleg. A column of rock is jointed: it steps sideways where it has
+      // parted along a bedding plane, and one step is worth more than any amount
+      // of smooth wobble because it puts a corner in the silhouette. The wander
+      // that was here could not supply one - noise1(f * 1.9) moves its argument
+      // by less than two lattice cells over the whole column, so over the last
+      // third it is a monotone arc, i.e. a slightly bent ruled line. Raised to
+      // 3.6 (still 3.3 samples per cell at n=13, so no aliasing) and given a
+      // step at a hashed height, so no straight line passes through more than
+      // one piece of a column - AGENTS.md's second shape trap, verbatim.
+      const fj = 0.40 + hash2(sid, q * 9 + 21) * 0.34;
+      const jog = (hash2(sid, q * 9 + 23) - 0.5) * 1.15;
+      // Width is needed by the point loop now (the jog is measured in local
+      // widths, or a step reads as huge on a needle and invisible on a trunk),
+      // so it moves above it. Ridged, two octaves: rock has facets and steps,
+      // and one smooth low-frequency wobble on a cone still measures as a
+      // constant-width stroke. The fine octave is what puts a burr on it.
+      const wfn = (f) => lerp(wq, wq * tipw, Math.pow(f, blunt ? 0.74 : 0.60))
+        * (0.78 + 0.34 * noise1(f * 6.5 + jseed) + 0.15 * fine * noise1(f * 21.3 + jseed * 1.7))
+        * (f > brk ? lerp(1, 0.18, (f - brk) / (1 - brk)) : 1);
       const n = 13, pts = this._p1(n);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
@@ -858,7 +924,8 @@ export class Scene {
         // offsets of one parabola, which is what makes a stroked column read as
         // an extrusion however much the width varies.
         pts[s * 2] = sx + f * f * lean * 175
-          + (noise1(f * 1.9 + jseed * 0.7) - 0.5) * wq * 0.52 * Math.pow(f, 0.7)
+          + (noise1(f * 3.6 + jseed * 0.7) - 0.5) * wq * 0.52 * Math.pow(f, 0.7)
+          + jog * wfn(fj) * smoothstep(clamp01((f - fj) / 0.17))
           + shear * gb * gb * wq * 0.58;
         // Buried root: the first sample is a butt cap, so it is put under the
         // band profile and the rim light below is gated to zero before it gets
@@ -880,12 +947,6 @@ export class Scene {
       // below it and the column is at full strength the moment it emerges.
       const fb = clamp(wq * 0.34 / Math.max(1, hq), 0.02, 0.45);
       const root = (f) => smoothstep(clamp01(f / fb));
-      // Ridged width, two octaves: rock has facets and steps, and one smooth
-      // low-frequency wobble on a cone still measures as a constant-width
-      // stroke. The fine octave is what puts a burr on the silhouette.
-      const wfn = (f) => lerp(wq, wq * tipw, Math.pow(f, blunt ? 0.74 : 0.60))
-        * (0.78 + 0.34 * noise1(f * 6.5 + jseed) + 0.15 * fine * noise1(f * 21.3 + jseed * 1.7))
-        * (f > brk ? lerp(1, 0.18, (f - brk) / (1 - brk)) : 1);
       // Alpha now falls with the width instead of holding at 0.985 all the way
       // into the fracture. A collapsing width at constant opacity is what made
       // the tip a hairline, and a hairline is what made frame 1 differ.
@@ -894,7 +955,7 @@ export class Scene {
         alpha: (f) => aFloor(wfn(f), 0.985 * opa * root(f)), falloff: 0.95,
       });
 
-      if (blunt) {
+      {
         // The fracture face, then two spalls hanging off it. A break needs a
         // surface and some debris or it reads as an end rather than as damage.
         // SMOKE's mask dies inside its own tile in every direction, so these
@@ -914,6 +975,13 @@ export class Scene {
         // So the patches are not this, the caps keep the opacity that hides the
         // ribbon's butt cap, and the remaining holes are the blade sprites
         // (layer L_LEAF) - see _kelp.
+        //
+        // EVERY column gets one now, not only the blunt 40%. The cap exists to
+        // bury a butt cap, and a needle has exactly the same butt cap as a
+        // stump - it is simply narrower, which is why it read as a ruled line
+        // with a squared-off end rather than as a rectangle. tw scales off the
+        // column's own tip width, so a slender break gets a chip and a blunt one
+        // gets a slab; nothing here is a fixed size.
         const tx2 = pts[(n - 1) * 2], ty2 = pts[(n - 1) * 2 + 1];
         const tw = wq * tipw * 1.55;
         this.occl.push(tx2, ty2 - dir * tw * 0.16, tw * 2.05, tw * 0.94,
@@ -1007,8 +1075,21 @@ export class Scene {
     // wash to a 3.4 bead, twenty of them per colony read as food you cannot
     // collect. Teal is decor, mint is reward: the hue does the sorting, so the
     // beads can stay crunchy.
-    let base = warm ? PAL.anchorMid : mixCol(PAL.plankton, PAL.surface, 0.66, o0);
-    let tip = warm ? PAL.anchorLive : mixCol(PAL.plankton, PAL.surface, 0.44, o1);
+    // ...and the WARM variant never got the same treatment, which is the
+    // accent-discipline break a review named: "one burst-plant asset is
+    // recoloured into both mint and amber, so two reserved accents are worn by
+    // the same prop." It wore PAL.anchorMid and PAL.anchorLive - not a hue near
+    // the anchors', the anchors' own two palette entries - and there are six of
+    // these on screen in four of seed 7's six gate frames and seven in seed 3's
+    // hazardNear. Amber's job is "the thing you aim at" (AI_HANDOFF s1); a
+    // dozen amber things in frame, most of them scenery, is a direct tax on the
+    // one read this game depends on.
+    //
+    // DECOR_WARM/_TIP are the same construction the cold variant already used -
+    // rotate off the accent, then hold luminance - so the colour moves and the
+    // exposure does not. See the constants above _anemone for the numbers.
+    let base = warm ? DECOR_WARM : mixCol(PAL.plankton, PAL.surface, 0.66, o0);
+    let tip = warm ? DECOR_WARM_TIP : mixCol(PAL.plankton, PAL.surface, 0.44, o1);
     if (e > 0) { base = this._ate(base, e, o2); tip = this._ate(tip, e, o3); }
     const breathe = 0.55 + 0.45 * Math.sin(t * 1.15 + d.phase);
     const k = (0.40 + breathe * 0.62) * (1 - d.depth * 0.75) * dim * (1 - e);
@@ -1139,10 +1220,35 @@ export class Scene {
       // costs are paid back over the rest of the arm, so the colony's total is
       // where it started and the cap is still gone.
       const ww = 0.62 + hw * 0.80;
+      // WEIGHT WHERE THE LIMB MEETS THE BODY, which is the one thing two
+      // consecutive reviews have credited the anchors for and named as missing
+      // here: "every stalk is a constant-width 1px line butt-jointed into an
+      // identical circle sprite, with no thickness at the root."
+      //
+      // The "constant-width" half of that is arithmetic, not impression. The
+      // taper runs wCore(d.r*0.16*ww) -> wCore(0), and wCore floors its argument
+      // at CORE_MIN: at d.r 35 the root is max(3.5..7.9, 4.2) and the tip is
+      // exactly 4.2, so an arm at the low end of ww has a taper ratio of
+      // 1.00:1 - it is not a taper at all - and the widest arm reaches 1.9:1.
+      // The tip cannot go below CORE_MIN (rule 2 at the top of this file), so
+      // the only place a taper can come from is the root.
+      //
+      // A localised shoulder rather than a wider arm, and the difference is the
+      // whole point: the review's complaint is about the JOINT, and widening
+      // the whole limb to fix a joint is how this prop turned into a gas cloud
+      // once already. The bell sits at f=0.21, just outside the root ramp that
+      // hides the ribbon's start cap, and is 0.17 wide in f - about 10px in
+      // game. Energy is held to the fourth decimal rather than eyeballed:
+      // integrating width*alpha over 80 (d.r, hw, hb) combinations gives an area
+      // ratio of 1.2478, so the alpha coefficient goes 0.475 -> 0.380 and this
+      // colony costs a salience block exactly what it did before.
+      const sh = 0.42 + hb * 0.62;
+      const shoulder = (f) => { const u = (f - 0.21) * 5.9; return 1 + sh * Math.exp(-(u * u)); };
       this.rGlow.stroke(pts, {
-        width: (f) => lerp(wCore(d.r * 0.16 * ww, 3.5), wCore(0, 3.5), Math.pow(f, 0.42 + hw * 0.30)),
+        width: (f) => lerp(wCore(d.r * 0.16 * ww, 3.5), wCore(0, 3.5), Math.pow(f, 0.42 + hw * 0.30))
+          * shoulder(f),
         color: base,
-        alpha: (f) => k * 0.475 * (0.78 + 0.46 * hw) * (1 - f * 0.32) * clamp01(f * 6.5),
+        alpha: (f) => k * 0.380 * (0.78 + 0.46 * hw) * (1 - f * 0.32) * clamp01(f * 6.5),
         falloff: 3.5,
       });
       const ex = pts[(n - 1) * 2], ey = pts[(n - 1) * 2 + 1];
@@ -1170,7 +1276,17 @@ export class Scene {
       // real 2-3px nucleus in it, and its MEAN is the old constant - the point
       // is the spread, not a trim. Trimming it was tried and cost p99.
       const bw = Math.min(d.r * (0.44 + h * 0.56), CORE_PX * (1.14 + 0.86 * hb) / this._ppu);
-      this._emits(ex, ey, bw, tip, k * (1.78 + hb * 1.56), S.GLOW, CEIL_PROP);
+      // ...and it is not a CIRCLE. A round quad on the end of a stroke reads as
+      // a ball-tipped stalk however much its diameter varies, which is the
+      // second half of the review's sentence. The bead is stretched along the
+      // arm's own last segment and rotated onto it, so a bead now says which way
+      // its limb was growing. w*h is bw*bw either way, so the area a salience
+      // block sums is unchanged to the bit and this is pure shape.
+      const ta = Math.atan2(ey - pts[(n - 2) * 2 + 1], ex - pts[(n - 2) * 2]);
+      const asp = 1.20 + hw * 0.66;
+      const bk = k * (1.78 + hb * 1.56);
+      this._emit(ex, ey, bw * asp, bw / asp, ta,
+        tip[0] * bk, tip[1] * bk, tip[2] * bk, S.GLOW, CEIL_PROP);
       // ...and a second bead partway down the longer filaments, because one
       // terminal dot per arm is a starburst and two are an organism. Its hash is
       // independent of the tip bead's, and it sits at 1/3 or 2/3 of the arm
@@ -1178,8 +1294,9 @@ export class Scene {
       // arm is the rotation signature again, one radius in.
       if (hb > 0.38) {
         const si = h > 0.55 ? 1 : 2;
-        this._emits(pts[si * 2], pts[si * 2 + 1], bw * (0.46 + h * 0.32), tip,
-          k * (0.70 + h * 0.74), S.GLOW, CEIL_PROP);
+        const bw2 = bw * (0.46 + h * 0.32), bk2 = k * (0.70 + h * 0.74);
+        this._emit(pts[si * 2], pts[si * 2 + 1], bw2 * asp, bw2 / asp, ta,
+          tip[0] * bk2, tip[1] * bk2, tip[2] * bk2, S.GLOW, CEIL_PROP);
       }
     }
     // The column's own light, and the wash is now narrow enough to be a mouth
@@ -1354,10 +1471,30 @@ export class Scene {
       // The highlight tracks the shaft it lies on, or a thin spine and a thick
       // one carry the same line and the width variance is invisible in light.
       const gw = 0.70 + h3 * 0.72;
+      // ...and it tracks the JOINT as well, which it did not. The shoulder that
+      // makes a spine grow out of the shell instead of being stuck into it lived
+      // only in the dark ribbon's width (the `flare` term above), and the dark
+      // ribbon is voidDeep over a near-black shell - so the weight was there in
+      // the silhouette and absent in everything the eye actually reads. This is
+      // the same bell one level down: `flare` is per-spine already, so no new
+      // hash, and it is centred at f=0.22 rather than run as exp(-6.5f) because
+      // the alpha ramp below zeroes the first 18% to bury the ribbon's start cap
+      // and an exponential spends most of itself inside that.
+      // Taper exponent is per-spine now too. Fixed 0.5 on every one of seventeen
+      // is exactly the "one tube profile" the review named; it was the last
+      // property of a spine that was a constant.
+      // Energy: the bell adds flare*sqrt(pi)*0.17 = 0.09-0.24 of the shaft area
+      // (mean 0.16), and 0.66 -> 0.57 pays it back, so hazardNear's block sums
+      // are held. Measured on the isolated urchin the reason this was worth
+      // spending at all: over a 100-200px band, which excludes the shell and the
+      // scatter puffs, per-element peak cv is 0.176 (seed 7) and 0.265 (seed 3),
+      // i.e. the spines were ALREADY unequal in brightness. The defect is shape.
+      const jf = (f) => { const u = (f - 0.22) * 5.9; return 1 + flare * Math.exp(-(u * u)); };
       this.rGlow.stroke(gz, {
-        width: (f) => lerp(wCore(r * 0.070 * gw, 4), wCore(r * 0.022 * gw, 4), Math.pow(f, 0.5)),
+        width: (f) => lerp(wCore(r * 0.070 * gw, 4), wCore(r * 0.022 * gw, 4),
+          Math.pow(f, 0.36 + h2 * 0.34)) * jf(f),
         color: scaled(cRim, 2.9 * gk, c1),
-        alpha: (f) => 0.66 * Math.pow(Math.sin(Math.PI * clamp01(0.08 + f * 0.88)), 0.5)
+        alpha: (f) => 0.57 * Math.pow(Math.sin(Math.PI * clamp01(0.08 + f * 0.88)), 0.5)
           * clamp01(1.2 - f * 0.95) * clamp01(f * 5.5),
         falloff: 4,
       });
@@ -1625,6 +1762,9 @@ export class Scene {
     // ---- stalk ----
     const n = 15, sp = this._p1(n);
     const tipY = by - r * 0.74;
+    // |stalk|: a low anchor grows UP out of the floor and carries a negative
+    // one, and an amplitude must not change sign with it.
+    const slen = a.stalk < 0 ? -a.stalk : a.stalk;
     for (let s = 0; s < n; s++) {
       const f = s / (n - 1);
       const en = f * f * (3 - 2 * f);           // keep the root vertical at the roof
@@ -1633,9 +1773,24 @@ export class Scene {
       // kelp trunk at the same angle - the "two competing parallel verticals" a
       // review flagged. Low frequency, and zero at both ends so the roof joint
       // and the bulb still meet the line they are drawn from.
-      sp[s * 2] = lerp(a.x, bx, en) + Math.sin(f * Math.PI)
-        * (sway * 0.5 * (1 - strain)
-          + (noise1(f * 1.6 + sid * 0.031) - 0.5) * a.stalk * 0.075 * (1 - strain * 0.6));
+      //
+      // ...and one octave under sin(f*PI) was not enough, which two reviews in
+      // a row have now said ("anchor stalks are unvarying-width splines"). Two
+      // reasons, both measurable. sin(f*PI) is SYMMETRIC, so whatever it carries
+      // is a single bow about the midpoint - the most obviously drawn curve
+      // there is. And at frequency 1.6 the noise argument moves by less than two
+      // lattice cells over the whole stalk, so inside that envelope it is a
+      // monotone arc: measured on the seed 7 / 400m floor anchor, a 480px stalk
+      // bows by about 18px, 3.7% of its length, which reads dead straight.
+      // The envelope now peaks at f=0.58 and a second octave puts a crook in it,
+      // so no straight line passes through more than about a third of a stalk -
+      // AGENTS.md's second shape trap, which says exactly this. Both octaves
+      // still vanish at f=0 and f=1, so the roof joint and the bulb are unmoved.
+      const env = Math.pow(f, 0.55) * Math.pow(1 - f, 0.40) * 1.72;
+      sp[s * 2] = lerp(a.x, bx, en)
+        + Math.sin(f * Math.PI) * sway * 0.5 * (1 - strain)
+        + env * (1 - strain * 0.6) * ((noise1(f * 2.4 + sid * 0.031) - 0.5) * slen * 0.085
+          + (noise1(f * 4.9 + sid * 0.083) - 0.5) * slen * 0.034);
       sp[s * 2 + 1] = lerp(topY, tipY, f);
     }
     // Nodes are swellings *of* the stalk, so they belong in its width function.
@@ -1649,11 +1804,33 @@ export class Scene {
     // count went 11 -> 15 because a bump 0.10 wide in f has to land on more than
     // one sample or it aliases into a kink.
     // (`-x ** 2` is a JavaScript SyntaxError, hence the inner parentheses.)
-    const bell = (f, c) => { const u = (f - c) * 10; return Math.exp(-(u * u)); };
-    const bump = (f) => 1 + 0.40 * bell(f, 0.32) + 0.34 * bell(f, 0.55) + 0.28 * bell(f, 0.78);
+    //
+    // ...and their PLACES are per-instance now. Three bells at exactly 0.32,
+    // 0.55 and 0.78 with fixed weights is one primitive stamped on every anchor
+    // in the game, so a frame with four stalks in it has the same three
+    // swellings at the same heights four times - which is precisely how a stalk
+    // ends up reading as a spline with decoration rather than as growth. The
+    // mean of the sum is held: the old weights total 1.02 against a new mean of
+    // 1.02, and the mean bell width goes 10 -> 10.5, so the extra dark ink is
+    // under 1% and the seed 3 / launch shadow floor is untouched.
+    const bell = (f, c, w) => { const u = (f - c) * w; return Math.exp(-(u * u)); };
+    const bc0 = 0.22 + hash2(sid, 61) * 0.16;
+    const bc1 = bc0 + 0.17 + hash2(sid, 63) * 0.14;
+    const bc2 = Math.min(0.93, bc1 + 0.16 + hash2(sid, 65) * 0.16);
+    const bump = (f) => 1
+      + (0.24 + hash2(sid, 67) * 0.30) * bell(f, bc0, 8.4 + hash2(sid, 71) * 4.2)
+      + (0.20 + hash2(sid, 73) * 0.28) * bell(f, bc1, 8.4 + hash2(sid, 75) * 4.2)
+      + (0.16 + hash2(sid, 77) * 0.26) * bell(f, bc2, 8.4 + hash2(sid, 79) * 4.2);
+    // The taper is real now rather than nominal. pow(f, 1.6) puts nearly all of
+    // a 1.75:1 change into the last fifth, so over the 80% of a stalk you
+    // actually look at the width ran 0.32r to 0.43r - a 34% change spread over
+    // 400 screen pixels, which is a constant-width line with noise on it. At
+    // 2.4:1 over pow(f, 1.15) the change is spread along the whole length and
+    // the mean width is held to within 4% of what it was (integral 0.427r
+    // against 0.412r), so this costs the exposure statistics nothing.
     this.rDark.stroke(sp, {
-      width: (f) => lerp(r * 0.32, r * 0.56, Math.pow(f, 1.6)) * (1 - strain * 0.20)
-        * (0.88 + 0.24 * noise1(f * 5.1 + sid * 0.017)) * bump(f),
+      width: (f) => lerp(r * 0.26, r * 0.62, Math.pow(f, 1.15)) * (1 - strain * 0.20)
+        * (0.86 + 0.28 * noise1(f * 5.1 + sid * 0.017)) * bump(f),
       color: PAL.voidDeep, alpha: 0.94, falloff: 1.05,
     });
     // The stalk conducts: a warm filament inside it, loaded when tethered.
@@ -1672,9 +1849,11 @@ export class Scene {
       width: wCore(r * 0.07, 3), color: cRim,
       alpha: (f) => (0.08 + 0.24 * live) * (0.4 + 0.6 * f), falloff: 3,
     });
-    // Nodes: swellings where the stalk has grown in fits.
+    // Nodes: swellings where the stalk has grown in fits. Their light rides the
+    // same hashed centres as the width bumps above - a lamp that is not on the
+    // swelling is a bead stuck to a stick.
     for (let q = 0; q < 3; q++) {
-      const f = 0.32 + q * 0.23;
+      const f = q === 0 ? bc0 : q === 1 ? bc1 : bc2;
       const si = Math.min(n - 2, (f * (n - 1)) | 0), lf = f * (n - 1) - si;
       const nx = lerp(sp[si * 2], sp[si * 2 + 2], lf);
       const ny = lerp(sp[si * 2 + 1], sp[si * 2 + 3], lf);
