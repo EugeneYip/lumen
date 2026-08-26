@@ -314,6 +314,7 @@ export class Scene {
     this._cv = new Float32Array(MAXP);   // per-sample fold taper for the wake
     this._ln = new Float32Array(MAXP);   // and its prefix arclength
     this._spine = new Float32Array(8);   // 4 points down the mote's own flow line
+    this._bleed = new Float32Array(10);  // 5 waypoints down the anamorphic bleed
     this._ai = 0;                        // monotonic cursor into world.anchors
     this._view = [new Array(MAXP + 1), new Array(MAXP + 1), new Array(MAXP + 1)];
     for (let k = 0; k < 3; k++) {
@@ -926,15 +927,55 @@ export class Scene {
     this.occl.push(d.x + rr * 0.09, d.y + dir * rr * 0.34, rr * 1.14, rr * 1.24,
       (hc2 - 0.5) * -0.30, c0[0], c0[1], c0[2], 0.88, S.VOLUME);
 
+    // The arms, and what a blind review saw when it called this colony "one
+    // ball-tipped stalk rotated N times at even radius". That description was
+    // literally true of the code: ang0 was ((a + 0.5) / arms - 0.5) * PI * 1.10,
+    // dead even with no jitter at all, every arm leaving ONE point at
+    // d.y + dir*d.r*0.45, every arm carrying the same width function, and - the
+    // part that is easiest to miss - every bead the same SIZE, because
+    // Math.min(d.r * (0.60 + h * 0.34), CORE_PX * 1.6 / ppu) clamps, and at any
+    // zoom where the clamp binds it returns one number for the whole colony.
+    // The "one ball" was the ceiling, not the author.
+    //
+    // Rendered alone and taken apart by an angular spectrum this fan lands on
+    // m = arms at 4.7-45x line contrast with those variations deleted, against
+    // 2.2-3.4x for the shipped one - so unlike the urchin, here the even
+    // partition IS a real part of the signal and jitter is worth spending.
+    // Three things change, in the order they matter:
+    //   - arms leave the column at DIFFERENT HEIGHTS and off its axis. One
+    //     origin is what makes a fan a rotation; several make it a tuft, and
+    //     nothing else recovers that.
+    //   - the partition is jittered by +-0.46 of a gap, so gaps run 0.08x-1.9x
+    //     and the colony gets clumps and voids rather than a comb.
+    //   - width, taper exponent, bead size, bead ceiling and bead gain are all
+    //     per-arm. Arms that start higher are shortened so the outer envelope
+    //     does not grow.
+    // Energy is slightly DOWN, not up: the mean bead ceiling falls from
+    // CORE_PX*1.60 to CORE_PX*1.37. That direction is deliberate - the file
+    // already records three attempts to give this colony more form that each
+    // cost the hero a rank place, because its block sits within a hair of the
+    // hero's, and every one of them spent LIGHT. This spends shape.
     const arms = 11;
     const base0 = Math.atan2(dir, 0);
     for (let a = 0; a < arms; a++) {
       const h = hash2(sid, a * 3 + 1);
-      const ang0 = base0 + ((a + 0.5) / arms - 0.5) * Math.PI * 1.10;
-      const L = d.r * (1.5 + h * 1.6) * (0.86 + 0.24 * Math.sin(t * 1.4 + a * 1.9 + d.phase));
-      const curl = (h - 0.5) * 1.5 + Math.sin(t * 0.9 + a * 1.3 + d.phase) * 0.32;
+      const hj = hash2(sid, a * 5 + 17);      // angular jitter
+      const ho = hash2(sid, a * 5 + 19);      // where up the column it sprouts
+      const hl = hash2(sid, a * 5 + 31);      // ...and how far off its axis
+      const hw = hash2(sid, a * 7 + 23);      // shaft weight and extra curl
+      const hb = hash2(sid, a * 7 + 29);      // bead size / ceiling / gain
+      const u = (a + 0.5) / arms + (hj - 0.5) * 1.22 / arms;
+      const ang0 = base0 + (u - 0.5) * Math.PI * 1.10;
+      const L = d.r * (1.5 + h * 1.6) * (1 - ho * 0.10)
+        * (0.86 + 0.24 * Math.sin(t * 1.4 + a * 1.9 + d.phase));
+      const curl = (h - 0.5) * 1.5 + (hw - 0.5) * 0.86
+        + Math.sin(t * 0.9 + a * 1.3 + d.phase) * 0.32;
       const ca = Math.cos(ang0), sa = Math.sin(ang0);
-      const bx = d.x, by = d.y + dir * d.r * 0.45;
+      const bx = d.x + (hl - 0.5) * d.r * 0.56 + ca * d.r * 0.20;
+      const by = d.y + dir * d.r * (0.18 + ho * 0.64);
+      // Four points, as before. The curl is a parabola and a 4-point sampling
+      // of it is under 1% of the arm's length off the true curve - well under a
+      // pixel here - so a fifth point was pure vertex cost.
       const n = 4, pts = this._p2(n);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
@@ -944,10 +985,34 @@ export class Scene {
       // The filament. Alpha back to where it was before the cap pass - 0.30 was
       // a salience trim and it took the arms out along with the tips - and a
       // sharper taper, so a strand thins into its bead instead of arriving at
-      // one width.
+      // one width. Weight and taper are per-arm and their hash term averages to
+      // 1.0, so the spread costs nothing; the 0.38 -> 0.45 coefficient is
+      // separate, and it is the root ramp's repayment - see below.
+      //
+      // The emerge ramp is not cosmetic - it is trap 1 arriving the moment the
+      // arms stop sharing one origin. Eleven ribbon start caps at one point are
+      // one blob under the core wash; scattered up the column each cap is a
+      // 32px hard-edged quadrilateral, and at 2x their union drew visible
+      // facets across the trunk. A ribbon cannot fade its own cap at any
+      // falloff, so the root of each arm is faded to nothing instead and the
+      // trunk wash carries the joint.
+      //
+      // The ramp is short, and its length is a MEASURED constraint rather than
+      // a taste one. An arm's width function is widest at f=0, so the inner
+      // fifth of a strand is about 44% of its lit area; fading it out over
+      // f*5.0 took roughly a fifth of the whole colony's light and failed the
+      // gate outright - seed 7 launch p99 0.2545 -> 0.2416 and hushNear
+      // 0.2526 -> 0.2489, both under the 0.25 "there must be real highlights"
+      // floor, exactly as the note on the trunk wash below predicts. The ramp
+      // is now f*6.5 (the first 15%, ~9px in game) and the alpha and length it
+      // costs are paid back over the rest of the arm, so the colony's total is
+      // where it started and the cap is still gone.
+      const ww = 0.62 + hw * 0.80;
       this.rGlow.stroke(pts, {
-        width: (f) => lerp(wCore(d.r * 0.16, 3.5), wCore(0, 3.5), Math.pow(f, 0.55)), color: base,
-        alpha: (f) => k * 0.38 * (1 - f * 0.32), falloff: 3.5,
+        width: (f) => lerp(wCore(d.r * 0.16 * ww, 3.5), wCore(0, 3.5), Math.pow(f, 0.42 + hw * 0.30)),
+        color: base,
+        alpha: (f) => k * 0.475 * (0.78 + 0.46 * hw) * (1 - f * 0.32) * clamp01(f * 6.5),
+        falloff: 3.5,
       });
       const ex = pts[(n - 1) * 2], ey = pts[(n - 1) * 2 + 1];
       // BEADED FILAMENTS, which is what this animal is and what it stopped
@@ -964,14 +1029,26 @@ export class Scene {
       // nucleus in it: at three times the peak it is a fifth of the block cost of
       // the wash it replaces, and it is the only part of this animal a reviewer
       // can point at. So all eleven arms get one back, and the per-arm wash goes.
-      const bw = Math.min(d.r * (0.60 + h * 0.34), CORE_PX * 1.6 / this._ppu);
-      this._emits(ex, ey, bw, tip, k * (1.85 + h * 1.40), S.GLOW, CEIL_PROP);
+      //
+      // The CEILING is per-arm, which is the specific fix for "one ball". A
+      // shared CORE_PX*1.6 clamp is a constant in world units once ppu is
+      // fixed, so every bead whose authored size exceeded it came out at
+      // exactly the same size - and at the isolation rig's zoom that was all
+      // eleven of them. 1.14-2.00 keeps every bead between about 11 and 20
+      // screen pixels, which is still inside the band where a GLOW quad has a
+      // real 2-3px nucleus in it, and its MEAN is the old constant - the point
+      // is the spread, not a trim. Trimming it was tried and cost p99.
+      const bw = Math.min(d.r * (0.44 + h * 0.56), CORE_PX * (1.14 + 0.86 * hb) / this._ppu);
+      this._emits(ex, ey, bw, tip, k * (1.78 + hb * 1.56), S.GLOW, CEIL_PROP);
       // ...and a second bead partway down the longer filaments, because one
-      // terminal dot per arm is a starburst and two are an organism. Reuses the
-      // arm's own hash rather than drawing a new one: nothing in this file may
-      // change how many values come out of the sequence.
-      if (h > 0.44) {
-        this._emits(pts[4], pts[5], bw * 0.62, tip, k * (0.78 + h * 0.70), S.GLOW, CEIL_PROP);
+      // terminal dot per arm is a starburst and two are an organism. Its hash is
+      // independent of the tip bead's, and it sits at 1/3 or 2/3 of the arm
+      // rather than always at the same node - a bud at a fixed fraction of every
+      // arm is the rotation signature again, one radius in.
+      if (hb > 0.38) {
+        const si = h > 0.55 ? 1 : 2;
+        this._emits(pts[si * 2], pts[si * 2 + 1], bw * (0.46 + h * 0.32), tip,
+          k * (0.70 + h * 0.74), S.GLOW, CEIL_PROP);
       }
     }
     // The column's own light, and the wash is now narrow enough to be a mouth
@@ -1039,55 +1116,134 @@ export class Scene {
     // Spines. The hot edge runs along the outer shaft rather than sitting as a
     // bead on the point: that is what puts the hazard's own hue on the majority
     // of its pixels instead of on forty of them.
+    //
+    // Two populations, an uneven angular partition, and roots on the SHELL
+    // rather than on a point - and which of those matters is a measured result
+    // that contradicts the brief it came from.
+    //
+    // A blind review called this "a procedural asterisk - sixteen near-identical
+    // spokes at near-equal angular spacing", and prescribed angular jitter. The
+    // obvious reading is that the angular PERIOD is the defect. It is not, and
+    // the disconfirmation is clean: build a deliberately PERFECT control (jitter,
+    // length, bend, thickness and gain variation all deleted), render one urchin
+    // alone at a fixed radius, and take an angular spectrum about its centre.
+    // The perfect control lands on m=17 - exactly the spine count - at 21-57x
+    // line contrast on four urchins over two seeds. The build being replaced,
+    // with only its +-0.22rad jitter, wanders over m=12,16,23,29 at 2.2-4.6x,
+    // i.e. the noise floor. The period was ALREADY dead.
+    //
+    // (Two instrument notes worth keeping. In the composite frame neither the
+    // angular spectrum nor tools/_comb.mjs can see the difference at all - at
+    // 1600x900 the creature is ~100px across and the annulus contains an anchor
+    // stalk, an anemone colony and rock, every one of them a larger signal;
+    // _comb.mjs scored the perfect asterisk as LESS regular than the shipped one
+    // (4.76x at 70px against 4.32x at 15px) and its peak lag moves frame to
+    // frame, which by its own reading rule means neither number is a finding.
+    // Isolate the object before measuring it, and measure on the axis the defect
+    // lives on. _comb.mjs answers "is a repeating CELL WIDTH drawing a comb" and
+    // a rotated primitive is not that.)
+    //
+    // So what the eye is reading is not a period. It is that every element is
+    // the SAME element: one straight radial taper, one width class, one origin,
+    // one scale. The variance therefore goes where a spectrum cannot see it -
+    // into class, origin, curvature and joint weight - and only a little more
+    // into angle.
+    //
+    // The warp below is that "only a little more". An even partition plus a
+    // symmetric jitter is still an even partition with noise on it: every gap
+    // has the same expectation. A smooth warp of the circle gives genuine clumps
+    // and voids at a phase this urchin owns. Amplitudes are bounded so
+    // d(uw)/du = 1 + TAU*(w1*cos + 2*w2*cos) stays positive (0.085 + 2*0.030
+    // times TAU is 0.91 < 1) and no two spines can swap places and collapse.
     const ns = 17;
+    const w1 = (hash2(sid, 401) - 0.5) * 0.14, w2 = (hash2(sid, 403) - 0.5) * 0.06;
+    const wp1 = hash2(sid, 405) * TAU, wp2 = hash2(sid, 407) * TAU;
     for (let k = 0; k < ns; k++) {
       const h1 = hash2(sid, k * 3 + 1), h2 = hash2(sid, k * 3 + 2), h3 = hash2(sid, k * 3 + 5);
-      const ang = spin + (k / ns) * TAU + (h1 - 0.5) * 0.44;
-      const L = r * (1.02 + Math.pow(h2, 1.25) * 1.06);
-      const bend = (h1 - 0.5) * 0.55;
-      const thick = 0.19 + h3 * 0.19;
+      const h4 = hash2(sid, k * 5 + 41), h5 = hash2(sid, k * 5 + 43);
+      const u = k / ns;
+      const uw = u + w1 * Math.sin(TAU * u + wp1) + w2 * Math.sin(2 * TAU * u + wp2);
+      const ang = spin + uw * TAU + (h1 - 0.5) * 0.30;
+      // A stub is not a short spine. It is thicker for its length and it stops
+      // inside the long spines' field, so the silhouette carries two scales
+      // instead of one - and it keeps the magenta area up while the long spines
+      // get sparser, which is what protects the read at 165 m/s.
+      const stub = h4 < 0.28;
+      const L = stub ? r * (0.86 + h2 * 0.50) : r * (1.28 + Math.pow(h2, 1.15) * 0.92);
+      // Roots sit ON the shell at varying depth, and off the radius they leave
+      // on, so there is no point in the middle that every spine passes through.
+      const rb = r * (0.30 + h5 * 0.34);
+      const bt = (h4 - 0.5) * r * 0.30;
+      // S-curve, not an arc: a quadratic bend plus a cubic hook of independent
+      // sign. Some spines sabre, some hook back, none is a rotation of another.
+      // The hook is bounded well under the bend: a spine that turns far enough
+      // to stop pointing outward stops reading as a spike, and the spike is the
+      // whole of the threat read at 165 m/s.
+      const bend = (h1 - 0.5) * 0.86, hook = (h5 - 0.5) * 0.50;
+      const thick = (stub ? 0.17 : 0.13) + h3 * 0.20;
+      const flare = 0.30 + h4 * 0.50;
       const n = 5, pts = this._p2(n);
+      const nbx = -Math.sin(ang), nby = Math.cos(ang);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
-        const a = ang + bend * f * f;
-        const rr = r * 0.24 + (L - r * 0.24) * f;
-        pts[s * 2] = h.x + Math.cos(a) * rr;
-        pts[s * 2 + 1] = h.y + Math.sin(a) * rr;
+        const a = ang + bend * f * f + hook * f * f * f;
+        const rr = rb + (L - rb) * f;
+        pts[s * 2] = h.x + Math.cos(a) * rr + nbx * bt * (1 - f) * (1 - f);
+        pts[s * 2 + 1] = h.y + Math.sin(a) * rr + nby * bt * (1 - f) * (1 - f);
       }
+      // Weight change at the joint - the one thing the review credited the
+      // anchors for and this creature had none of. The flare decays over ~15%
+      // of the shaft, so it is a shoulder where the spine meets the shell and
+      // not a fatter spine.
       const swf = (f) => lerp(r * thick, r * 0.012, Math.pow(f, 0.62))
-        * (0.84 + 0.30 * noise1(f * 4.7 + h1 * 11.3));
+        * (0.84 + 0.30 * noise1(f * 4.7 + h1 * 11.3))
+        * (1 + flare * Math.exp(-f * 6.5));
+      // ...and moving the roots off a common point is what EXPOSES trap 1.
+      // Seventeen ribbon start caps used to overlap at r*0.24 into one blob
+      // under the shell; scattered over 0.30-0.64r and widened by the flare,
+      // their union drew a hard-edged polygon around the core - visible as
+      // straight diagonal steps at 4x, and exactly the artefact this file has
+      // removed from the mote's rim, the spire and the anemone trapezoids. A
+      // ribbon cannot soften its own butt cap at any falloff, so the cap is
+      // faded out instead: the first fifth of every spine is transparent, which
+      // is the part buried in the shell anyway.
       this.rDark.stroke(pts, {
-        width: swf, color: PAL.hazardDark, alpha: (f) => 0.99 - f * 0.14, falloff: 0.95,
+        width: swf, color: PAL.hazardDark,
+        alpha: (f) => (0.99 - f * 0.14) * clamp01(f * 5.5), falloff: 0.95,
       });
       // Offset to one flank, so it reads as a lit side and not as an outline.
-      const nx0 = -Math.sin(ang), ny0 = Math.cos(ang);
       const gz = this._p3(n);
       for (let s = 0; s < n; s++) {
         const f = s / (n - 1);
         const w = swf(f) * 0.46;
-        gz[s * 2] = pts[s * 2] + nx0 * w;
-        gz[s * 2 + 1] = pts[s * 2 + 1] + ny0 * w;
+        gz[s * 2] = pts[s * 2] + nbx * w;
+        gz[s * 2 + 1] = pts[s * 2 + 1] + nby * w;
       }
       const gk = (0.72 + 0.28 * p) * hot * (0.52 + h3 * 0.72);
+      // The highlight tracks the shaft it lies on, or a thin spine and a thick
+      // one carry the same line and the width variance is invisible in light.
+      const gw = 0.70 + h3 * 0.72;
       this.rGlow.stroke(gz, {
-        width: (f) => lerp(wCore(r * 0.070, 4), wCore(r * 0.022, 4), Math.pow(f, 0.5)),
+        width: (f) => lerp(wCore(r * 0.070 * gw, 4), wCore(r * 0.022 * gw, 4), Math.pow(f, 0.5)),
         color: scaled(cRim, 2.9 * gk, c1),
         alpha: (f) => 0.66 * Math.pow(Math.sin(Math.PI * clamp01(0.08 + f * 0.88)), 0.5)
-          * clamp01(1.2 - f * 0.95),
+          * clamp01(1.2 - f * 0.95) * clamp01(f * 5.5),
         falloff: 4,
       });
       // Glint pulled *inside* the tip and stretched along the spine. A round
       // bead sitting on the point detaches and floats. Not every spine either -
-      // regularity is what read as floral.
-      if (h2 > 0.30) {
-        const i0 = n - 2, lf = 0.72;
+      // regularity is what read as floral - and its hash is now independent of
+      // the length's, so "long" and "glinting" are not the same spine twice.
+      // Stubs never glint: they are half-buried in the shell.
+      if (!stub && h5 > 0.30) {
+        const i0 = n - 2, lf = 0.52 + h4 * 0.40;
         const ex = lerp(pts[i0 * 2], pts[i0 * 2 + 2], lf);
         const ey = lerp(pts[i0 * 2 + 1], pts[i0 * 2 + 3], lf);
         const sa = Math.atan2(pts[i0 * 2 + 3] - pts[i0 * 2 + 1], pts[i0 * 2 + 2] - pts[i0 * 2]);
         const bk = gk * (0.85 + h1 * 0.55);
-        this._emit(ex, ey, r * 0.72, r * 0.32, sa,
+        this._emit(ex, ey, r * (0.52 + h3 * 0.42), r * 0.32, sa,
           cBod[0] * bk * 1.5, cBod[1] * bk * 1.5, cBod[2] * bk * 1.5, S.STREAK, CEIL_WARM);
-        this._emit(ex, ey, r * 0.60, r * 0.33, sa,
+        this._emit(ex, ey, r * (0.46 + h3 * 0.30), r * 0.33, sa,
           cRim[0] * bk * 1.6, cRim[1] * bk * 1.6, cRim[2] * bk * 1.6, S.GLOW, CEIL_WARM);
       }
     }
@@ -1096,6 +1252,23 @@ export class Scene {
     const bp = this._p1(2);
     bp[0] = h.x - r * 0.17; bp[1] = h.y; bp[2] = h.x + r * 0.17; bp[3] = h.y;
     this.rDark.stroke(bp, { width: r * 1.34, color: PAL.hazardDark, alpha: 0.995, falloff: 0.78 });
+    // ...and the shell is a body, not a dot. Three unequal plates at unequal
+    // offsets, drawn as occluder sprites so they land over the spine ribbons
+    // (round 2 flushes every ribbon before every sprite), give the dark core a
+    // lumpy silhouette and bury each root at a different depth. VOLUME rather
+    // than a ribbon for the reason this file keeps paying for: a ribbon cannot
+    // reach zero at its own edge, and three overlapping trapezoids would be
+    // exactly the artefact removed from under the anemone colonies. They sit
+    // inside the 1.34r body, so this is silhouette shape rather than new area -
+    // seed 7 / fast has no hazard in it and hazardNear moved 24.2% -> 24.6%.
+    for (let q = 0; q < 3; q++) {
+      const ha = hash2(sid, q * 13 + 211), hb = hash2(sid, q * 13 + 213);
+      const pa = spin * 0.8 + q * 2.09 + ha * 1.1;
+      const pr = r * (0.12 + hb * 0.26);
+      this.occl.push(h.x + Math.cos(pa) * pr, h.y + Math.sin(pa) * pr,
+        r * (0.80 + ha * 0.56), r * (0.66 + hb * 0.52), pa + ha,
+        PAL.hazardDark[0], PAL.hazardDark[1], PAL.hazardDark[2], 0.80, S.VOLUME);
+    }
 
     // Rim on the shell's lit flank: the brightest thing on the object, wrapped
     // around a hole. Dark core, hot rim - the inversion, in one gesture.
@@ -1720,6 +1893,64 @@ export class Scene {
       pts[s * 2 + 1] = src[i + 1] + (dx / dl) * w;
     }
 
+    // Corner limit, and it is geometry rather than tuning.
+    //
+    // A review reported "a hard angular kink partway along - a sharp V corner in
+    // what should be a fluid path", and at 3x under ?noSprites=1 that is exactly
+    // what a tethered swing draws: the path reverses inside its own history, and
+    // ribbons.js miters a join with cosHalf = sqrt(max(0.02, (1 + dot) * 0.5)),
+    // so a join approaching 180 degrees extends the miter to 1/0.141 = 7.07x the
+    // stroke width. On the wake's widest pass, 34-60 units, that is a 240-420
+    // unit spike at one vertex. Nothing in the alpha can remove it, and the fold
+    // taper below cannot either: chord-over-arclength answers "did the path
+    // cross itself", which is a different question from "how sharp is this one
+    // join" - the comment on FOLD_LO says as much, and rejects local curvature
+    // for fold detection on exactly those grounds. It is the right quantity here
+    // and the wrong one there.
+    //
+    // The threshold is measured, not guessed, and the measurement is a small
+    // surprise: a wake is not generally kinked. Dumping every join angle of
+    // player.trailPts at the gate's own moments, seed 7 / tethered has exactly
+    // ONE join over two degrees - index 12 of 44, at 80.4 degrees, between two
+    // 11-unit segments - and every other join in that frame, and every join in
+    // the fast frame, sits at 1.5-1.7 degrees. So this is one isolated vertex,
+    // almost certainly a seam in the history rather than a path the mote flew,
+    // and a wide smoothing would be all cost. It wants a narrow one that hits
+    // hard.
+    //
+    // And it has to round it over several samples, not one. The elbow turns 80
+    // degrees between 11-unit segments while the widest wake pass is 34-60 units
+    // ACROSS: a turn whose radius is smaller than the ribbon's own width is a
+    // hairpin however sharp the vertex is, overlapping itself on the inside and
+    // spiking the miter on the outside. Moving one vertex cannot reach a radius
+    // of 44 units; twelve passes can, because a Laplacian's radius grows with
+    // the square root of the iteration count.
+    //
+    // Zero below 20 degrees, full by 90, and the weight is RECOMPUTED each pass
+    // on purpose - rounding a vertex sharpens its neighbours, so recomputing is
+    // what spreads the correction along the strand instead of leaving two new
+    // corners where one was, and it is also what makes the pass self-limiting:
+    // once the turn is gentler than 20 degrees every weight is zero and further
+    // passes are no-ops. Jacobi rather than Gauss-Seidel (the previous point is
+    // read before it is written) so the pass cannot walk the whole tail sideways.
+    for (let it = 0; it < 12; it++) {
+      let ppx = pts[0], ppy = pts[1];
+      for (let s = 1; s < n - 1; s++) {
+        const qx = pts[s * 2], qy = pts[s * 2 + 1];
+        const ax = qx - ppx, ay = qy - ppy;
+        const bx = pts[s * 2 + 2] - qx, by = pts[s * 2 + 3] - qy;
+        const al = Math.hypot(ax, ay), bl = Math.hypot(bx, by);
+        if (al > 1e-4 && bl > 1e-4) {
+          const wg = clamp01((0.94 - (ax * bx + ay * by) / (al * bl)) / 0.94);
+          if (wg > 0) {
+            pts[s * 2] = qx + ((ppx + pts[s * 2 + 2]) * 0.5 - qx) * 0.62 * wg;
+            pts[s * 2 + 1] = qy + ((ppy + pts[s * 2 + 3]) * 0.5 - qy) * 0.62 * wg;
+          }
+        }
+        ppx = qx; ppy = qy;
+      }
+    }
+
     // Fold taper. A tethered swing folds the wake back over itself, and two
     // stretches of the same additive ribbon crossing at a shallow angle sum into
     // a contour line - the artefact this file has had to remove from the hazard,
@@ -1775,10 +2006,20 @@ export class Scene {
       }
       cv[a] = clamp01((lo - FOLD_LO) * span);
     }
-    // Smoothed across neighbours, or the taper itself becomes a dashed line.
+    // Smoothed across neighbours, or the taper itself becomes a dashed line -
+    // and over FIVE samples rather than three, because at three it still cut.
+    // The same review that found the V corner asked for the quads to "taper to
+    // alpha zero at the trailing edge (they currently butt-cut)", and at 3x the
+    // butt-cut is not at the ribbon's end at all: every pass here already
+    // reaches zero at f=0. It is where this taper falls off a cliff MID-STROKE,
+    // which draws a straight alpha edge straight across the ribbon and looks
+    // exactly like a quad ending. A five-tap costs nothing and turns the cut
+    // into a fade.
     const fold = (f) => {
       const i = Math.round(f * (n - 1));
-      return (cv[Math.max(0, i - 1)] + cv[i] + cv[Math.min(n - 1, i + 1)]) * 0.3333;
+      const a = Math.max(0, i - 2), b = Math.max(0, i - 1);
+      const c = Math.min(n - 1, i + 1), d = Math.min(n - 1, i + 2);
+      return (cv[a] + cv[b] + cv[i] + cv[c] + cv[d]) * 0.2;
     };
 
     // Three passes whose alpha ramps localise a colour to a stretch of the
@@ -2354,21 +2595,93 @@ export class Scene {
       LEN * 0.60, HH * 1.34, ang,
       FLESH[0] * hk2, FLESH[1] * hk2, FLESH[2] * hk2 * 0.98, 1, S.GLOW);
 
-    // 10. anamorphic bleed. Length and asymmetry are keyed to velocity: a
-    // constant full-width bar reads as a sprite, a bar that grows and trails
-    // reads as motion, and that alone carries most of the speed legibility.
-    const alen = R * (2.2 + sk * 40 + lg * 44);
+    // 10. anamorphic bleed, laid along the PATH instead of drawn as one bar.
+    //
+    // Two blind reviews two rounds apart described this object independently,
+    // and neither description named it: "the anamorphic streaks read as a
+    // filter, not light - every bright object throws a level bar across the
+    // full frame that passes in front of silhouettes it should be behind", and
+    // "a dead-straight, uniform-width blue line running horizontally 550px
+    // across its own wake - a stale trail sample that never faded". It is not
+    // stale and it is not a sample. It was ONE S.ANAMORPH quad at
+    // alen = R*(2.2 + sk*40 + lg*44), i.e. up to 42R long against 0.73R tall.
+    //
+    // A 58:1 quad. That is trap 2 from the top of this file, in the file that
+    // documents trap 2. A stretched quad is a straight line because its medial
+    // axis IS a segment, and no profile saves it: ANAMORPH's own length term is
+    // pow(1 - |nx|, 1.5), still 0.72 at a fifth of the way out and 0.35 at half,
+    // so the brightest half of that quad is a uniform-width ruled bar. Length
+    // keyed to speed is exactly why one reviewer measured "550px" and the other
+    // "about half the length" - the defect scales with the thing it was drawn
+    // for, which is what made it look like a filter rather than like light.
+    //
+    // There is no depth buffer, so the occlusion half of the round-seven
+    // prescription is not available and is not attempted. The other half is: a
+    // short emitter-oriented anisotropic bloom that ends in nothing. Four
+    // overlapping pieces walked back along the mote's own trail, each rotated to
+    // its local chord and each under 7:1, so no straight line passes through
+    // more than one - which is this file's own stated rule for anything that
+    // must not read as ruled. The reach is 43% of what it was, and the gain runs
+    // to zero along the chain, so the tail is authored at nothing rather than
+    // terminating in open water.
+    //
+    // Speed legibility survives because it never lived here: what reads as
+    // speed is that the smear FOLLOWS THE ARC and grows, not that one bar is
+    // long, and the wake in _trail already widens with sk. AI_HANDOFF section 8
+    // is explicit that speed cues belong on the world and not on the hero.
+    const alen = R * (2.2 + sk * 16 + lg * 18);
     const fl = 0.10 + sk * 0.40 + lg * 0.95;
     if (alen > R * 4.5) {
-      // Halved in thickness and pushed further back. A bar 37px tall through
-      // the core is 23% of the annulus the focal metric samples, at whatever
-      // brightness it is drawn - length is what reads as speed, height is only
-      // what dilutes the core. Thinner again here, because the sac now has to
-      // read *through* it: a bar as tall as the body erases the membrane.
-      this.glow.push(p.x - dx * alen * 0.40, p.y - dy * alen * 0.40, alen, R * (1.05 - sk * 0.32), ang,
-        SKIN[0] * fl * 0.105, SKIN[1] * fl * 0.120, SKIN[2] * fl * 0.170,
-        1, S.ANAMORPH);
-      this.glow.push(p.x + dx * alen * 0.16, p.y + dy * alen * 0.16, alen * 0.36, R * (0.74 - sk * 0.20), ang,
+      const BP = this._bleed;
+      BP[0] = p.x; BP[1] = p.y;
+      const tr = p.trailPts, tnb = tr.length >> 1;
+      let j = tnb - 1, acc = 0, cx = p.x, cy = p.y;
+      for (let k = 1; k < 5; k++) {
+        const need = alen * (k / 4);
+        while (j > 0) {
+          const qx = tr[(j - 1) * 2], qy = tr[(j - 1) * 2 + 1];
+          const seg = Math.hypot(qx - cx, qy - cy);
+          if (acc + seg >= need) {
+            const u = (need - acc) / (seg || 1);
+            cx += (qx - cx) * u; cy += (qy - cy) * u; acc = need;
+            break;
+          }
+          acc += seg; cx = qx; cy = qy; j--;
+        }
+        // No history yet: fall back to the velocity ray, as the flow line does.
+        if (acc < need) { cx = p.x - dx * need; cy = p.y - dy * need; acc = need; }
+        // ...and the same fold guard, for the same reason. This reach is four
+        // times the flow line's, so it spans a whole swing reversal, and a bleed
+        // that folded back over the mote would put its own bar across the hero.
+        const st = clamp01((Math.hypot(cx - p.x, cy - p.y) / need - FOLD_LO)
+                           / (FOLD_HI - FOLD_LO));
+        BP[k * 2] = lerp(p.x - dx * need, cx, st);
+        BP[k * 2 + 1] = lerp(p.y - dy * need, cy, st);
+      }
+      for (let k = 0; k < 4; k++) {
+        const x0 = BP[k * 2], y0 = BP[k * 2 + 1];
+        const x1 = BP[k * 2 + 2], y1 = BP[k * 2 + 3];
+        const sx2 = x1 - x0, sy2 = y1 - y0;
+        const sl = Math.hypot(sx2, sy2);
+        if (sl < R * 0.4) continue;
+        // A third of overlap, so the chain has no gap at a joint, and a height
+        // that only tapers a little - length is what reads as motion, height is
+        // what dilutes the core, and the focal metric samples a 42-83px annulus
+        // that these pieces sit in.
+        const kk = fl * 0.150 * (1 - k * 0.25) * (1 - k * 0.25);
+        this.glow.push((x0 + x1) * 0.5, (y0 + y1) * 0.5, sl * 1.34,
+          R * (1.00 - sk * 0.28) * (1 - k * 0.09), Math.atan2(sy2, sx2),
+          SKIN[0] * kk * 0.70, SKIN[1] * kk * 0.80, SKIN[2] * kk * 1.13,
+          1, S.ANAMORPH);
+      }
+      // The leading lobe. A flare is roughly symmetric about its source, and
+      // dropping it entirely made the mote look towed rather than moving. Under
+      // ?noSprites=1 the launch frame has no long diagonal in it at all, which
+      // is how this quad rather than the tether was named as the last ruled line
+      // left on the hero; it is now 22% of the reach at 6:1 instead of 30% at
+      // 11:1, which is inside the same rule the chain above follows.
+      this.glow.push(p.x + dx * alen * 0.10, p.y + dy * alen * 0.10, alen * 0.22,
+        R * (0.90 - sk * 0.22), ang,
         PAL.moteCore[0] * fl * 0.145, PAL.moteCore[1] * fl * 0.145, PAL.moteCore[2] * fl * 0.170,
         1, S.STREAK);
     }
@@ -2377,9 +2690,17 @@ export class Scene {
     // that is always there. Kept dim and short: with a travel-aligned bar in the
     // frame as well, a full-strength horizontal one is the "4-point star" the
     // review saw instead of an animal.
+    //
+    // Shortened from R*(7 + lg*30) for the same reason as the bleed above: at
+    // lg=1 that was 37R against 1.05R, a 35:1 screen-horizontal quad, and "a
+    // LEVEL bar across the full frame" describes a screen-horizontal one more
+    // exactly than it describes a travel-aligned one. This is a lens artefact,
+    // so being straight is correct and being frame-wide is not; at R*18 it is
+    // about 220px, which is a flare on the hero rather than a rule across the
+    // image. It stays a single quad because a lens flare has no path to follow.
     if (lg > 0.02) {
       const rot = -(cam.rot || 0);
-      this.glow.push(p.x, p.y, R * (7 + lg * 30), R * 1.05, rot,
+      this.glow.push(p.x, p.y, R * (5 + lg * 13), R * 1.05, rot,
         SKIN[0] * lg * 0.085, SKIN[1] * lg * 0.100, SKIN[2] * lg * 0.130,
         1, S.ANAMORPH);
     }
