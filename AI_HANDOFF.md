@@ -419,30 +419,64 @@ Verify each against the current code before acting; some may be fixed. The
 authoritative snapshot of quality is whatever `node tools/check.mjs --seeds 7,3`
 says today, plus a blind review per `tools/CRITIC.md`.
 
-**Most recent blind review** (five pairs, simulation byte-identical between the
-two builds so every difference was purely rendering): the current build won all
-five pairs, scored **6.1 mean** across nine axes, and the verdict was **No** to
-shipping. Highest axis was light behaviour (7); lowest was motion legibility (5).
-Its three ranked problems, all open at the time of writing:
+**Most recent blind review** — eight pairs, two seeds x four matched depths,
+captured per `CRITIC.md` from a detached worktree at the baseline commit. **The
+current build won all eight pairs** (two decisive, six clear), which is the
+reliable signal a blind A/B produces. Nine-axis mean **6.2**, ship verdict **No**.
 
-1. **The hero is the weakest-crafted object in its own frame.** The anchor bell
-   membranes, the barbed kelp and the seabed anemones all carry more internal
-   structure than the player does. The prescription: give the mote a body — a
-   translucent sac with a visible nucleus and trailing cilia that lag behind the
-   velocity vector — and make its halo an anisotropic ellipse stretched along
-   travel rather than a circle, so its shape alone reads direction. Constraint:
-   focal contrast must stay above 4:1, so new structure has to sit inside the
-   core radius or be genuinely dark.
-2. **The anamorphic streaks read as a filter, not light.** Every bright object
-   throws a level bar across the full frame that passes *in front of*
-   silhouettes it should be behind. There is no depth buffer to test against, so
-   either approximate occlusion or replace the streak with a short
-   emitter-oriented anisotropic bloom.
-3. **Speed is invisible in a still.** In a distance game the HUD is doing work
-   the image should do. Cues belong on the world (plankton streaked along
-   travel, near-ground directional smear, a wake whose length is the speedometer)
-   and explicitly **not** on the hero — smearing the player is what made an
-   earlier build's tether read as a flat desaturated ribbon.
+| axis | | axis | |
+|---|---|---|---|
+| Composition | 7 | Object craft | 6 |
+| Value structure | 7 | Detail & texture | 6 |
+| Colour | 7 | **Motion legibility** | **4** |
+| **Light behaviour** | **5** | UI | 7 |
+| Cohesion | 7 | | |
+
+**Read the axis scores with care and the win/loss without.** The previous review
+scored light behaviour 7 and motion 5; this one scores them 5 and 4. That is a
+different reviewer looking at a different frame set (eight depth-matched pairs
+rather than five named scenes), so **absolute axis scores are not comparable
+across rounds** and no regression should be inferred from them. What *is*
+comparable is that one build beat the other on every pair.
+
+The reviewer independently confirmed the far-wall fracture fix without being told
+about it: it described the losing build as carrying "ruled parallel hatching in
+five of eight frames" and the winner as having "one faint shallow diagonal and
+nothing else" in the same region.
+
+Its three ranked problems:
+
+1. **The frame does not move.** *(vfx — motion legibility 4/10, the lowest axis
+   and the most persistent complaint across eight rounds.)* The near-field streak
+   layer is "the right idea at the wrong amplitude" — the reviewer had to zoom to
+   4x to confirm it existed in one pair, and it vanishes at some depths. It also
+   is not tied to velocity and has no parallax. Its warning matters: lengthening
+   strokes *without taper* produces ruled hatching, which is worse than nothing.
+2. **Light is a blur filter, not light.** *(postfx — 5/10.)* "Glows are radial
+   gaussians. Bloom bars are hard-terminated straight streaks. Cores clip to flat
+   255. No light wrap on silhouettes, no scatter around occluders." The single
+   most important item in the whole review: **the hero and the anchors both clip
+   to flat 255, so the two most important objects read as the same material** —
+   which is the gap between a statistic and a perception, since the gate already
+   measures the hero as the brightest highlight peak in every frame. Also: the
+   anchor's flare bar is a uniform-width streak that stops dead in open water,
+   and the Hush is a flat fill with a hard crenellated edge and no internal
+   density variation.
+3. **Objects show their primitives.** *(scene/world — object craft 6/10.)* "The
+   magenta creature is a procedural asterisk — sixteen near-identical spokes at
+   near-equal angular spacing. The amber coral is one ball-tipped stalk rotated N
+   times at even radius." It named the anchors as the standard to match: "rim,
+   ring, tapered tendrils, weight change at the joints."
+
+Also flagged, and a bug rather than a craft call: **a 550px dead-straight
+uniform-width segment lying across the wake** — a stale trail sample that never
+faded — plus a visible polyline kink and butt-cut trail quads you can count.
+
+Carried forward from the previous review and **independently confirmed still open
+by this one**: the anamorphic streak reading as a filter rather than as light.
+Not re-raised this round: "the hero is the weakest-crafted object in its own
+frame", which may have been addressed by the tether-convergence and salience work
+— verify before assuming either way.
 
 Runners-up from the same review: geometry floats (kelp and reeds terminate on a
 flat horizontal baseline instead of intersecting the seabed — `world.bandBot(x)`
