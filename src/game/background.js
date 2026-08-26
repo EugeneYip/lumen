@@ -1210,6 +1210,82 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
   return vec4(c, cov);
 }
 
+// ---------------------------------------------------- far-wall fracture sets --
+// ONE fracture set on a receding plane: a level set of a warped, sheared x,
+// wandering inside its own cell and broken along its length. It is a function
+// rather than an inlined block because the far walls now run TWO of them at
+// CONJUGATE leans, and the reason a second lattice is the only way to get a
+// second mean angle is worth stating once, here:
+//
+//   the mean angle of a set lives INSIDE the level set. An offset applied
+//   after floor() is bounded by its own cell - that is what bounds the meander
+//   - and a per-joint TILT is an offset that grows without bound in y, so it
+//   leaves the cell and truncates at the boundary within one screen height.
+//   Measured on the traced cores: a tilt big enough to move the mean by 20 deg
+//   crosses 36 cells over the deepest plane's 8000-unit span. So a second mean
+//   angle costs a second lattice, or it does not exist.
+//
+// 'mea' is the meander amplitude in cells; 2.5 sigma of the widest core is
+// 0.148, and the in-cell offset already spends 0.15, so mea must stay under
+// about 0.20 or the core is cut by its own cell edge.
+float fracSet(vec2 q, float wy, float W, float lean, float sf, float sph,
+              float gate, float seed, float k0, float k1, vec2 wid, float mea){
+  float jsx = (q.x + q.y * lean) / W + wave(q.y, sf, sph) * 0.17;
+  float ji  = floor(jsx);
+  float jh  = hash11(ji * k0 + 1.9);
+  if(jh <= gate) return 0.0;
+  // Two raw sinusoids rather than two wave() calls: the same known +-1 range
+  // for half the transcendentals, and the two fields want their own phases
+  // anyway. The meander leans on the low octave, the segments on the high.
+  //
+  // fk is a PER-JOINT frequency for both, and it is half of 'near identical
+  // LENGTH'. Every joint used to break on the same two periods, 2027 and 528
+  // world units, differing only in phase - so a reviewer counting strokes saw
+  // one length repeated. 0.62..1.67 is a 2.7x spread of segment length, off
+  // fract(p) rather than a third hash, since p is already a large number whose
+  // fractional part is uncorrelated with the value that made it.
+  float p  = hash11(ji * k1 + 4.7) * 43.7 + seed;
+  float fk = 0.62 + fract(p * 0.317) * 1.05;
+  float s1 = sin(wy * 0.0031 * fk + p);
+  float s2 = sin(wy * 0.0119 * fk + p * 2.7);
+  float jd = abs(fract(jsx) - 0.5 + (jh - 0.5) * 0.30
+               + (s1 * 0.72 + s2 * 0.28) * mea);
+  // A PER-JOINT DUTY, and it is the one axis of a per-joint weight that is
+  // SAFE. A multiplicative gain on jnt is not: alb is consumed as
+  // alb *= 1.0 - 0.88 * jnt, so a mean-1 gain must exceed 1 somewhere and there
+  // it drives the albedo NEGATIVE - the channel stops occluding and starts
+  // subtracting light, which is the mechanism AI_HANDOFF records behind the
+  // black polygons. seg is clamped to 0..1 BEFORE it multiplies anything, so
+  // moving its centre cannot do that.
+  //
+  // IT IS ALSO NOT WHERE LENGTH JITTER COMES FROM, AND THE BRIEF THAT ASKED FOR
+  // '+-60% length jitter' GETS IT SOMEWHERE ELSE. +-0.312 about 0.52 IS +-60%
+  // of the duty, but duty is not length: measured off seg(y) at one world unit
+  // over 500 joints, run length goes from median 246 (p05 134, p95 470, CV
+  // 0.385) to median 248 (p05 130, p95 484, CV 0.433). A 12% wider spread, not
+  // 60% - because length is already dominated by fk's 2.7x and by where the two
+  // octaves beat. What DOES move it is the bed confinement in farWall: median
+  // 246 -> 102 world units, p95/p05 3.51x -> 9.24x, and three times as many
+  // separate segments. Keep this term - it is nearly free and it decorrelates
+  // duty from width - but do not credit it with the length variance.
+  float seg = sat(0.52 + (fract(p * 0.713) - 0.5) * 0.624
+                       + (s2 * 0.62 + s1 * 0.38) * 1.9);
+  // WIDTH, AND WHY THE FISSURE'S IS NOT ALLOWED TO GROW. Mean seg is 0.507
+  // integrated over phase, so segmenting cost the channel about half its mass,
+  // and 0.023/0.036 is already 1.135x the pre-segment width to give some back -
+  // 0.576 of the old mass, not 1.0. Going the rest of the way was measured and
+  // goes the WRONG WAY: at 0.035 + 0.055 * jh the mass is 0.880 of the old and
+  // notch rises 0.971 -> 1.032 at 900m and 1.683 -> 1.837 at 300m. A joint at
+  // s = 0.135 is around a pixel, so widening it recruits more pixels into the
+  // hairline instead of dissolving it. The 42% of mass that stays lost is worth
+  // 0.0000 of scene mean and at most 0.3pp of pixels below L8 on any gate
+  // scene. The GOUGE is wider (0.034/0.042) precisely because it is allowed to
+  // be a band rather than a hairline - the same argument the fault's damage
+  // zone makes below.
+  float jt = wid.x + jh * wid.y;
+  return exp(-(jd * jd) / (jt * jt)) * seg;
+}
+
 // A trench wall further back. A smaller 's' converges it toward the view centre
 // and shrinks it; the value and the contrast come down with it, and that
 // difference in contrast - not the parallax rate - is what makes the air.
@@ -1334,6 +1410,41 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // Same bed index and the same hash as strata(), so bed N is the same shade of
   // rock at every distance.
   float alb = 0.55 + 1.00 * hash11(floor(syF - bpF.z * uKill3.z) * 1.37 + 0.5);
+  // 1 on the deepest plane, 0 on the nearest of the four. Every family weight
+  // below is a function of it and of 's' alone, and both are literals at the
+  // four call sites, so each instantiation folds them to constants: a family
+  // that is quiet on a plane costs that plane nothing.
+  float farK = 1.0 - sat(s / 0.58);
+  // MATERIAL. The same bed index alb reads, hashed the way strata() hashes bed
+  // CHARACTER, so a bed on the fourth plane is the same rock as the bed at that
+  // horizon on the near wall: high is a competent sandstone, low an incompetent
+  // shale. It steps at a bed contact, and that is legal here for the reason
+  // AI_HANDOFF section 6 gives - the locus already exists and is already drawn
+  // at full strength, because alb steps on the SAME index by up to a whole unit
+  // of albedo. This adds no boundary that was not already there.
+  float chrF = hash11(floor(syF - bpF.z * uKill3.z) * 2.71 + 9.1);
+  float comp = smoothstep(0.28, 0.74, chrF);
+  float bfF  = fract(syF);
+  // SEDIMENT BANDING - the third stroke family, and the only one that is not a
+  // stroke. Round eleven scored detail 4/10 with 'no sediment, no encrustation,
+  // no near/far differentiation'. These planes were not bare - there is already
+  // a bright seam AT each bed CONTACT further down, and it is pixel-aware, so
+  // it widens with distance instead of becoming a hairline. What was missing is
+  // anything INSIDE a bed: between two contacts a far wall was one flat tone
+  // with cracks in it, so the bedding read as ruling rather than as sediment.
+  //
+  // One smooth cycle per bed, phase-shifted by the bed's own character. A
+  // sinusoid because it is exactly zero-mean over the bed, which a part/cap
+  // pair is not - strata() can afford the asymmetry on one near plane, four
+  // superposed planes cannot, and the p99 headroom on seed 7 launch is 0.0045.
+  // A sinusoid is also the shape that CANNOT draw a hairline: the sharp parting
+  // strata() uses is 7-14 world units, which at s=0.135 is a one-pixel dark
+  // line every fifteen pixels - graph paper turned on its side.
+  // It weakens with distance for the same reason the parting is not used at
+  // all: a bed is 65 screen pixels tall on the nearest of these planes and 15
+  // on the deepest, and a full cycle inside 15 pixels is a comb, not sediment.
+  alb *= 1.0 + 0.26 * (0.34 + 0.66 * (1.0 - comp)) * (1.0 - 0.62 * farK)
+             * sin((bfF + 0.21 * chrF) * 6.2832);
   // VERTICAL STRIATION, and it is the one kind of structure that costs the
   // frame no level: a joint is a shadow, so a wall that gains legibility this
   // way gains blacks with it rather than spending them. Same 186-unit spacing
@@ -1439,6 +1550,46 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // 26.0, range 8.4..42.2, and 12.08 degrees along a joint. The strokes fan two
   // and a half times as wide and each one now curves.
   //
+  // ROUND TWELVE, AND THE ACCEPTANCE BAR IT CAME WITH IS NOT REACHABLE. THAT IS
+  // A MEASUREMENT, NOT AN EXCUSE, AND IT HAS A CONTROL BEHIND IT.
+  // The bar was 'no stroke may have a neighbour within 100 px sharing its angle
+  // to within 5 degrees.' Traced on the level set and projected to screen -
+  // toLayer divides BOTH offsets by s, so a parallax layer changes a stroke's
+  // POSITION and LENGTH but not its ANGLE, and the four planes have to be
+  // counted superposed because that is how the eye gets them - the shipped
+  // build puts 11.5 other strokes within 100 px of the average stroke. Twelve
+  // strokes cannot be pairwise 5 degrees apart inside less than 55 degrees of
+  // range even if they are perfectly spaced, and no rock leans 55 degrees of
+  // fan. The control says the same thing empirically: 234 strokes at INDEPENDENT
+  // random angles over a 76-degree range still scores 95.3% of samples with a
+  // twin. A perfectly ruled set scores 100%, so the instrument separates them -
+  // it simply has no zero available at this density.
+  //
+  // So the number that can be driven is TWINS PER STROKE, and it was, three
+  // ways: a conjugate set, so the population is bimodal instead of one fan; a
+  // thinner population on the far planes; and bed confinement, which shortens
+  // strokes so fewer of them reach into any 100 px disc.
+  //
+  //   joints only      neighbours 11.48  twins 4.06  ->  12.77  twins 2.71
+  //   joints + faults  neighbours 14.53  twins 5.39  ->  16.06  twins 4.08
+  //
+  // Twins fall 35% while the stroke count goes UP, which is the shape the
+  // reviewer actually wanted. The angle distribution goes from unimodal
+  // 7.6..42.7 (sd 8.07) to bimodal -48.0..42.7 (sd 26.6), and the median
+  // nearest-neighbour angle gap goes 0.8 -> 1.3 degrees. tools/_lean.mjs run
+  // per family agrees: fissure median 25.5 (min 8.4 off vertical), gouge median
+  // -31.0 (min 12.5), so the second family is FURTHER from vertical than the
+  // first, not nearer.
+  //
+  // AND THE RESIDUAL HAS A NAME: THE FAULT PLANES BELOW, NOT THE JOINTS. Adding
+  // them to the same trace costs 1.38 twins per stroke, 34% of everything left,
+  // because FAULTW is global and faultShear is a function of y ALONE - so within
+  // one plane every fault at one height has exactly the same angle, which is the
+  // construction the joint set was pulled out of four rounds ago. They survive
+  // for now only because the four layers read that shear at four different world
+  // y for one screen y. That is the next piece of this work, and it is a
+  // structural change to bedFrame's fu, not a tuning one.
+  //
   // THE LEAN MUST STAY BOUNDED AWAY FROM VERTICAL - see FAULT_LEAN above and
   // AI_HANDOFF section 6, where a level set whose slope passed through zero drew
   // a dead vertical line down the whole frame. 0.17% of traced core samples come
@@ -1452,50 +1603,70 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   float wb = w.y * 0.008055 + seed * 1.3;
   float sa = sin(wa), ca = cos(wa), sb = sin(wb), cb = cos(wb);
   vec2 q = w + vec2(32.22 * sa * cb, -21.86 * ca * sb);
-  float jsx = (q.x + q.y * 0.50) / 186.0 + wave(q.y, 0.00130, 3.1 + seed) * 0.17;
-  float ji = floor(jsx);
-  float jh = hash11(ji * 3.17 + 1.9);
-  float jnt = 0.0;
-  if(jh > 0.44){
-    // Two raw sinusoids rather than two wave() calls: the same known +-1 range
-    // for half the transcendentals, and the two fields want their own phases
-    // anyway. The meander leans on the low octave, the segments on the high.
-    //
-    // fk is a PER-JOINT frequency for both, and it is the other half of 'near
-    // identical LENGTH'. Every joint used to break on the same two periods,
-    // 2027 and 528 world units, differing only in phase - so a reviewer counting
-    // strokes saw one length repeated. 0.62..1.67 is a 2.7x spread of segment
-    // length, off fract(p) rather than a third hash, since p is already a large
-    // number whose fractional part is uncorrelated with the value that made it.
-    //
-    // A PER-JOINT WEIGHT was tried alongside it and is a negative result worth
-    // not repeating. Varying how dark each crack is cannot be had
-    // multiplicatively: alb is consumed as alb *= 1.0 - 0.88 * jnt, so a mean-1
-    // gain must exceed 1 somewhere, and there it drives the albedo NEGATIVE -
-    // the channel stops occluding and starts SUBTRACTING light, which is the
-    // mechanism AI_HANDOFF records behind the black polygons. Clamped instead it
-    // is no longer mean-neutral: it only adds mass. The width already varies off
-    // jh, and that is enough.
-    float p = hash11(ji * 7.13 + 4.7) * 43.7 + seed;
-    float fk = 0.62 + fract(p * 0.317) * 1.05;
-    float s1 = sin(w.y * 0.0031 * fk + p);
-    float s2 = sin(w.y * 0.0119 * fk + p * 2.7);
-    float jd = abs(fract(jsx) - 0.5 + (jh - 0.5) * 0.30
-                 + (s1 * 0.72 + s2 * 0.28) * 0.075);
-    // Mean seg is 0.507 (integrated over phase), so the channel loses about
-    // half its mass and this width is 1.135x to give some of it back - 0.576 of
-    // the old mass, not 1.0. Going the rest of the way is NOT free and was
-    // measured: at 0.035 + 0.055 * jh the mass is 0.880 of the old and the
-    // notch goes the WRONG WAY, 0.971 -> 1.032 at 900m and 1.683 -> 1.837 at
-    // 300m. Widening works on the fault below because that zone is already a
-    // several-pixel band; a joint at s = 0.135 is around a pixel, so widening
-    // it only recruits more pixels into the hairline instead of dissolving it.
-    // The 42% of mass that stays lost is worth 0.0000 of scene mean and at most
-    // 0.3pp of pixels below L8 on any gate scene, which is the price paid.
-    float jt = 0.023 + jh * 0.036;
-    float seg = sat(0.52 + (s2 * 0.62 + s1 * 0.38) * 1.9);
-    jnt = exp(-(jd * jd) / (jt * jt)) * seg * uKill4.y;
-  }
+  // THREE STROKE VOCABULARIES, WHICH IS WHAT ROUND ELEVEN ASKED FOR AND WHY.
+  // It called the previous build graph paper and this one better, then said the
+  // job was half done: 'it is still one stroke vocabulary applied everywhere,
+  // and it still produces near-twins... the worst of it is gone; the cause is
+  // not.' The cause is that ONE lattice at ONE mean lean can only make one kind
+  // of mark, however hard it is bent.
+  //
+  //  FISSURE  - narrow, dark, leaning the way the trench is cut, BED-CONFINED:
+  //             it dies at the contact. Competent beds, near planes.
+  //  GOUGE    - the conjugate set. Leans the other way, half again as wide,
+  //             softer, sparser, and it CROSSES the beds instead of stopping at
+  //             them. Incompetent beds, middle distance.
+  //  SEDIMENT - not a stroke at all; see the band folded into alb above. Four
+  //             planes back a fracture is under a pixel wide, so what should
+  //             survive is the fabric of the bedding as TONE. That is why the
+  //             stroke weights fall with farK instead of the strokes simply
+  //             getting fainter - a faint hairline is still a hairline.
+  //
+  // The conjugate lean is -0.62 and NOT the -0.38 that first measured best: at
+  // -0.38 the set's upper tail comes within 0.4 deg of screen vertical and 3.6%
+  // of its traced cores sit inside the 8.9 deg the camera roll can cancel,
+  // which is the FAULT_LEAN trap arriving one construction later. At -0.62 the
+  // minimum over the whole superposed field is 8.0 deg and the figure is 0.31%,
+  // against 7.6 deg and 0.69% for the single-set build it replaces - so adding
+  // a family moved this bound the SAFE way rather than eating into it.
+  // The fissure's meander stays at the 0.075 the single-set build shipped.
+  // 0.090 was tried and is not worth it: twins per stroke 4.08 -> 4.02, a 1.5%
+  // gain, against the minimum angle off screen vertical falling 8.0 -> 7.4 deg
+  // and the share inside the camera roll's 8.9 deg going 0.21% -> 0.29%. Buying
+  // 1.5% of the defect with the one bound this file has been bitten by four
+  // times is a bad trade. The conjugate set is where the angle range comes from.
+  float fis = fracSet(q, w.y, 186.0,  0.50, 0.00130, 3.1 + seed,
+                      0.44 + 0.20 * farK, seed, 3.17, 7.13, vec2(0.023, 0.036), 0.075);
+  float gou = fracSet(q, w.y, 251.0, -0.62, 0.00097, 1.7 + seed * 1.9,
+                      0.60 + 0.12 * farK, seed, 4.61, 5.29, vec2(0.034, 0.042), 0.105);
+  // BED CONFINEMENT. A systematic joint nucleates inside one bed and arrests at
+  // the contact, so this is a clip and not a fade - but it is windowed to
+  // exactly zero AT the contact, so the joint cannot draw its own end: it ends
+  // on a line alb already draws. Only the fissure is confined. The gouge
+  // crossing the beds is what stops every stroke in the frame from terminating
+  // on the same horizon, which would be the ruled defect rotated 90 degrees.
+  float conf = smoothstep(0.0, 0.075, min(bfF, 1.0 - bfF));
+  // Weight by material and by distance. The far ranges soften because the
+  // WEIGHTS fall, which is not the same as lowering the exposure: a fainter
+  // hairline is still a hairline, and what has to go at distance is the MARK.
+  // The near end was 0.62/0.42 for one pass and the gate's detail trend fell
+  // about 1% on all twelve frames - the same signature AI_HANDOFF records for
+  // the two rounds that were lost to over-optimising a one-sided target, so it
+  // came back up. p99 is unchanged either way.
+  float wFis = (0.70 + 0.40 * comp) * (1.0 - 0.32 * farK);
+  float wGou = (0.45 + 0.60 * (1.0 - comp)) * (1.0 - 0.44 * farK) * 0.86;
+  // PRICED, because a second set is a second lattice on every pixel four times
+  // over. tools/_perf.mjs at 1600x900, interleaved new/base/new/base so a
+  // contended window cannot favour one of them, min of three pairs: the
+  // background pass goes 0.138/0.150/0.150 to 0.150/0.162/0.163 ms - +0.012 ms,
+  // same sign and size all three times, so about +8%. The gate's own best-of-5
+  // render goes 3.55 -> 3.72 (seed 7) and 4.81 -> 5.23 (seed 3) against a 12 ms
+  // budget. AI_HANDOFF is right that a minimum over a contended window is not
+  // an idle measurement; the interleave is what makes the DIFFERENCE trustworthy
+  // even where the absolute is not.
+  //
+  // max, not sum: two crossing fractures are one void in the rock, and summing
+  // them would put a hot black node at every intersection.
+  float jnt = max(fis * wFis * mix(1.0, conf, 0.80), gou * wGou) * uKill4.y;
   // ...and the fault plane, which is the one break that must appear on every
   // plane at once. A fault that stops at the foreground is a scratch on the
   // lens; a fault that runs through all five planes is a structure the trench
@@ -1578,7 +1749,6 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // The bedding seam, at distance. Four layers of legible strata is most of
   // what makes the far walls read as rock instead of as tinted fog, and it
   // costs nothing: the bed coordinate is already in hand.
-  float bfF = fract(syF);
   float sw = max(0.11, 2.0 * pxL / BEDY);
   c += rk * V_ROCK * 0.50 * (0.11 / sw) * (1.0 - smoothstep(0.0, sw, min(bfF, 1.0 - bfF)))
      * (sky + 1.10 * aw) * exp(-intoS / 650.0);
