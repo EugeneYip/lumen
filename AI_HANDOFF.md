@@ -492,13 +492,20 @@ everywhere** and still produces near-twins. Its acceptance bar is worth adopting
 because it is objective: **no stroke may have a neighbour within 100px sharing
 its angle to within 5°.**
 
-**Speed: the reviewer says length is still the only variable, and this needs
-settling.** That contradicts a measurement taken the same day showing wake width
-15.9 → 26.0px strictly monotone with speed on both seeds. The likely reconciler
-is that the reviewer compared a 31 m/s frame at 900m against 171 m/s frames at
-120m, so camera scale and depth differ too — but nobody has confirmed it. Its
-acceptance bar is good: crop the wake alone, hide the HUD, and a stranger should
-call 31 against 171 correctly.
+**Speed: the reviewer said length is still the only variable. SETTLED, and it is
+wrong.** Run against its own acceptance bar — crop the wake alone, hide the HUD,
+and see whether a stranger could call the speeds apart — on seed 3's own frames,
+which sit at 27 m/s (900m) and 200 m/s (120m). At 200 the wake is a broad
+multi-layered ribbon with visible internal laminae, a bright hard leading edge
+and real width. **At 27 there is essentially no wake at all** — a small bright
+core and a thin cap, nothing else. The difference is presence, width, layering
+and density, not length, and it is unmistakable at a glance.
+Two lessons worth more than the verdict. The reviewer compared a 900m frame
+against a 120m frame, so **depth and camera scale varied alongside speed** and it
+attributed the whole difference to length. And the same day, a measurement said
+wake width goes 15.9 → 26.0px strictly monotone on both seeds; **when a
+measurement and a reviewer disagree, run the reviewer's own acceptance bar rather
+than picking a side** — it took one pair of crops.
 
 **Colour discipline broken in three places**, with coordinates: burst plants
 wearing amber *and* mint simultaneously; a Hush mote sitting on an amber vent;
