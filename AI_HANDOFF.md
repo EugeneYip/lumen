@@ -454,68 +454,67 @@ Verify each against the current code before acting; some may be fixed. The
 authoritative snapshot of quality is whatever `node tools/check.mjs --seeds 7,3`
 says today, plus a blind review per `tools/CRITIC.md`.
 
-**Most recent blind review** — round eleven, eight depth-matched pairs, two
-seeds, identical world generation so every difference is a rendering difference.
-**The same build won all eight pairs** — decisive x5, clear x2, slight x1. The
-reviewer verified the pair registration itself ("stalactite drips, plankton motes
-and HUD glyphs land on identical pixels in every pair I checked") and corrected
-its own pair-06 verdict from "clear" down to "slight" on an 8x re-check, noting
-that a slight win is a failed iteration. Nine-axis mean **4.9**, ship verdict
-**No**.
+**Most recent blind review** — round twelve, eight depth-matched pairs, two
+seeds, identical world generation, registration verified at shift 0. **The same
+build took all eight pairs.** Nine-axis mean **5.1**, ship verdict **No**.
 
 | axis | | axis | |
 |---|---|---|---|
-| Composition | 6 | Object craft | 5 |
-| **Value structure** | **7** | Detail & texture | 4 |
-| Colour | 5 | Motion legibility | 4 |
-| **Light behaviour** | **3** | UI | 5 |
+| Composition | 5 | Object craft | 5 |
+| **Value structure** | **4** | Detail & texture | 5 |
+| **Colour** | **6** | **Motion legibility** | **7** |
+| Light behaviour | 4 | UI | 5 |
 | Cohesion | 5 | | |
 
-**"Nothing receives light" is half wrong, and the half that is right names the
-work.** The reviewer gave three proofs and all three are **props**: a kelp trunk
-in front of an anchor staying pure cold cyan, a rock lip in front of a vent
-taking no warm rim, a shaft crossing an anchor with neither acknowledging the
-other. Checked at 4x on a 400m frame: **the rock and seabed plainly do carry a
-warm cast** near an anchor — that fix landed and is measurable at ~90000 pixels —
-while the kelp and branch props beside it stay cold blue-grey. The precise
-statement is that **`background.js` has a light rig and `render.js` has none.**
-Everything drawn as a prop is a self-lit decal composited over an unrelated
-ambient. That is the single highest-value piece of work left, and the reviewer
-supplied an acceptance bar for it: rock 40px from an anchor must be visibly
-warmer and lighter than rock 200px away, *and* a kelp trunk beside it must carry
-a warm edge on its anchor-facing side.
+**Four things it settled, in its own words:**
 
-**Ruled lines: improved, not fixed.** The losing build is "graph paper" — eleven
-strokes at even pitch, none bending. The winner curves them, varies their length
-and stops them at strata. But it is still **one stroke vocabulary applied
-everywhere** and still produces near-twins. Its acceptance bar is worth adopting
-because it is objective: **no stroke may have a neighbour within 100px sharing
-its angle to within 5°.**
+- **Props receive light: yes.** "Warm ochre on the anchor-facing flank, cold on
+  the far flank, and the losing build shows nothing." A **partial** pass — see
+  problem 2 below.
+- **The magenta hazard's "visible sprite bounding box" DOES NOT EXIST.** Checked
+  at 18-20x in four places including the spine-crosses-lit-rock case: smooth
+  falloff every time. *"Three reviews were reading the additive glow's outer edge
+  against near-black rock. Retire it."* One genuine hard quad was found and fixed
+  in the same round, but what reviewers kept describing was the glow edge.
+- **The conjugate stroke family is real, "just under-dosed"** — and it corrected
+  its own earlier read: *"my own pair-00 read of 'one parade' was wrong at higher
+  magnification."*
+- **Speed changes character, and it is now the best axis (7).** "Three layers
+  where there was one… mask the HUD and you can still read the velocity off the
+  image." Confirms the resolution reached independently by running its
+  predecessor's acceptance bar.
+- **Amber reads as "aim here" again**, and did not before: *"the straw rotation
+  is the single most valuable change in this iteration."*
 
-**Speed: the reviewer said length is still the only variable. SETTLED, and it is
-wrong.** Run against its own acceptance bar — crop the wake alone, hide the HUD,
-and see whether a stranger could call the speeds apart — on seed 3's own frames,
-which sit at 27 m/s (900m) and 200 m/s (120m). At 200 the wake is a broad
-multi-layered ribbon with visible internal laminae, a bright hard leading edge
-and real width. **At 27 there is essentially no wake at all** — a small bright
-core and a thin cap, nothing else. The difference is presence, width, layering
-and density, not length, and it is unmistakable at a glance.
-Two lessons worth more than the verdict. The reviewer compared a 900m frame
-against a 120m frame, so **depth and camera scale varied alongside speed** and it
-attributed the whole difference to length. And the same day, a measurement said
-wake width goes 15.9 → 26.0px strictly monotone on both seeds; **when a
-measurement and a reviewer disagree, run the reviewer's own acceptance bar rather
-than picking a side** — it took one pair of crops.
+Its three ranked problems:
 
-**Colour discipline broken in three places**, with coordinates: burst plants
-wearing amber *and* mint simultaneously; a Hush mote sitting on an amber vent;
-and danger rendered inside the Hush volume, where "hazard aura and Hush field are
-indistinguishable at 5x".
+1. **The mid-tones are one slab — there is no value structure.** *(environment,
+   and the weakest axis at 4.)* Near kelp, mid rock and far wall sit within a few
+   percent of each other; depth is carried by overlap and a little fog and
+   nothing else. It calls the result "functionally a two-value picture: dark and
+   emitter, with nothing organised in between", and asks for 12-15% luminance
+   separation between near/mid/far with fog driven by depth rather than a flat
+   global tint.
+2. **Prop lighting is an ink keyline, not a lamp.** *(scene.)* The new rim runs
+   the full height of a stem at constant width and constant intensity regardless
+   of distance from the anchor, does not break where a strap crosses in front,
+   and does not reach stems one bulb-width away. Wants inverse-square
+   attenuation, a terminator so the rim dies as the surface turns away, and
+   contact shadows — **"eight frames, zero shadows"**.
+3. **The HUD has no scrim and the world overprints it.** *(ui.)* With
+   coordinates: "90 M/S" printed inside the hazard's spines, speed-bar ticks lost
+   in a plant, an anchor stalk through THE HUSH panel. A bottom scrim exists; it
+   is not enough and the side panels have none.
 
-**Finding the player: 2-4 seconds, and "you never find the character".** The eye
-goes to the score numeral, then the brightest anchor, then follows the tether or
-wake back to an 8px bead. Third review running to say the protagonist is found
-via its accessories.
+**A bug with coordinates, present in BOTH builds:** a hard axis-aligned black
+rectangle in the rock at half-frame x 748-822, y 500-552, with a smaller one
+below it. *"This — not the magenta hazard — is the real 'visible bounding box' in
+the game."* *(world / textures.)*
+
+**And the standing note on the hero, now sharper than ever:** "In all eight frames
+I found the tether and the wake, never the character… Cover the wake and the
+tether and there is nothing there but a bright dot. At 31 m/s, when the wake
+stops doing the work, the protagonist effectively vanishes."
 
 Runners-up from the same review: geometry floats (kelp and reeds terminate on a
 flat horizontal baseline instead of intersecting the seabed — `world.bandBot(x)`
