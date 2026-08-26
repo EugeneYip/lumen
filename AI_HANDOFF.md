@@ -463,7 +463,28 @@ Its three ranked problems, all open:
    bottom safe area, and the unfilled speed track is a 1px hairline that
    vanishes. *(ui, with a white cap in postfx.)*
 
-**A bug, not a note:** solid hard-edged pure-black polygons are being composited
+**A bug, now located: the plant occluder is bigger than the glow that hides it.**
+Attributed by elimination in the usual way. `?noSprites=1` removes the black
+polygons entirely, so they are sprites, not ribbons. `?noRibbons=1` does not
+remove them — it **exposes** them: what reaches the shipped frame as a small
+hard-edged sliver is actually a large rounded premultiplied black blob that the
+plant's glow strokes normally draw over. It is not a degenerate quad and not a
+stale buffer entry; it is a coverage mismatch between an occluder and the glow
+authored to cover it.
+
+`render.js` already knows this occluder exists — its comment reads *"the dark
+body it is drawn around is a premultiplied occluder, and an occluder over black
+water is nothing"*. That is true, and it is exactly the bug: **over black water
+it is nothing, and over anything lit it punches a hole.** Every instance found so
+far sits on or beside lit content — a god-ray shaft, a lit stalk, an anchor's
+spill. The frames where it hides are the frames where the water behind it happens
+to be black.
+
+The fix is therefore not to delete the occluder but to make the glow cover it, or
+to shrink and soften the occluder to the silhouette the glow actually fills.
+*(scene.)*
+
+Original report: solid hard-edged pure-black polygons composited
 over the scene — around (565,338) and (537,447) in one pair and (601,418) in
 another, present in **both** builds. *(scene.)*
 
