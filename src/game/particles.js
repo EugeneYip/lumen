@@ -84,6 +84,24 @@
 //    could be bought with instead, untried: the element PITCH, which is
 //    currently a constant on screen (one per TRAIL_GAP of travel at every speed)
 //    and is the one spatial magnitude an arc does not compress.
+//  - AND THE REASON IT WAS FLAT IS NOT THE ARC. That paragraph is right about
+//    the chord and wrong about the cause, and the deeper cause invalidates the
+//    lever it recommends. Measured on the real autopilot: element WIDTH, LENGTH
+//    and PITCH are all flat in speed - length flat even in WORLD units, 70.5 to
+//    68.4 across 37 to 163 m/s, while the emitter stretches it 1.5x to 3.2x. The
+//    camera is not eating it either (u2p 0.795-0.819 over the same rows).
+//    THE WAKE IS A MEMORY, NOT A STATE. Elements live 0.29-0.64s, and over any
+//    0.67s window the speed ranges 1.00-4.34x of its own value at 37 m/s and
+//    0.42-1.00x at 163. A probe requiring one band to hold for a single trail
+//    lifetime returns ZERO samples on either seed: this game has no steady
+//    speeds. So both frames are built from elements authored across the same
+//    60-170 m/s mixture and are identical because their CONTENT is identical.
+//    The consequence is general and it is the useful part: ANY per-element
+//    property fixed at emission - elg, s0, lat, lanes, the brightness ramp,
+//    and the recommended PITCH, which is an emission RATE - is averaged over a
+//    4x speed swing and cannot state the current speed in a still frame. Only a
+//    property evaluated at DRAW time, from the current speed, applies to every
+//    live element at once. See the block at the top of Particles.draw().
 //  - AND TWO WAKE ARTEFACTS A REVIEW BLAMED ON "THE TRAIL SYSTEM" ARE NOT IN
 //    THIS FILE. Recorded here because this is where the next person will look.
 //    Attributed by elimination, not by reading code (AI_HANDOFF §7):
@@ -103,6 +121,14 @@
 //    is the ribbon in render.js `_trail()` over `player.trailPts`, visible on
 //    its own under ?noSprites=1, along with the butt cut at its trailing end.
 //    Neither is reachable from here. Do not spend a round looking.
+//    RE-VERIFIED after the draw-time wake pass, by elimination and not by
+//    reasoning, because a later review asked for "sub-frame interpolation to
+//    kill the polyline elbows" and this is where someone will come looking.
+//    seed 7 / fast, same seeked moment, four captures: with ?noSprites=1 the
+//    kink and the butt cut are BOTH still there, on a curve that is otherwise
+//    smooth; with ?noRibbons=1 what is left is this file's wake alone and it is
+//    a cloud of overlapping puffs with no vertex anywhere in it, because a
+//    point cloud has no polyline to show. The elbow is still the ribbon's.
 //  - AND SPEED IS ALSO ONSET, WHICH NOTHING HERE WAS SAYING. gearK and spdK are
 //    both functions of speed alone, so a steady 30 m/s and a just-released
 //    30 m/s drew the identical frame; feeling speed is largely feeling change.
@@ -623,6 +649,124 @@ const STRIA_AREA = 4.49;
 // The gaps open with time; the beads do not grow. That is the difference
 // between a streak that tears and one that stretches.
 const STRIA_TEAR = 0.55;
+
+// ------------------------------------------------- the near field's ANGLES ---
+// A near-field stroke is NOT combed onto the camera's heading, and the build
+// that combed it was named by two consecutive reviewers - "a uniform-angle
+// uniform-length dash pattern that reads as scratches on the lens", then
+// "dead-straight rain strokes at one repeated angle in every frame".
+//
+// MEASURED on the authored geometry rather than argued, by driving the real
+// Ambient.draw with every species but RUSH culled and reading the train axis of
+// each stroke against travel. Six frames, seeds 7 and 3, before this pass:
+//
+//   units/sec     700     840    1100    1710
+//   axis circ SD 17.5     1.5     1.2     1.2   degrees
+//   |dAngle| p90 28.3     5.7     5.0     4.7   degrees
+//   R            0.83   0.999   0.999   0.999
+//
+// So from 84 m/s upward EVERY stroke in the frame is within 5 degrees of ONE
+// angle, and the 1.2 degrees that is left is the bead train's own lateral throw
+// displacing the endpoints - there is no angular variance in the layer at all.
+// One line causes it: the shared alignment term reaches al = 1 at sh >= 0.476,
+// and al = 1 does not bias the stroke toward travel, it SNAPS it onto travel.
+// Everything above about 45 m/s is past that, which is the whole cruise.
+//
+// This is NOT the amplitude finding recorded in the RUSH branch of draw(). That
+// one - differenced against a control and amplified 10x - said the shape was
+// already right and only the level was short, and it was correct. The level it
+// bought is exactly what made this visible. So the fix here is VARIANCE, and
+// taking the level back down would re-open the motion-legibility complaint the
+// level was raised to answer.
+//
+// The variance is the file's own drag law, not a jitter constant. Linear drag
+// goes as 1/radius (see dragFor), so a big floc is entrained by a shear LESS
+// than a small one: small strokes lock to the flow and comb, big ones keep
+// their own tumble and fan. ps spans 4.6-10.5, which maps to a per-individual
+// alignment CEILING of 0.906 down to 0.586, i.e. a residual of +/-8.5 to
+// +/-37 degrees against a uniform own-heading. That is the +/-25 the review
+// asked for, centred, arrived at by a law this file already applies to
+// velocity - and it puts the widest fan on the biggest, nearest, loudest
+// strokes, which are the ones a reviewer is describing.
+//
+// AND THE INSTRUMENT WAS CONTROLLED BEFORE IT WAS BELIEVED, per AI_HANDOFF §8,
+// by building the two inputs it must be able to separate and checking that it
+// does. Circular SD of the train axis at 1710 units/sec, seeds 7 / 3:
+//
+//   control                                        SD deg        R
+//   `free`   alignment forced OFF (own heading)   70.9 / 50.3   0.05 / 0.21
+//   this build                                    15.9 / 16.5   0.86 / 0.85
+//   shipped                                        1.2 /  1.1   0.999
+//   `perfect` alignment forced to 1, no tip/bow    5.5 /  5.1   0.98
+//
+// Monotone over a 13x range of a known ground truth, and BOTH halves of the
+// statistic move together for every pair - the |dAngle| percentiles and the
+// circular R agree in sign in all five columns, which is exactly what _hair.mjs
+// failed to do against a curvature control and is why it is not the instrument
+// for this. (_hair.mjs over the near field does report 1.782 -> 1.748 notch and
+// 11825 -> 11593 deep notches on seed 7 / fast, i.e. slightly less ruled; it is
+// quoted only as "did not get worse", because a perfectly-ruled control once
+// scored LOWER on it than a curved one.)
+//
+// The one thing the control caught, and it is a limit of the instrument rather
+// than of the art: `perfect` scores 5.5 where the SHIPPED build scores 1.2, so
+// the shipped build is more perfectly combed than a control built to be
+// deliberately ruled. The 4.3 degrees between them is the TAPER below moving
+// the bead-0-to-bead-2 chord the instrument measures, not angular variance. So
+// of this build's 15.9, about sqrt(15.9^2 - 5.5^2) = 14.9 is entrainment and
+// the rest is the taper. Both are real changes to the drawn axis; only the
+// first is what RUSH_ENT is for.
+const RUSH_ENT0 = 1.156, RUSH_ENT1 = -0.0543;   // alMax = a + b*ps, over ps 4.6..10.5
+// ...and the COHERENT half, because angular white noise reads as noise and real
+// water turns neighbours together. The curl field is already fetched at this
+// drifter's position, so the eddy's component ACROSS travel tips the aim for
+// nothing, and it tips nearby strokes the same way and distant ones differently.
+// 0.24 rad (13.7 deg) at the field's peak.
+const RUSH_TIP = 0.24;
+// A three-bead train laid on a SEGMENT is a dash however it is angled, and
+// AGENTS.md's own prescription for "must not read as ruled" is that no straight
+// line may pass through more than one piece. So the beads sit on an ARC: a
+// symmetric bow whose sagitta is signed by the same eddy component, which means
+// the bend is spatially coherent, consumes no RNG, and is the path the water
+// actually took. STRIA_BOW is u^2 - mean(u^2) over the three along-axis
+// offsets, which is that bow; the tangent term rotates each bead to follow it,
+// so the three read as one curved stroke rather than three tilted puffs.
+// Where the eddy is weak the train relaxes back onto the throw table's own
+// zigzag, which is the shape it had - a floor would be a constant, and a
+// constant curvature across a whole field is just a differently-shaped comb.
+// Derived from STRIA_AL rather than written down, so a retune of the throw
+// table cannot leave a bow that is no longer a bow. [0.1031, -0.2297, 0.1267].
+const STRIA_BOW = (() => {
+  const u2 = STRIA_AL.map((u) => u * u);
+  const m = (u2[0] + u2[1] + u2[2]) / 3;
+  return u2.map((v) => v - m);
+})();
+const RUSH_CURV = 0.62;
+// ...and the train TAPERS, head to tail. Two reviews running have warned that a
+// stroke lengthened without a taper is ruled hatching, "which is worse than
+// nothing", and ruled lines are the most expensive recurring defect here. A
+// near drifter sweeps BACKWARD past the camera, so its head is the -travel end
+// (STRIA_AL[0]) and its tail trails forward: bead 0 is biggest and hottest,
+// bead 2 smallest and faintest. That also gives the stroke a direction, which
+// three equal puffs cannot have.
+//
+// ENERGY IS HELD EXACTLY. Light per bead is area x tint = (sw*SZ*SIG)^2 * TAU,
+// so RUSH_TAPER_N is sum(SZ^2 SIG^2 TAU) / sum(SZ^2) and dividing by it leaves
+// this layer's contribution to the frame's mean, p50 and p99 identical to the
+// untapered train. The taper moves silhouette and never level - the same rule
+// aniso() is built on, and the reason a shape pass here is free. Derived at
+// load rather than written down so it cannot go stale under a retune.
+const RUSH_SIG = [1.14, 1.00, 0.84];
+const RUSH_TAU = [1.30, 1.00, 0.66];
+const RUSH_TAPER_N = (() => {
+  let a = 0, b = 0;
+  for (let i = 0; i < 3; i++) {
+    const s2 = STRIA_SZ[i] * STRIA_SZ[i];
+    a += s2 * RUSH_SIG[i] * RUSH_SIG[i] * RUSH_TAU[i];
+    b += s2;
+  }
+  return a / b;
+})();
 
 const CFG = {
   attach: {
@@ -2300,6 +2444,102 @@ export class Particles {
     const u2p = this._u2p > 0 ? this._u2p : 0.786;
     const fl = MIN_QUAD_PX / u2p;
 
+    // ------------------------------------------- THE WAKE'S CHARACTER, HERE ---
+    // A review: "at 31 m/s and at 171 m/s the CHARACTER is identical - same
+    // strand count, same width, same edge hardness." Measured, by driving the
+    // real autopilot and reading every live K.WAKE element's drawn geometry at
+    // the moment the player's instantaneous speed enters a band (seed 7, 60
+    // samples per band, medians):
+    //
+    //   m/s     37    50    64    79   100   129   163
+    //   width  19.5  19.4  19.6  19.0  18.9  19.2  18.3   px, cross-stream
+    //   length 54.8  52.4  43.2  47.9  46.4  54.2  56.2   px, along-track
+    //   pitch  11.1  10.8  10.4  10.1  10.3  10.6   9.5   px
+    //   w/p    1.75  1.79  1.88  1.88  1.84  1.81  1.93
+    //   extent  471   426   395   394   357   419   521   px
+    //   peak   0.505 0.685 0.671 0.741 0.787 0.758 0.983
+    //
+    // The reviewer is right on every count, and one number is worse than that:
+    // LENGTH IS FLAT TOO, in world units (70.5 -> 68.4), even though the
+    // emitter stretches each element by elg = 1.5 -> 3.2 on gearK. The camera
+    // is not the explanation - u2p measures 0.795 to 0.819 across the same
+    // rows, i.e. the speed zoom is worth 3%.
+    //
+    // WHY, and it is the finding this pass turns on: THE WAKE IS A MEMORY, NOT
+    // A STATE. Elements live 0.29-0.64s and carry whatever speed authored them.
+    // Instrumented over the same run, the ratio of the speed seen during the
+    // preceding 0.67s to the speed NOW:
+    //
+    //   at  37 m/s   1.00 .. 4.34      at 100 m/s   0.48 .. 1.15
+    //   at  64 m/s   0.27 .. 1.84      at 163 m/s   0.42 .. 1.00
+    //
+    // A probe that required the speed to stay inside one band for a single
+    // trail lifetime returned ZERO samples in either seed: this game has no
+    // steady speeds. So the "31 m/s" wake is mostly built out of elements
+    // authored at 60-160 m/s and the "171 m/s" wake out of elements authored at
+    // 70-171, the two populations overlap almost entirely, and the frames are
+    // identical because the CONTENT is nearly identical.
+    //
+    // The consequence generalises past this file: ANY per-element property set
+    // at emission time is averaged over a 4x speed swing and cannot state the
+    // current speed in a still frame. elg, s0, lat, lanes and the brightness
+    // ramp are all emission-time, which is why every one of them measured flat.
+    // Only a property evaluated at DRAW time from the CURRENT speed applies to
+    // every live element at once, and only that can read.
+    //
+    // So the width and the along-track blur are computed here, once, and they
+    // are ENERGY-CONSERVING: the tint is divided by exactly the area gained, so
+    // this cannot spend a unit of the exposure contract in either direction. It
+    // trades the one cue that did move - peak level, 1.95x - for a shape cue,
+    // which is this file's standing preference and the reviewer's own words
+    // ("which you can't read without a second frame to compare").
+    //
+    // Blended 0.42 spdK / 0.58 gearK for the reason the near field's smear is:
+    // gearK spends its whole range inside the band the game actually plays in,
+    // and spdK keeps the curve alive above 112 m/s where gearK has saturated.
+    const wsp = Math.hypot(this.pvx, this.pvy);
+    const wk = 0.42 * spdK(wsp) + 0.58 * gearK(wsp);
+    // AND THE RAMP RUNS DOWNWARD FROM UNITY, WHICH IS NOT WHAT THE REVIEW ASKED
+    // FOR. Its prescription was to grow width and opacity with speed; measured,
+    // the exposure contract cannot buy that at the fast end, and the numbers are
+    // worth keeping because the argument will come round again.
+    //
+    // The gate scores `launch` and `fast` at 151-174 m/s, i.e. wk 0.99-1.00 -
+    // the very top of this ramp - and at those frames the wake's own elements
+    // measure a median surface brightness of 0.30-0.35 with only 24-36 of them
+    // over 0.25 linear at all. p99 is a COUNT of pixels above 0.25, so for a
+    // falloff of peak P the area over threshold T goes as w^2 ln(P/T): holding
+    // energy while spreading by f multiplies it by f(1 - ln f / ln(P/T)), which
+    // for P barely above T is NEGATIVE. Spreading a marginal element does not
+    // trade peak for area, it deletes the element from the statistic.
+    // Measured, and this is why the first version of this pass failed the gate:
+    //
+    //   wWide          wLong        seed 7 launch p99   verdict
+    //   1 (shipped)    1                     0.2564     floor is 0.25
+    //   0.92+0.70wk    1                     0.2508     passes by 0.0008
+    //   0.92+0.70wk    0.88+0.40wk           0.2489     FAIL
+    //
+    // The RUSH pass above, bisected out on its own, leaves that same frame at
+    // 0.2564 to four decimals and lifts seed 3 launch 0.3403 -> 0.3454, so the
+    // whole cost was here and none of it was the near field.
+    //
+    // So the cue is spent where there IS margin, which is the slow end: area
+    // never exceeds 1, the frames the gate is tight on are drawn at the size
+    // they always were, and a crawl gets a TIGHTER, HOTTER cord instead of the
+    // cruise getting a broader one. Same 1.78x of width ratio, opposite sign of
+    // the same lever. It also pays twice: `tethered` measures its wake elements
+    // at a median 0.195-0.226, i.e. BELOW the highlight threshold, and
+    // concentrating them by 1.69 lifts them over it.
+    //
+    // 0.80 is the floor, not a taste call. WISP's bright part is a ridge 0.17 of
+    // the tile; the p10 WISP element at those frames is 18.2-19.5px, so 0.80
+    // leaves the ridge at 2.5px, and this file's own rule is that nothing may be
+    // drawn much thinner than three pixels. The tint rising by the same 1.69 is
+    // what keeps that narrower ridge over the threshold.
+    const wWide = 0.80 + 0.62 * wk;
+    const wLong = 0.74 - 0.04 * wk;
+    const wDim = 1 / (wWide * wLong);
+
     for (let i = 0; i < this.n; i++) {
       if (this.delay[i] > 0) continue;
       const kd = this.kind[i];
@@ -2369,7 +2609,9 @@ export class Particles {
 
       const px = this.x[i], py = this.y[i];
       const ap = this.asp[i];
-      const reach = ap > 1 ? s * ap : s;
+      // The cull margin has to know about the draw-time stretch above, or a
+      // lengthened element is dropped while a fifth of it is still on screen.
+      const reach = ap > 1 ? s * ap * (kd === K.WAKE ? wLong : 1) : s;
       if (cull && (px < cx - cw - reach || px > cx + cw + reach
                 || py < cy - ch - reach || py > cy + ch + reach)) continue;
 
@@ -2476,6 +2718,12 @@ export class Particles {
       // the smear it gives up was on the hero anyway - where, by this file's
       // own rule, a speed cue does not belong.
       let dw = s * ap, dh = s, drot = this.rot[i], dlay = this.layer[i];
+      // The wake, and only the wake, is shaped by the speed the player is doing
+      // NOW rather than by the speed that authored it. See the block at the top
+      // of draw() for why that distinction is the whole fix. `str` is 0 for
+      // every WAKE element, so this can never collide with the STREAK branch.
+      let dz = 1;
+      if (kd === K.WAKE) { dw *= wLong; dh *= wWide; dz = wDim; }
       const st = this.str[i];
       if (st > 0 && s * 0.62 * u2p >= 13) {
         const vx = this.vx[i], vy = this.vy[i];
@@ -2484,7 +2732,7 @@ export class Particles {
         if (e > 1.55) { dw = s * e; dh = s * 0.62; drot = Math.atan2(vy, vx); dlay = S.STREAK; }
       }
       const dg = quad(dw, dh, fl);
-      let ba = bb * dg;
+      let ba = bb * dg * dz;
       // The point-spread floor, and DELIBERATELY on the plankton family only.
       // These are the emitters that run continuously - a pickup burst, a
       // scatter, the near wake - so their hard little blocks are what a cruising
@@ -3012,9 +3260,26 @@ export class Ambient {
       // interpolated: without that a flake 170 degrees off the flow takes the
       // long way round and reads as tumbling backwards the faster you go.
       let rot = this.rt[i] + t * this.rs[i];
+      // Cross-track component of the eddy this drifter is sitting in, -1..1.
+      // Hoisted out of the RUSH branch because the AIM needs it before the
+      // train geometry does, and because waterAt() has already been called at
+      // this exact position - nothing between here and there touches the field.
+      let fp = 0;
       if (sh > 0) {
-        const al = sh * 2.1 < 1 ? sh * 2.1 : 1;
-        let dd = sang - rot;
+        let aim = sang, al = sh * 2.1 < 1 ? sh * 2.1 : 1;
+        if (k === AK.RUSH) {
+          // PARTIAL entrainment, per individual, toward the WATER's heading
+          // rather than the camera's. See RUSH_ENT0 for the measurement this
+          // answers, and for why the answer is variance and not amplitude.
+          // The other five species keep the hard snap on purpose: their cue is
+          // that sixty flakes are COMBED along one axis where they used to
+          // point sixty ways, and it is the near field alone that a reviewer
+          // has twice read as ruling.
+          fp = clamp((-Math.sin(sang) * flowX + Math.cos(sang) * flowY) / WVEL, -1, 1);
+          aim = sang + fp * RUSH_TIP;
+          al *= RUSH_ENT0 + RUSH_ENT1 * this.ps[i];
+        }
+        let dd = aim - rot;
         dd = ((dd + HALF_PI) % Math.PI + Math.PI) % Math.PI - HALF_PI;
         rot += dd * al;
       }
@@ -3214,14 +3479,27 @@ export class Ambient {
         // sqrt(bas), and sqrt(5.2/7.0) = 0.862).
         const pitch = sw * Math.sqrt(bas) * this.tk[i]
           * (0.62 + 0.83 * nz) * (0.84 + 0.72 * sh + 1.10 * srg);
+        // THE BOW, and it is what stops the train being a dash. Three beads on
+        // a segment are a dash however the segment is angled; on an arc, no
+        // straight line passes through more than one of them, which is the
+        // prescription AGENTS.md gives for anything that must not read as
+        // ruled. Signed by the eddy, so neighbours bend together - see
+        // STRIA_BOW. In the same units the lateral throw is in, so the two
+        // compose: where they agree the stroke is a deep curve, where they
+        // oppose it straightens back toward the shape it had.
+        const bow = fp * RUSH_CURV * pitch;
+        // The arc's own tangent, exactly: lateral = BOW(u) * bow with
+        // BOW = u^2 - c, so d(lateral)/d(along) = 2u * fp * RUSH_CURV.
+        const tang = 2 * RUSH_CURV * fp;
         const ca = Math.cos(rot), sa2 = Math.sin(rot);
         for (let n3 = 0; n3 < 3; n3++) {
-          const sk = sw * STRIA_SZ[n3];
+          const sk = sw * STRIA_SZ[n3] * RUSH_SIG[n3];
           const al = STRIA_AL[n3] * pitch;
-          const lt = STRIA_LT[n3] * sk * 0.42;
-          const q = aniso(sk, sk, bas, fl) * gate / STRIA_AREA;
+          const lt = STRIA_LT[n3] * sk * 0.42 + STRIA_BOW[n3] * bow;
+          const q = aniso(sk, sk, bas, fl) * gate * RUSH_TAU[n3]
+            / (STRIA_AREA * RUSH_TAPER_N);
           emit(batch, x + ca * al - sa2 * lt, y + sa2 * al + ca * lt,
-            qw, qh, rot + STRIA_RJ[n3] * 0.7,
+            qw, qh, rot + STRIA_RJ[n3] * 0.7 + STRIA_AL[n3] * tang,
             cr * q, cg * q, cb * q, S.SMOKE, CEIL_AMB);
         }
         continue;
