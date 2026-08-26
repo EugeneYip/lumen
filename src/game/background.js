@@ -2667,12 +2667,33 @@ export class Background {
     if (player) { L[0] = player.x; L[1] = player.y; L[2] = 1.0; L[3] = 0.0; n = 1; }
     const as = world.anchors;
     if (as) {
-      const reach = cam.viewW * 0.6;
+      // WINDOWED, NOT CUT, and this is the branch-locus trap in its temporal
+      // form. |a.x - cam.x| > reach is a hard test on a CAMERA coordinate, so
+      // an anchor sitting within a float of the boundary enters and leaves the
+      // set between frames whose recorded state is identical -- the gate's
+      // fingerprint rounds to 1e-3. render.js hit exactly this and it made the
+      // renderer non-deterministic while _det3 stayed STABLE, because a frozen
+      // state re-rendered five times never crosses the boundary at all.
+      //
+      // Here the strength effect alone is small -- a marginal anchor is worth
+      // about 0.007 of peak on the rock -- but there is a second-order effect
+      // that is not: n increments, so an anchor appearing at the boundary
+      // shifts every LATER anchor down a slot, and the shader reads slots. One
+      // marginal anchor therefore renumbers the whole rig.
+      //
+      // So the window scales the strength to zero over the last 12% of the
+      // reach and the anchor is only dropped once it is already contributing
+      // nothing. Membership and strength both become continuous in x.
+      const reach = cam.viewW * 0.6, fade = reach * 0.88;
       for (let i = 0; i < as.length && n < MAXL; i++) {
         const a = as[i];
-        if (a.alive === false || Math.abs(a.x - cam.x) > reach) continue;
+        if (a.alive === false) continue;
+        const dx = Math.abs(a.x - cam.x);
+        if (dx >= reach) continue;
+        const w = dx <= fade ? 1 : 1 - (dx - fade) / (reach - fade);
+        if (w <= 0) continue;
         L[n * 4] = a.x; L[n * 4 + 1] = a.y;
-        L[n * 4 + 2] = a.big ? 0.85 : 0.55; L[n * 4 + 3] = 1.0;
+        L[n * 4 + 2] = (a.big ? 0.85 : 0.55) * w; L[n * 4 + 3] = 1.0;
         n++;
       }
     }
