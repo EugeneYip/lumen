@@ -700,6 +700,25 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **BEFORE TRUSTING AN INSTRUMENT, BUILD A CONTROL IT MUST BE ABLE TO SEE.** This
+  is the single highest-return habit in this project and it has now caught three
+  instruments in a row, each of which would otherwise have cost a round:
+  - `_comb.mjs` against a radial asterisk: a deliberately **perfect** control (17
+    identical spines at exactly even angles) scored as *less* regular than the
+    shipped build.
+  - `_hair.mjs` against curvature: the same strands drawn twice at identical
+    widths and endpoints, once on their real curve and once on their endpoint
+    chords. **The perfectly-ruled control scored notch 79.5 against the curved
+    version's 86.2 — lower** — while the deep-notch count went the other way,
+    49286 against 39403. The two halves of one statistic disagreed in sign.
+  - the salience rank against grid phase: re-measuring the *same image* with the
+    lattice shifted moved a frame from rank 1 to rank 29.
+
+  The control costs minutes and the wasted round costs hours. Build the input the
+  instrument must be able to separate, and check that it does, before you point
+  it at the art. And read a statistic's halves against each other: when the mean
+  and the tail disagree in sign, the instrument has no power on that axis.
+
 - **`_comb.mjs` has almost no power against a radial asterisk, and I sent an
   agent after one with it.** I briefed "use `_comb.mjs`, it is the right
   instrument for one primitive rotated N times at even radius". It is not. It
