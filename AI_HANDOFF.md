@@ -773,6 +773,19 @@ Longer-standing items:
   old construction, still standing. Fixing it is a structural change to
   `bedFrame`'s `fu`, not a tuning job.
 
+- **A clamp can make a taper a no-op, and three reviewers described it as three
+  different defects.** `wCore(d.w * 0.66, 3)` and `wCore(0, 3)` return the *same
+  number* for any strand thinner than `d.w = 6.4`, because `wCore` floors at
+  `CORE_MIN` while `d.w` runs 3.4-15 — so on most strands the taper did nothing
+  and the rim was a constant 8.74 world units root to tip. That one floor
+  produced "anchor stalks are unvarying-width splines" in one round, "prop
+  lighting is a constant-width keyline" in the next, and my own 5x read of "the
+  tentacles are wires" in the round after. **When several reviewers describe
+  different objects in the same language, look for one shared clamp** rather than
+  three shape problems. It is the same lesson as the kelp bed, where a clamp to a
+  phrase bound stacked seven strands on one x and made them literally the same
+  plant.
+
 - **Ablate the CALL SITE, not the pass.** The kill switches (`?noSprites=1`,
   `?noRibbons=1`, `?bgNo*=1`) narrow an artefact to a *system*, and that is where
   most attributions here have stopped — and where three of mine this session were
