@@ -440,80 +440,56 @@ Verify each against the current code before acting; some may be fixed. The
 authoritative snapshot of quality is whatever `node tools/check.mjs --seeds 7,3`
 says today, plus a blind review per `tools/CRITIC.md`.
 
-**Most recent blind review** — round nine, eight depth-matched pairs, two seeds.
-**The current build won all eight pairs again**, and the reviewer verified its own
-consistency after judging blind: every ruled line and every pinwheel hazard it
-found independently landed on the losing side. Nine-axis mean **4.8**, ship
-verdict **No**.
+**Most recent blind review** — round ten, eight depth-matched pairs, two seeds.
+**The current build won 7 of 8.** Nine-axis mean **4.6**, ship verdict **No**.
+The reviewer identified the builds unaided: one clips its HUD text to flat
+255,255,255 in all eight frames, the other "never clips a single world or UI
+pixel" — that is the HUD ceiling landing, and it decided most of the round.
 
 | axis | | axis | |
 |---|---|---|---|
 | Composition | 5 | Object craft | 4 |
-| Value structure | 5 | Detail & texture | 4 |
-| **Colour** | **6** | Motion legibility | 5 |
-| Light behaviour | 4 | UI | 5 |
+| **Value structure** | **6** | **Detail & texture** | **3** |
+| Colour | 5 | **Motion legibility** | **3** |
+| Light behaviour | 4 | UI | 6 |
 | Cohesion | 5 | | |
 
-**Do not read the drop from 6.2 to 4.8 as a regression.** It is a different, and
-much harsher, reviewer on the same protocol — this is the third round in a row
-where axis scores moved more between reviewers than between builds. The only
-comparison that has ever held up is which build won each pair, and that was 8-0
-in both rounds. Motion legibility is the one axis that rose (4 → 5), and the near
-field was the one thing changed to move it.
+**READ THIS ROUND'S CONTENT JUDGEMENTS WITH CARE — the A/B compared two
+different worlds.** The round folded in a `world.js` generation fix, so matched
+depths no longer showed matched content. Reverting only that change accounts for
+the entire large-amplitude divergence at every depth (max delta 184 of 184) while
+every rendering change in the round together accounts for max delta 61. So the
+reviewer's "an entire amber organism goes missing" and "10-17% less detail
+energy" are substantially a different world, **not** a rendering regression. Its
+judgements about *how things are drawn* stand; its judgements about *what is
+present* do not. The rule is now in `CRITIC.md`.
 
 Its three ranked problems, all open:
 
-1. **Ruled lines nobody drew — now structural rather than incidental.** Kelp
-   stems are straight strokes with straight thorns at a fixed acute angle ("it
-   reads as barbed wire or frost, not plant", and it fills the lower third); the
-   rock face carries parallel diagonal hatch strokes of near-identical length and
-   angle; the tether is a constant-width hard-edged beam with no scatter cone;
-   the near-field drift is a uniform-angle uniform-length dash pattern that
-   "reads as scratches on the lens". *(world, environment, vfx.)* Note the last
-   of those is a consequence of tripling that layer's amplitude — making it
-   visible revealed that it is uniform.
-2. **The wake is quads, not fluid.** The tail separates into five or six stacked
-   laminae with straight edges and blunt square cut-offs, and at 400m becomes a
-   polyline with a hard chevron kink where it doubles back. *(vfx.)*
-3. **The HUD out-values the hero, and the foreground eats the HUD.** "The only
-   pixels clipping to 255 in any frame are the HUD numerals" while the player
-   core peaks at 246 — **independently confirming a discovery made the same day
-   from the other direction**, when a peak-brightness probe read the score
-   numerals and nearly filed a clipping bug against the scene. Meanwhile
-   foreground corals grow through the words SPEED and M/S with no scrim and no
-   bottom safe area, and the unfilled speed track is a 1px hairline that
-   vanishes. *(ui, with a white cap in postfx.)*
+1. **Ruled geometry, everywhere** — and it gave coordinates. Constant-angle,
+   constant-spacing, constant-width stroke sets in the rock hatch, the near-field
+   "rain" particulate, kelp trunks and stair-step ledge silhouettes with
+   axis-aligned risers. *(textures + world + environment.)* Note the near-field
+   dash field has now been named by **two consecutive reviewers** — "scratches on
+   the lens", then "dead-straight rain strokes at one repeated angle in every
+   frame" — and it is a consequence of tripling that layer's amplitude, which
+   made it visible enough to see that it is uniform.
+2. **The wake carries no speed.** "At 31 m/s and at 171 m/s the *character* is
+   identical — same strand count, same width, same edge hardness. Only total
+   length changes, which you can't read without a second frame to compare."
+   *(vfx.)*
+3. **Creature craft is bimodal, and the danger signal is the weak half.** The
+   anchors are "genuine 7-level work"; the hazard and burst plants are one
+   primitive stamped radially. It also flags two accent-discipline breaks: one
+   burst-plant asset is recoloured into **both** mint and amber, so two reserved
+   accents are worn by the same prop, and the magenta hazard is staged *inside*
+   the violet Hush field — "the two accents the player most needs to tell apart,
+   rendered adjacent, at similar value, in the darkest busiest corner."
+   *(scene + world.)*
 
-**A bug, now fixed — and the instructive part is that I attributed it wrongly.**
-The black polygons are **additive emitters with negative gain**: light
-subtraction, not occlusion. Linear HDR readback at the repro pixel is
-`rgb(-0.026, -0.020, +0.012)`; killing the additive glow batch takes it from
-display L2 to L67, killing the occluder batch changes nothing, and a hook on
-`occl.push` finds zero occluder quads covering it. Cause was three pulse gains of
-the form `a + b*sin` with `b > a`, negative for 27-32% of every cycle, feeding an
-additively-blended batch.
-
-**My "decisive" evidence disproved my own theory and I read it the wrong way
-round.** I argued that `?noRibbons=1` *enlarging* the blob proved an occluder
-wider than the glow covering it. It proves the opposite: removing ribbons removes
-**positive** light from the neighbourhood, so the sum crosses zero further out and
-the black region grows. **An occluder's silhouette cannot change size when you
-remove something else drawn near it.** That is the cheap discriminator between
-the two mechanisms — if a dark region changes *size* when you ablate an unrelated
-light source, it is a sum crossing zero, not a silhouette.
-
-Two negative results from the same work: a fourth call site looks identical to a
-grep but is consumed as `0.45 + sk*0.85` and has a floor of 0.144; and the
-largest surviving dark patch is a legitimate rock silhouette — cutting it moved
-15844 pixels and changed the hole count by nine. The probe cannot tell a hole
-from a silhouette.
-
-Also worth acting on: the brightest, most saturated amber in the seed 7 frames is
-a corner coral rather than an anchor, which breaks the "amber means anchor"
-contract the palette rests on; anchors put no light on the rock or kelp beneath
-them, so "every object is self-lit and none receives"; and the speed cue "falls
-off a cliff, not a curve" — it sells completely at 155-171 m/s and is absent at
-31 and 90.
+**A warning worth keeping:** on finding the player, "the eye is led by the
+*tether line* and the *wake arc*, not by the character… the protagonist is found
+via its accessories."
 
 Runners-up from the same review: geometry floats (kelp and reeds terminate on a
 flat horizontal baseline instead of intersecting the seabed — `world.bandBot(x)`

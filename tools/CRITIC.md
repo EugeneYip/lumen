@@ -21,6 +21,23 @@ done
 node tools/montage.mjs pair --a shots/iterPREV --b shots/iterN --out shots/cmpN --width 2400
 ```
 
+**A change to `world.js` invalidates a depth-matched A/B, and this is not
+obvious.** Depths pin both builds to the same *place*, which is why they beat
+named scenes — but they cannot pin them to the same *content*. If generation
+changes, the same depth shows a different world, and the reviewer will report
+content differences ("an entire amber organism goes missing", "10-17% less
+detail energy") as though they were rendering regressions. Measured on one such
+round: reverting only the `world.js` change accounted for the whole
+large-amplitude divergence at every depth (max delta 184 of 184), while every
+rendering change in the same round together accounted for max delta 61.
+
+So: **do not fold a generation change into an A/B round if you can avoid it.** If
+you cannot, say so in the brief, and treat the reviewer's judgements about *how
+things are drawn* (clipping, ruled edges, silhouette quality, wake construction)
+as valid while treating judgements about *what is present* as uninformative.
+`tools/_dif.mjs` against a build with only the generation change reverted is the
+cheap way to separate the two.
+
 Capture the "before" build from a **detached worktree at the baseline commit**
 (`git worktree add --detach <tmp> <sha>`, symlink `node_modules`), not from the
 working tree. Agents edit the tree while a round is being prepared, and a
