@@ -715,6 +715,19 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **Ablate the CALL SITE, not the pass.** The kill switches (`?noSprites=1`,
+  `?noRibbons=1`, `?bgNo*=1`) narrow an artefact to a *system*, and that is where
+  most attributions here have stopped — and where three of mine this session were
+  wrong. Each time an agent went one level finer and overturned me:
+  a "stale trail sample" was the mote's own anamorphic quad; an "occluder wider
+  than its glow" was an additive emitter with negative gain; and a ruled line I
+  called an anchor's mooring stalk was column q=0 of a *stalactite*, proved by
+  zeroing the stalk's alpha (no differing pixel anywhere in that column) and then
+  early-returning `_spire` (gone entirely).
+  The pattern: a pass-level switch tells you which file to open, and a
+  one-call-site ablation tells you which line. Do the second before you name
+  anything, because a plausible name stops other people looking.
+
 - **The wake is a MEMORY, not a state, so emission-time properties cannot carry
   speed.** Trail elements live 0.29-0.64s, and over any single trail lifetime the
   player's speed ranges **1.00-4.34x** of its current value. A probe requiring one
