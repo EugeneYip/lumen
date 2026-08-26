@@ -43,9 +43,10 @@
 //
 // Debug kill switches, matching render.js's noSprites/noRibbons: append
 // bgNoSnow / bgNoRays / bgNoVents / bgNoHush, bgNoFar / bgNoSilt / bgNoGrain /
-// bgNoBreak, bgNoLamp / bgNoLedge / bgNoDip / bgNoTalus, or bgNoMoteKey, to
+// bgNoBreak, bgNoLamp / bgNoLedge / bgNoDip / bgNoTalus, bgNoMoteKey,
+// bgNoJoint or bgNoAnchorLight, to
 // drop one feature group and attribute an artefact - or a value floor, or a
-// missing one - to it. Thirteen uniform multiplies. They are how the
+// missing one - to it. Fifteen uniform multiplies. They are how the
 // axis-aligned-rectangle bug was pinned on the marine snow after two sessions
 // of blaming other people's passes, how the missing blacks were pinned on this
 // file rather than on the grade, and how the lavender streak field was pinned
@@ -77,7 +78,7 @@ uniform float uDiff;
 uniform vec4  uKill;         // debug: x snow, y rays, z vents, w hush (1 = on)
 uniform vec4  uKill2;        // debug: x far walls, y silt, z grain, w silhouette
 uniform vec4  uKill3;        // debug: x lamp on rock, y ledges, z dip/faults, w talus
-uniform vec4  uKill4;        // debug: x the mote's key light on rock (1 = on)
+uniform vec4  uKill4;        // debug: x mote key, y joints, z anchor lamps (1 = on)
 uniform vec4  uLights[${MAXL}];   // xy world pos, z strength, w warmth
 
 // Chromaticities: peak channel is 1.0, brightness comes from the V_ constants.
@@ -496,7 +497,7 @@ float joints(vec2 w){
   float d = abs(fract(sx) - 0.5 + (jh - 0.5) * 0.42);
   float thick = 0.018 + jh * 0.026;
   float seg = sat(0.32 + dev(N1(vec2(w.y * 0.0034 + ji * 0.41, 0.77), 0.0034)) * 3.2);
-  return exp(-(d * d) / (thick * thick)) * seg;
+  return exp(-(d * d) / (thick * thick)) * seg * uKill4.y;
 }
 
 // Strata. Built additively so the mean albedo stays near 1.0 and V_ROCK really
@@ -759,6 +760,10 @@ vec3 lampLight(vec2 w, float nrm){
   vec3 s = vec3(0.0);
   for(int i = 0; i < ${MAXL}; i++){
     vec4 Lg = uLights[i];
+    // bgNoAnchorLight zeroes lights 1..n and keeps the mote, which is the only
+    // way to price 'the anchors put no photon on the rock' - bgNoLamp cannot,
+    // because the mote shares this loop and moteKey is gated on it too.
+    Lg.z *= (i == 0) ? 1.0 : uKill4.z;
     if(Lg.z <= 0.0) continue;
     vec2 dl = Lg.xy - w;
     float r2 = dot(dl, dl);
@@ -784,6 +789,58 @@ vec3 lampLight(vec2 w, float nrm){
        * Lg.z * nd * (core / (r2 + core) + 0.46 * wide * wide);
   }
   return s * uKill3.x;
+}
+
+// ...and the same lights read for BOTH surface orientations in one pass.
+//
+// 'The three amber anchors put not one photon on the rock beneath them.'
+// Measured before believing it, with bgNoAnchorLight, which zeroes lights 1..n
+// and keeps the mote - bgNoLamp cannot answer this because the mote shares the
+// loop above and moteKey is gated on it as well. Seed 7 at 400m, sprite and
+// ribbon passes off: the anchors move 90799 pixels by two display levels or
+// more and peak at 25, and every one of those pixels is on the SEABED. The
+// claim is false for the near rock and exactly true for everything else,
+// because trenchRock is the only caller of lampLight - the four receding walls
+// take moteKey and nothing else. In most frames the rock an anchor hangs
+// against IS a far wall, which is why the read is 'nothing receives' even
+// though the floor plainly does.
+//
+// The fix is affordable only because it does not have to be a per-anchor loop
+// per layer. moteKey already records why light on a receding plane is read at
+// the NEAR plane rather than at the layer's traced position - a wall behind the
+// player is lit directly behind the player - and that argument makes the lamp a
+// screen-space quantity, evaluated once. So one loop in main() serves all four
+// walls, and the marginal cost of anchors lighting the whole trench is one
+// extra pass over seven lights per pixel rather than four.
+//
+// Both orientations come out of that one pass because the wrapped cosine for a
+// roof is the complement of the one for a floor: sat(c) and sat(-c) off the
+// same c, which is two saturates and an add rather than a second loop.
+//
+// trenchRock deliberately keeps its own lampLight call rather than consuming
+// this: it evaluates at wr, the vent-warped position, not at w, so a lamp on
+// the near rock shimmers with the vent the way everything else there does.
+// Two passes over seven lights per pixel measured 0.138 ms for the whole
+// background at 1600x900 against 0.137 for one - best of six batches of eight
+// with gl.finish(), interleaved old/new/old/new because this machine's
+// full-frame number swings 10.9 to 15.6 ms on an UNCHANGED build.
+void lampPair(vec2 w, out vec3 up, out vec3 dn){
+  up = vec3(0.0); dn = vec3(0.0);
+  for(int i = 0; i < ${MAXL}; i++){
+    vec4 Lg = uLights[i];
+    Lg.z *= (i == 0) ? 1.0 : uKill4.z;
+    if(Lg.z <= 0.0) continue;
+    vec2 dl = Lg.xy - w;
+    float r2 = dot(dl, dl);
+    float c = dl.y * inversesqrt(max(r2, 1.0));
+    float core = mix(2600.0, 26000.0, Lg.w);
+    float wide = 92000.0 / (r2 + 92000.0);
+    vec3 e = mix(vec3(0.30, 0.72, 1.00), vec3(1.00, 0.56, 0.20), Lg.w)
+           * Lg.z * (core / (r2 + core) + 0.46 * wide * wide);
+    up += e * sat(-c);
+    dn += e * sat(c);
+  }
+  up *= uKill3.x; dn *= uKill3.x;
 }
 
 // The mote's KEY light: the one term in this file whose job is the premise.
@@ -1162,7 +1219,7 @@ vec4 trenchRock(vec2 w, float sky, float amb, float glowM, float open, float cau
 // false void across the bottom. The haze between eye and wall is real water.
 vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
              float fog, vec3 haze, float cloud, float awN, float veilK,
-             float glowM, float brk){
+             float glowM, float brk, vec3 lampUp, vec3 lampDn){
   vec2 w = toLayer(uv, s);
   // A layer at apparent scale s covers 1/s times more world per pixel, so its
   // fetches want a coarser mip than the near plane by exactly that factor.
@@ -1307,17 +1364,95 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   //    is a chain of segments and an unbroken one reads as a drawn line rather
   //    than as a crack.
   //
+  // AND IT STILL DREW ONE. Round nine, four rounds later: 'parallel diagonal
+  // hatch strokes of near-identical length and angle across the whole rock
+  // face'. Attributed by elimination, not by reading the code - seed 7 at 400m
+  // and 900m with the sprite and ribbon passes off, bgNoFar deletes the whole
+  // hatched mass, bgNoGrain moves nothing in it (that region is far wall, not
+  // trenchRock), and differencing bgNoJoint against the base frame produces an
+  // image that IS the hatch and nothing else. The near rock's own joints() moves
+  // 2971 pixels by two levels in a 120m frame, all in one patch: it is not in
+  // this defect, which is why the fix below is here and not there.
+  //
+  // The reason the last fix did not take is measurable and is worth writing
+  // down, because it is a general one. The meander is a function of w.y with a
+  // per-joint PHASE, so it makes each joint wobble about a mean angle that every
+  // joint in the file shares - the constant 0.44. Its slope contribution is
+  // +-0.109, i.e. +-6.2 degrees. Against a control of 90 strokes of identical
+  // length and width, drawn at 20 degrees with a jitter of +-0, 6, 12, 18, 25,
+  // 40 and 90 degrees, a directional notch statistic scores 0.617, 0.530, 0.478,
+  // 0.441, 0.393, 0.291 and 0.085 - monotone, with the mean-based and
+  // tail-based halves agreeing in sign at every step, which is the check
+  // AI_HANDOFF section 8 asks for before an instrument is believed. Looking at
+  // those controls: +-18 still reads as hatch. +-6 was never going to be enough.
+  //
+  // So the mean angle itself has to vary in SPACE, and the way to do that
+  // without a branch is to warp the coordinate the lattice is cut from rather
+  // than to bend the lattice. A curl of a scalar potential is divergence-free,
+  // so it rotates the field without piling the joints up or thinning them out,
+  // and because the warp is applied BEFORE floor() the cell index, the in-cell
+  // offset and the joint core all move together - the truncation hazard that
+  // bounded the meander to 0.105 of a cell does not exist for it. It is also
+  // exactly what a joint set does in the field: fractures curve around the
+  // stress field of the mass they are in.
+  //
+  //   psi = A sin(Kx x) sin(Ky y),  W = (dpsi/dy, -dpsi/dx)
+  //
+  // A is set from the largest Jacobian entry, A*Ky*Ky = 0.26, which is the local
+  // rotation the warp can apply; the wavelengths are 1150 and 780 world units,
+  // so two joints 186 apart see 58 degrees of warp phase between them and do not
+  // share an angle even where they are parallel to their own tangent.
+  //
+  // A RESULT TO BE HONEST ABOUT, because it points the other way. Over four
+  // rock-only regions on two seeds, the notch statistics SPLIT: at 900m both
+  // _hair.mjs and the directional one improve (notch 0.959 -> 0.953 and 0.946 ->
+  // 0.922; ruled 0.288 -> 0.258 and 0.446 -> 0.400) and at 400m both get worse
+  // (1.106 -> 1.135 and 1.144 -> 1.157; ruled 0.300 -> 0.372 and 0.385 -> 0.410).
+  // The two instruments agree with each other inside every region, so this is
+  // real and not noise. It is what a notch statistic is FOR - it counts ink, and
+  // the warp varies |grad jsx|, so a joint is wider where the field stretches and
+  // narrower where it compresses, and the count of pixels past a fixed depth
+  // threshold is convex in width. More angle costs a little more ink. Neither
+  // statistic measures the thing the reviewer named, which is the angle
+  // DISTRIBUTION; the field measurement below does, and the 3x crops agree with
+  // it in both regions where the notch says otherwise. _hair.mjs says so itself:
+  // it measures ruling, not correctness, and a rock face should have notch
+  // energy in it.
   // THE LEAN MUST STAY BOUNDED AWAY FROM VERTICAL - see FAULT_LEAN above and
-  // AI_HANDOFF section 6, where a level set whose slope passed through zero
-  // drew a dead vertical line down the whole frame. A wandering lean can
-  // reintroduce that one layer back, so it is bounded here rather than copied
-  // from joints(), whose lean does reach zero and is saved only by being
-  // broken. Effective lean is 0.44 plus the global shear (186 * 0.17 * 1.5 *
-  // 0.00130 = +-0.062) plus the meander (186 * 0.105 * (0.72 * 0.0031 + 0.28 *
-  // 0.0119) = +-0.109): it runs 0.269..0.611, which is 15.1 to 31.4 degrees off
-  // vertical and never nearer than 6.2 degrees to what the camera roll can
-  // cancel (bank 0.105 * 1.2 plus shake 0.03 = 0.156 rad = 8.9 degrees).
-  float jsx = (w.x + w.y * 0.44) / 186.0 + wave(w.y, 0.00130, 3.1 + seed) * 0.17;
+  // AI_HANDOFF section 6, where a level set whose slope passed through zero drew
+  // a dead vertical line down the whole frame. The fan is wide now, so the base
+  // lean pays a little for it - 0.50 rather than 0.44 - and NO MORE THAN THAT,
+  // because the lean is not free. The lattice is cut across a sheared x, so the
+  // number of joints crossing a screen is (W + L*H)/186: raising L from 0.44 to
+  // 0.80 puts 16% MORE strokes on the deepest plane, which is denser hatch, not
+  // less, and it showed up as a gate failure rather than as an opinion - seed 7
+  // / launch p99 0.2564 -> 0.2489 against a 0.250 floor, with the far-wall lamp
+  // zeroed to prove the lamp was not paying for it, and back to 0.2583 the
+  // moment the joint block alone was reverted. Joint ink is highlights.
+  //
+  // Measured on the level set itself rather than on a frame - grain, four
+  // superposed layers, camera roll and the bedding all dilute an angle
+  // statistic, and the question is a property of the field. Tracing every joint
+  // core down four layers and differencing the traced x gives the local lean
+  // directly. Before: sd 3.13 degrees about a 23.8 mean, range 15.6..30.8, and
+  // 4.70 degrees of change ALONG a joint between samples. After: sd 8.11 about
+  // 26.0, range 8.4..42.2, and 12.08 degrees along a joint. The strokes fan two
+  // and a half times as wide and each one now curves.
+  //
+  // THE LEAN MUST STAY BOUNDED AWAY FROM VERTICAL - see FAULT_LEAN above and
+  // AI_HANDOFF section 6, where a level set whose slope passed through zero drew
+  // a dead vertical line down the whole frame. 0.17% of traced core samples come
+  // within the 8.9 degrees the camera roll can cancel (bank 0.105 * 1.2 plus
+  // shake 0.03) and none within 3; the minimum over the whole field is 8.4
+  // degrees. The fault's case does not carry over anyway - its lean is global,
+  // so when it crossed zero EVERY plane in the frame went vertical and straight
+  // at once, where a warped lean is a function of position and the joint that
+  // approaches vertical is already curving through it.
+  float wa = w.x * 0.005464 + seed * 2.7;
+  float wb = w.y * 0.008055 + seed * 1.3;
+  float sa = sin(wa), ca = cos(wa), sb = sin(wb), cb = cos(wb);
+  vec2 q = w + vec2(32.22 * sa * cb, -21.86 * ca * sb);
+  float jsx = (q.x + q.y * 0.50) / 186.0 + wave(q.y, 0.00130, 3.1 + seed) * 0.17;
   float ji = floor(jsx);
   float jh = hash11(ji * 3.17 + 1.9);
   float jnt = 0.0;
@@ -1325,11 +1460,28 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
     // Two raw sinusoids rather than two wave() calls: the same known +-1 range
     // for half the transcendentals, and the two fields want their own phases
     // anyway. The meander leans on the low octave, the segments on the high.
+    //
+    // fk is a PER-JOINT frequency for both, and it is the other half of 'near
+    // identical LENGTH'. Every joint used to break on the same two periods,
+    // 2027 and 528 world units, differing only in phase - so a reviewer counting
+    // strokes saw one length repeated. 0.62..1.67 is a 2.7x spread of segment
+    // length, off fract(p) rather than a third hash, since p is already a large
+    // number whose fractional part is uncorrelated with the value that made it.
+    //
+    // A PER-JOINT WEIGHT was tried alongside it and is a negative result worth
+    // not repeating. Varying how dark each crack is cannot be had
+    // multiplicatively: alb is consumed as alb *= 1.0 - 0.88 * jnt, so a mean-1
+    // gain must exceed 1 somewhere, and there it drives the albedo NEGATIVE -
+    // the channel stops occluding and starts SUBTRACTING light, which is the
+    // mechanism AI_HANDOFF records behind the black polygons. Clamped instead it
+    // is no longer mean-neutral: it only adds mass. The width already varies off
+    // jh, and that is enough.
     float p = hash11(ji * 7.13 + 4.7) * 43.7 + seed;
-    float s1 = sin(w.y * 0.0031 + p);
-    float s2 = sin(w.y * 0.0119 + p * 2.7);
+    float fk = 0.62 + fract(p * 0.317) * 1.05;
+    float s1 = sin(w.y * 0.0031 * fk + p);
+    float s2 = sin(w.y * 0.0119 * fk + p * 2.7);
     float jd = abs(fract(jsx) - 0.5 + (jh - 0.5) * 0.30
-                 + (s1 * 0.72 + s2 * 0.28) * 0.105);
+                 + (s1 * 0.72 + s2 * 0.28) * 0.075);
     // Mean seg is 0.507 (integrated over phase), so the channel loses about
     // half its mass and this width is 1.135x to give some of it back - 0.576 of
     // the old mass, not 1.0. Going the rest of the way is NOT free and was
@@ -1342,7 +1494,7 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
     // 0.3pp of pixels below L8 on any gate scene, which is the price paid.
     float jt = 0.023 + jh * 0.036;
     float seg = sat(0.52 + (s2 * 0.62 + s1 * 0.38) * 1.9);
-    jnt = exp(-(jd * jd) / (jt * jt)) * seg;
+    jnt = exp(-(jd * jd) / (jt * jt)) * seg * uKill4.y;
   }
   // ...and the fault plane, which is the one break that must appear on every
   // plane at once. A fault that stops at the foreground is a scratch on the
@@ -1450,12 +1602,28 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // exactly as it veils the wall's own.
   float keyN = moteKey(toWorld(uv), roof ? 1.0 : -1.0);
   float keyF = keyN * pow(s, 2.2);
+  // The anchors, on the same screen-anchored read and the same depth ladder as
+  // the mote's key above. Warm against the wall's cool body, which is the only
+  // place in the frame the 'amber means anchor' contract can be stated by
+  // LIGHT rather than by an emitter drawing itself.
+  //
+  // Carried by alb, so what comes up out of the dark is the wall's own strata,
+  // joints and per-bed shade - the same argument V_MOTEKEY makes about
+  // modulating albedo rather than adding glow, and the reason this reads as a
+  // lit surface rather than as amber fog in front of one.
+  vec3 lampF = (roof ? lampDn : lampUp) * pow(s, 2.2);
   // Blended on the UNSCALED key, so the hue is a function of distance from the
   // hero and nothing else: keyed to keyF instead, every far plane would jump
   // straight to the deep hue and the pool would change colour across every
   // silhouette it crossed.
   c += mix(rk, vec3(1.0), 0.62) * mix(MOTE_DEEP, MOTE_LIGHT, sat(keyN * 2.1))
      * V_MOTEKEY * alb * keyF * (0.45 + 0.55 * exp(-intoS / 300.0));
+  c += rk * V_ROCK * alb * 6.00 * lampF * (0.45 + 0.55 * exp(-intoS / 300.0));
+  // The bedding takes it further in than the body does, exactly as it does for
+  // the sky and for the mote on the near rock: a parting plane is a gap.
+  c += rk * V_ROCK * 2.40 * (0.11 / sw)
+     * (1.0 - smoothstep(0.0, sw, min(bfF, 1.0 - bfF)))
+     * lampF * exp(-intoS / 650.0);
   // The break of slope, which is what makes a tread the top OF something. The
   // near rock has had one for two rounds - see 'brow' in trenchRock - and its
   // absence out here is the other half of why a far bench read as a stripe: a
@@ -1557,8 +1725,36 @@ vec4 farWall(vec2 uv, float s, float seed, float openT, float openB, float amp,
   // three times the amplitude and a far bench is not a light source.
   float tread = (roof ? 0.0 : 0.30 * uKill3.y) * min(2.6, 1.0 / fsK)
               * (1.0 - smoothstep(24.0 * fsK, 42.0 * fsK, intoS));
+  float rimF = exp(-intoS / 18.0) + 0.15 * exp(-intoS / 44.0) + tread;
   o += uCHigh * V_FARRIM * sky * (roof ? 0.30 : 1.00) * (0.50 + 0.95 * openL)
-     * (1.0 - fog) * (exp(-intoS / 18.0) + 0.15 * exp(-intoS / 44.0) + tread);
+     * (1.0 - fog) * rimF;
+  // AND THE ANCHORS GET A SHARE OF THAT EDGE. The near rock's rim already
+  // splits between the lamp and the mote for a stated reason - an edge is where
+  // a light's DIRECTION is most legible - and it is the cheapest highlight
+  // energy in either pass, seventeen units wide against a whole plane. Measured
+  // on the body term alone, tripling the level moved the peak display delta
+  // from 9 to 12: the grade's toe eats a broad lift on rock this dark, so the
+  // read has to be bought with contrast on an edge rather than with level on a
+  // face. That is the same trade the rest of this file is built on, and it is
+  // why this is here and not in the body coefficient.
+  //
+  // After the fog, like the rim it rides, so a warm edge four planes back is
+  // still veiled by the water in front of it.
+  //
+  // What the whole far-wall lamp is worth, isolated by differencing against the
+  // same build with the three terms zeroed, seed 7, sprite and ribbon passes
+  // off: 102638 pixels moved by two display levels or more at 400m and 62553 at
+  // 900m, peaking at 19 and 16. What it COSTS, across all twelve gate frames:
+  // p50 +0.0005 at worst against a 0.030 ceiling, p90 +0.0006 against 0.150,
+  // max unchanged to three figures, and p99 UP on nine frames - a rim is
+  // highlight energy, so this pays into the statistic the contract is tightest
+  // on rather than out of it. It also cleared the one standing warning on the
+  // suite: seed 7 / fast crushed shadows 36.5% -> 35.2% against a 36% ceiling.
+  // The number that moved the wrong way is seed 3 / launch, whose shadow
+  // fraction went 9.1% -> 8.1% against an 8% floor. That is the binding
+  // constraint on this term now, and it is why the body coefficient is 6.00
+  // rather than higher.
+  o += lampF * V_FARRIM * 3.40 * (1.0 - fog) * rimF;
   return vec4(o, cov);
 }
 
@@ -1704,13 +1900,18 @@ void main(){
   // last. The contrast difference, not the parallax rate, is what makes air.
   vec3 haze = col;
   float brk = uKill2.w;
-  vec4 r4 = farWall(uv, 0.135, 4.3,  1060.0, 880.0, 980.0, 0.560, haze, cloud, awN, veilK, glowM, brk);
+  // One pass over the lights for all four receding walls - see lampPair. The
+  // lamp is read at the near plane for the same reason the mote's key is, so
+  // it is a screen-space quantity and evaluating it per layer would be four
+  // copies of one answer.
+  vec3 lampUp, lampDn; lampPair(w, lampUp, lampDn);
+  vec4 r4 = farWall(uv, 0.135, 4.3,  1060.0, 880.0, 980.0, 0.560, haze, cloud, awN, veilK, glowM, brk, lampUp, lampDn);
   col = mix(col, r4.rgb, r4.a * uKill2.x);
-  vec4 r3 = farWall(uv, 0.225, 19.7,  980.0, 790.0, 900.0, 0.440, haze, cloud, awN, veilK, glowM, brk);
+  vec4 r3 = farWall(uv, 0.225, 19.7,  980.0, 790.0, 900.0, 0.440, haze, cloud, awN, veilK, glowM, brk, lampUp, lampDn);
   col = mix(col, r3.rgb, r3.a * uKill2.x);
-  vec4 r2 = farWall(uv, 0.360, 37.1,  920.0, 730.0, 800.0, 0.300, haze, cloud, awN, veilK, glowM, brk);
+  vec4 r2 = farWall(uv, 0.360, 37.1,  920.0, 730.0, 800.0, 0.300, haze, cloud, awN, veilK, glowM, brk, lampUp, lampDn);
   col = mix(col, r2.rgb, r2.a * uKill2.x);
-  vec4 r1 = farWall(uv, 0.580, 61.9,  880.0, 690.0, 720.0, 0.175, haze, cloud, awN, veilK, glowM, brk);
+  vec4 r1 = farWall(uv, 0.580, 61.9,  880.0, 690.0, 720.0, 0.175, haze, cloud, awN, veilK, glowM, brk, lampUp, lampDn);
   col = mix(col, r1.rgb, r1.a * uKill2.x);
 
   // ---------- volumetric light from the surface far above ----------
@@ -2239,7 +2440,10 @@ function killMasks() {
     // actually measuring an anchor. Killing this one and diffing the frame is
     // how the 270-450 unit geometry in V_MOTEKEY's note was established, and it
     // is the only honest way to answer the question at all.
-    new Float32Array([on('bgNoMoteKey'), 1, 1, 1]),
+    // bgNoJoint drops the joint channel on BOTH the near rock and the far
+    // walls while leaving the fault (bgNoDip) standing, which is the one
+    // bisect that separates the two diagonal line sets in this file.
+    new Float32Array([on('bgNoMoteKey'), on('bgNoJoint'), on('bgNoAnchorLight'), 1]),
   ];
 }
 
