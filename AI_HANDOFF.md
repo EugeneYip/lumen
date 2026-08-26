@@ -408,10 +408,19 @@ duplicate tags, partial coverage, and byte-identical frames within one build.
 
 **One straight edge in the frame is not a defect and you should not chase it.**
 The largest column-to-column step in every `hushNear` frame, on every seed, is at
-x=51 and x=2 — that is `hud.js`'s "THE HUSH" panel and its rule. HUD is composited
-into the captured frame, so it appears in any statistic taken over the image, it
-is identical across builds, and it does not move under `bgNoHush`. Verify a
+x=51 and x=2 — that is `hud.js`'s "THE HUSH" panel and its rule. Verify a
 candidate seam is not HUD before you go looking for it in a shader.
+
+**But know which tools see the HUD and which do not, because they differ.**
+`shoot.mjs` uses `page.screenshot()` and captures the **composited page**, so the
+HUD is in every PNG and therefore in `_hair.mjs`, `_comb.mjs` and any statistic
+you take over a capture. `check.mjs` samples `document.getElementById('gl')` — the
+**GL canvas only** — so the HUD is invisible to every number the gate prints.
+Consequence, and it hid a real defect for a long time: **the gate's
+`clipped 0.00%` was never a statement about the delivered image.** The HUD was
+clipping 678-20217 pixels to pure 255 in every frame and the gate could not see
+it. A 342-line change to `hud.js` moves all twelve frames' statistics by exactly
+zero.
 
 ## 8. Known weaknesses and active investigation
 
@@ -463,30 +472,29 @@ Its three ranked problems, all open:
    bottom safe area, and the unfilled speed track is a 1px hairline that
    vanishes. *(ui, with a white cap in postfx.)*
 
-**A bug, now located: the plant occluder is bigger than the glow that hides it.**
-Attributed by elimination in the usual way. `?noSprites=1` removes the black
-polygons entirely, so they are sprites, not ribbons. `?noRibbons=1` does not
-remove them — it **exposes** them: what reaches the shipped frame as a small
-hard-edged sliver is actually a large rounded premultiplied black blob that the
-plant's glow strokes normally draw over. It is not a degenerate quad and not a
-stale buffer entry; it is a coverage mismatch between an occluder and the glow
-authored to cover it.
+**A bug, now fixed — and the instructive part is that I attributed it wrongly.**
+The black polygons are **additive emitters with negative gain**: light
+subtraction, not occlusion. Linear HDR readback at the repro pixel is
+`rgb(-0.026, -0.020, +0.012)`; killing the additive glow batch takes it from
+display L2 to L67, killing the occluder batch changes nothing, and a hook on
+`occl.push` finds zero occluder quads covering it. Cause was three pulse gains of
+the form `a + b*sin` with `b > a`, negative for 27-32% of every cycle, feeding an
+additively-blended batch.
 
-`render.js` already knows this occluder exists — its comment reads *"the dark
-body it is drawn around is a premultiplied occluder, and an occluder over black
-water is nothing"*. That is true, and it is exactly the bug: **over black water
-it is nothing, and over anything lit it punches a hole.** Every instance found so
-far sits on or beside lit content — a god-ray shaft, a lit stalk, an anchor's
-spill. The frames where it hides are the frames where the water behind it happens
-to be black.
+**My "decisive" evidence disproved my own theory and I read it the wrong way
+round.** I argued that `?noRibbons=1` *enlarging* the blob proved an occluder
+wider than the glow covering it. It proves the opposite: removing ribbons removes
+**positive** light from the neighbourhood, so the sum crosses zero further out and
+the black region grows. **An occluder's silhouette cannot change size when you
+remove something else drawn near it.** That is the cheap discriminator between
+the two mechanisms — if a dark region changes *size* when you ablate an unrelated
+light source, it is a sum crossing zero, not a silhouette.
 
-The fix is therefore not to delete the occluder but to make the glow cover it, or
-to shrink and soften the occluder to the silhouette the glow actually fills.
-*(scene.)*
-
-Original report: solid hard-edged pure-black polygons composited
-over the scene — around (565,338) and (537,447) in one pair and (601,418) in
-another, present in **both** builds. *(scene.)*
+Two negative results from the same work: a fourth call site looks identical to a
+grep but is consumed as `0.45 + sk*0.85` and has a floor of 0.144; and the
+largest surviving dark patch is a legitimate rock silhouette — cutting it moved
+15844 pixels and changed the hole count by nine. The probe cannot tell a hole
+from a silhouette.
 
 Also worth acting on: the brightest, most saturated amber in the seed 7 frames is
 a corner coral rather than an anchor, which breaks the "amber means anchor"
