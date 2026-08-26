@@ -150,6 +150,19 @@ for (const b of branches) {
 }
 
 console.log(H('Worktrees'));
+// THIS SECTION IS WHY THIS SCRIPT CAN GET SLOW, and it degrades silently. Each
+// worktree costs a `git status` and two `rev-list --count` subprocesses, so the
+// scan is linear in worktree count -- at 28 it exceeded a two-minute timeout and
+// returned nothing at all, which is a bad way for a successor's FIRST command to
+// behave. Removing the scratch worktrees took it back to about eight seconds.
+// Hence the warning below: the fix is to prune, and a successor should be told
+// that rather than left wondering why orientation hangs.
+if (worktrees.length > 12) {
+  console.log(`  !! ${worktrees.length} worktrees. This scan is linear in that count and`);
+  console.log('     gets slow past roughly a dozen. Read the guidance below, then remove');
+  console.log('     the ones you have confirmed hold nothing -- it is the only thing that');
+  console.log('     makes this command fast again.\n');
+}
 for (const w of worktrees) {
   const tag = w.isPrimary ? '[primary]' : w.missing ? '[PATH MISSING]' : `[dirty ${w.dirty}]`;
   console.log(`  ${tag} ${w.path}`);
