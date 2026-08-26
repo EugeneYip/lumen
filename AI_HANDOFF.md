@@ -411,6 +411,18 @@ The largest column-to-column step in every `hushNear` frame, on every seed, is a
 x=51 and x=2 — that is `hud.js`'s "THE HUSH" panel and its rule. Verify a
 candidate seam is not HUD before you go looking for it in a shader.
 
+**The HUD ceiling and the mote's peak are coupled, and the margin has already
+shrunk once.** `hud.js` caps its ink at 0.85 luma so the mote is the value peak
+of the frame. That ceiling was set against a measured mote floor of **0.944**.
+Re-measured after the black-polygon and kelp work landed, the mote's peak floor
+is **0.9275** — so the worst-case headroom went from 0.099 to **0.0775**. Still
+healthy, the mote is still unambiguously the brightest pixel, and **zero pixels
+anywhere in the frame reach 255**, including the title wordmark that used to
+clip 20217 of them. But the ceiling is a constant in one file and the floor is a
+property of `render.js` and the grade, so **anything that dims the hero eats this
+margin silently.** Re-run the peak probe if you touch the mote, the emitter caps
+or the tone curve.
+
 **But know which tools see the HUD and which do not, because they differ.**
 `shoot.mjs` uses `page.screenshot()` and captures the **composited page**, so the
 HUD is in every PNG and therefore in `_hair.mjs`, `_comb.mjs` and any statistic
