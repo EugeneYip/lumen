@@ -49,9 +49,19 @@
 //   16 VEIL       wide soft scatter          17 VOLUME    volumetric ball
 //   18 SHOCK      impact shockwave           19 ANAMORPH  wide lens streak
 //   20 FILAMENT   single tapered hair (tentacles, frayed tether strands)
+//   21 LEAF       broad soft-edged blade with a ROUNDED tip (kelp fronds)
+//
+// LEAF exists because neither of the two long profiles could be a leaf. SHARD
+// is a straight taper to a POINT, and a point reads as a thorn at any
+// orientation - that is what made the kelp beds read as barbed wire through
+// four review rounds. FILAMENT curves, but its half-width is 0.013 of its quad,
+// so a blade of thickness T would need a quad 77T tall. See pLeaf.
 //
 // Currently unused by render.js/particles.js, and therefore kept deliberately
-// cheap to build: BOKEH, WISP, CAUSTIC_SPOT, SHARD.
+// cheap to build: BOKEH, WISP, CAUSTIC_SPOT, SHARD. SHARD was reached until now
+// only through render.js's LY('LEAF', S.SHARD) fallback - i.e. it was the kelp
+// blade, and it is the layer postfx.js's note back-solved the four-review "ruled
+// diagonal" to. LEAF supersedes it there; nothing draws SHARD any more.
 //
 // Boot cost note: the whole kit is on a budget, and the two things that blow it
 // are (a) a transcendental per pixel and (b) calling hash2 inside a per-pixel
@@ -72,8 +82,9 @@ export const S = {
   PLANKTON: 6, BLOB: 7, STAR: 8, WISP: 9, CAUSTIC_SPOT: 10, HALO: 11,
   SHARD: 12, SMOKE: 13, THORN: 14, PETAL: 15,
   VEIL: 16, VOLUME: 17, SHOCK: 18, ANAMORPH: 19, FILAMENT: 20,
+  LEAF: 21,
 };
-export const SPRITE_LAYERS = 21;
+export const SPRITE_LAYERS = 22;
 
 /** One texel in the [-1,1] paint space. */
 const TEXEL = 2 / SPRITE_SIZE;
@@ -282,6 +293,9 @@ let RING_R = null, RING_G = null, RING_S = null;
 let SHOCK_R = null, SHOCK_G = null, SHOCK_S = null;
 let HALO_R = null, HALO_G = null;
 let PETAL_M = null, PETAL_RG = null;
+// LEAF is tabulated in BOTH directions - along the blade (stride 1 per table)
+// and across it - so the pixel loop has no transcendental at all. See pLeaf.
+let LEAF_WU = null, LEAF_WD = null, LEAF_S = null, LEAF_A = null, LEAF_X = null;
 
 function buildTables() {
   if (FA) return;
@@ -351,6 +365,122 @@ function buildTables() {
                                  + 0.024 * Math.sin(a * 5 - 2.3)
                                  + 0.016 * Math.sin(a * 13 + 1.1));
   PETAL_RG = angTable((a) => 0.66 + 0.34 * (0.5 + 0.5 * Math.sin(a * 4 - 1.5)));
+
+  buildLeaf();
+}
+
+// ------------------------------------------------------------------- LEAF ---
+// The blade lives in two 1-D tables and is assembled per pixel with no
+// transcendental: one set indexed along the length (t, from nx), one indexed
+// across it (|q|, the signed distance from the medial axis over the local
+// half-width). Every pow/sin/sqrt/exp below is paid 1024 or 512 times at boot
+// instead of 65536 times in the pixel loop, so pLeaf itself is two table reads,
+// a subtract and a divide.
+//
+// Boot cost, measured by running buildSpriteArray 31 times against a no-op GL
+// stub in node (the browser's own buildAll timing has +-150ms of noise, which
+// is larger than a whole layer, so it cannot price one): +0.2ms on the min and
+// +3.4ms on the median of a ~265ms sprite build. Most of even that is the mip
+// chain, which every layer pays alike - the paint loop is under a millisecond.
+const LEAF_N = 1024;                  // samples along the blade
+const LEAF_XN = 512;                  // samples across it
+const LEAF_QMAX = 1.85;               // |q| at which the soft skirt is exactly 0
+const LEAF_TK = LEAF_N / 2;           // nx in [-1,1] -> along-table index
+const LEAF_XK = LEAF_XN / LEAF_QMAX;
+// Half-width at the widest point, in ny units, so the painted thickness is this
+// times the FULL quad height (the sprite quad maps [-1,1] onto its whole size).
+// SHARD's peak is 0.126, which is why blades made from it read as twigs.
+// Measured on seed 7 `fast` and `deep` at 3x: 0.24 is unambiguously a leaf and
+// no longer a barb, 0.30 is the broader read the request asked for and is what
+// is here. It is bounded above by render.js, which offsets the lit face 0.13 of
+// the quad off the medial axis: at 0.30 the lit strip still overlaps the dark
+// blade and reads as a rim light on it, and past ~0.34 it separates and draws a
+// second, parallel blade. Exposure is nearly insensitive to this - the whole
+// twelve-frame gate moves by at most 0.3pp of shadow between 0.126 and 0.30.
+const LEAF_HW = 0.30;
+
+function buildLeaf() {
+  LEAF_WU = new Float32Array(LEAF_N + 2);
+  LEAF_WD = new Float32Array(LEAF_N + 2);
+  LEAF_S = new Float32Array(LEAF_N + 2);
+  LEAF_A = new Float32Array(LEAF_N + 2);
+  for (let i = 0; i <= LEAF_N + 1; i++) {
+    const t = clamp01(i / LEAF_N);
+    // Ramp off the stipe. There is a real tension in this number and it is worth
+    // knowing about: render.js builds one blade from TWO of these, the second
+    // starting at 0.86 of the first's length and rotated 0.30-0.80 rad away, so
+    // the first piece's cap and the second's base overlap over only ~10% of
+    // either quad. A long ramp meets the cap where both are narrow and pinches
+    // the elbow; a short one leaves each piece a round-ended rod. The first cut
+    // used 0.10, and under ?debugLayers=1 every blade read as a bent BONE -
+    // constant width, rounded at both ends. 0.16 plus the taper below is what
+    // turns each piece back into a leaf; the residual pinch at the elbow is
+    // ~40% of full width over about 4px of a 60px blade, and reads as a fold.
+    const ramp = smoothstep(t / 0.16);
+    // The tip. sqrt is the whole point: the half-width falls with INFINITE
+    // slope at the apex, which is what "rounded" means geometrically. Any
+    // exponent >= 1 here is a point, and a point is a thorn however it is
+    // oriented - that is the defect this layer exists to remove. 0.155 of the
+    // length makes the cap as long as the blade is half-thick at the widths
+    // render.js draws, i.e. very close to a true semicircle.
+    const cap = Math.sqrt(clamp01((1 - t) / 0.155));
+    // Half the width is gone by the tip. The brief was "near-constant width
+    // over most of its length", and 0.24*t^1.9 delivered that literally - and
+    // literally was wrong, because render.js's second piece is drawn at 0.62 of
+    // the first's height, so two constant-width pieces make a rod that STEPS
+    // rather than a blade that tapers. 0.42*t^1.5 falls slowly enough to still
+    // be a strap through the first half and hands off to the second piece at
+    // roughly the width that piece starts at.
+    const strap = 1 - 0.42 * Math.pow(t, 1.5);
+    const w = LEAF_HW * ramp * cap * strap;
+    // Undulating margin, decorrelated per side. Two reasons, both load-bearing.
+    // (1) A near-constant-width strap has two PARALLEL STRAIGHT edges, which is
+    // the stretched-quad trap wearing a different hat - the medial axis stops
+    // being the only straight line in the shape. (2) Because the two margins
+    // are independent, the medial axis is w*(ru-rd)/2 off the spine and is
+    // therefore not a segment either. Real blades have crinkled margins, so
+    // this is also just what a blade looks like.
+    const ru = sampleF(FA, NRES, 0.19 + t * 1.15, 0.44);
+    const rd = sampleF(FA, NRES, 0.63 + t * 1.15, 0.81);
+    LEAF_WU[i] = Math.max(MIN_SOFT, w * (0.86 + 0.30 * ru));
+    LEAF_WD[i] = Math.max(MIN_SOFT, w * (0.86 + 0.30 * rd));
+    // Spine: a gentle S. Zero at the base so the blade leaves the stipe along
+    // the quad's axis (render.js sets rot from the local tangent), then a
+    // cantilever sweep. render.js flips the blade's side but never mirrors the
+    // sprite, so a fixed-sign bow ADDS to the fold on one side and opposes it
+    // on the other - half the blades curve, half are S-shaped, for free.
+    LEAF_S[i] = 0.26 * Math.pow(t, 1.7) - 0.06 * Math.sin(t * 3.4);
+    // Amplitude follows the width, so the cap ends in nothing rather than in a
+    // MIN_SOFT-wide bright hair - which would be a point again. The noise term
+    // is a slight density drift along the length: a blade is not a slab. Capped
+    // at 1.0 so it never clips against the cross-section's own peak.
+    const dens = 0.86 + 0.14 * sampleF(FB, NRES, 0.31 + t * 0.9, 0.12);
+    LEAF_A[i] = clamp01(w / (LEAF_HW * 0.30)) * Math.min(1, dens);
+  }
+
+  // Across the blade: a plateau with soft shoulders plus a faint spill, i.e.
+  // the thing AGENTS.md says a ribbon can never draw - opaque through the
+  // middle AND exactly zero inside its own quad.
+  //
+  // NO MIDRIB, and that is a measurement rather than an omission. A real blade
+  // has one, so it was built (exp(-(q/0.22)^2)*0.20, body dropped to 0.66 to
+  // make room) and both versions were rendered at true size through the real
+  // mip chain. At 168px the rib is obvious. At 48px - the top of the range
+  // render.js actually draws - the two are indistinguishable, and at 24px they
+  // are identical. It is 1-2px of a blade that is 11-16px thick, so the mip
+  // chain has averaged it away before it can be seen, and paying for it means
+  // a flatter body and a softer silhouette everywhere. Reverted.
+  LEAF_X = new Float32Array(LEAF_XN + 2);
+  for (let i = 0; i <= LEAF_XN + 1; i++) {
+    const q = (i / LEAF_XN) * LEAF_QMAX;
+    const body = 1 - smoothstep((q - 0.58) / 0.44);
+    const skirt = Math.exp(-Math.pow(q / 0.86, 2)) * 0.17;
+    // The skirt is still ~8e-4 at QMAX, and a hard cut there is a step from
+    // stored byte 10 to 0 - the same mistake ANAMORPH's note describes. Window
+    // it to exactly zero instead.
+    const shut = 1 - smoothstep((q - 1.42) / 0.43);
+    LEAF_X[i] = clamp01((body * 0.83 + skirt) * shut);
+  }
 }
 
 // ---------------------------------------------------------------- profiles ---
@@ -652,6 +782,34 @@ function pFilament(nx, ny) {
   return clamp01(core + halo);
 }
 
+/**
+ * LEAF: a kelp blade. Broad, near-constant width over most of its length, a
+ * rounded tip, soft edges that reach zero well inside the quad. Long axis on
+ * X, base at nx=-1, tip at nx=+1 - the same convention as SHARD and FILAMENT,
+ * because render.js draws these with the quad's WIDTH along the blade.
+ *
+ * Painted extent, computed over the tables: the mask is exactly zero outside
+ * |ny| = 0.646, and the silhouette (where it is still above ~0.05) inside
+ * |ny| = 0.414. So better than a third of the quad's height is dark at every
+ * mip level, which is what keeps this a blade rather than a filled tile once
+ * the mip chain takes over below ~12px - the same reason CORE, SPARK and
+ * PLANKTON compress their skirts.
+ */
+function pLeaf(nx, ny) {
+  const j = ((nx + 1) * LEAF_TK) | 0;
+  if (j < 0 || j > LEAF_N) return 0;
+  const a = LEAF_A[j];
+  if (a <= 0) return 0;
+  const d = ny - LEAF_S[j];
+  // The two margins are independent, so which one applies depends on the SIGN
+  // of the offset. The value at d=0 is the same from both sides, so this is
+  // continuous - only the edges differ, which is the entire intent.
+  const hw = d >= 0 ? LEAF_WU[j] : LEAF_WD[j];
+  const q = (d < 0 ? -d : d) / hw;
+  if (q >= LEAF_QMAX) return 0;
+  return LEAF_X[(q * LEAF_XK) | 0] * a;
+}
+
 /** WISP: comma-shaped smear for motion trails - thin curved tail, fat head at
  *  +x so callers can point it along velocity with rot. Currently unused. */
 function pWisp(nx, ny, r) {
@@ -744,6 +902,7 @@ export function buildSpriteArray(gl) {
   put(S.SHOCK, (x, y, r, a) => pShock(r, a), true);
   put(S.ANAMORPH, (x, y) => pAnamorph(x, y));
   put(S.FILAMENT, (x, y) => pFilament(x, y));
+  put(S.LEAF, (x, y) => pLeaf(x, y));
 
   // No generateMipmap: uploadMips has already written every level, correctly.
   return tex;
