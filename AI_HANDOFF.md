@@ -696,6 +696,28 @@ Longer-standing items:
   lost. If a reviewer says the hero is hard to find in a frame where the rank is
   1, believe the reviewer, and look at extent.
 
+- **The wake is a MEMORY, not a state, so emission-time properties cannot carry
+  speed.** Trail elements live 0.29-0.64s, and over any single trail lifetime the
+  player's speed ranges **1.00-4.34x** of its current value. A probe requiring one
+  speed band to hold for one lifetime returned **zero samples on either seed** —
+  this game has no steady speeds, and a 37 m/s frame and a 163 m/s frame are built
+  from the same 60-170 m/s mixture. Consequence: anything set when an element is
+  emitted is averaged over a 4x swing and **structurally cannot read**, including
+  `pitch`, which this project had recorded as "the one untried lever" and
+  recommended in briefs more than once. Character that must read has to be
+  computed at **draw time** from the current speed and applied to every live
+  element at once.
+
+- **`p99` is a COUNT above a linear threshold, so spreading a marginal element
+  deletes it.** This is not intuitive and it defeats the obvious way to add
+  presence. Growing the wake's width and opacity with speed *lowered* p99, because
+  its elements sit at a median 0.30-0.35 against a 0.25 threshold and widening
+  pushes them under it — measured on seed 7 `launch` against its 0.250 floor:
+  0.2564 shipped, 0.2508 width-only, **0.2489 FAIL** with width and length. You
+  cannot trade peak for area against this statistic. The fix was to run the ramp
+  *downward from unity* — a crawl gets a tighter, hotter cord and the fast frames
+  draw at the size they always did, same ratio, opposite sign.
+
 - **`_hair.mjs` was built for ruled lines and cannot see an orientation
   distribution — which is what "ruled" actually means.** It samples neighbours a
   few *columns* away on a horizontal scanline, so it detects near-vertical lines
