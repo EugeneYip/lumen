@@ -773,8 +773,8 @@ Longer-standing items:
   old construction, still standing. Fixing it is a structural change to
   `bedFrame`'s `fu`, not a tuning job.
 
-- **The terrain depth ramp is not a ramp — it is an arch, and in the Hush it
-  inverts.** Recovered by running `tools/_vs.mjs`, which segments a frame by
+- **The terrain depth ramp was an arch. FIXED in the ordinary scenes; still
+  inverted under the Hush, and that may be correct.** Recovered by running `tools/_vs.mjs`, which segments a frame by
   which terrain layer drew each pixel and reports the *delivered* display
   luminance of each. Delivered means, near to far:
 
@@ -793,7 +793,18 @@ Longer-standing items:
   (nearRock is 1.5-2x the far band) but *within* the far band the ordering
   carries no depth information at all, so overlap is the only cue left.
   **Fix the ordering before touching the separation.** A bigger gap between two
-  bands that are already in the wrong order buys nothing.
+  bands that are already in the wrong order buys nothing — and that is what the
+  reviewer's "12-15% separation" bar would have bought, since near-vs-far was
+  already 1.5-2x.
+  **Outcome:** `s7 fast` and `s3 tethered` are now strictly monotone, the far band
+  spans 3.05x rather than 1.3x, and three of four adjacent steps exceed 12-15%.
+  `s3 hushNear` is improved but still dips at far3 and still puts nearRock below
+  far1. Before anyone forces that one monotone: **in that scene the sky term runs
+  0.27-0.375 against 0.02-0.04 everywhere else**, so layer luminance there is
+  dominated by the Hush wash rather than by depth. The Hush is *meant* to flood
+  the frame and `HDR_SCENE` already carries a per-scene allowance for it, so
+  whether the residual inversion is a defect or the effect working is a judgement
+  nobody has made. Decide that before changing it.
 
 - **A clamp can make a taper a no-op, and three reviewers described it as three
   different defects.** `wCore(d.w * 0.66, 3)` and `wCore(0, 3)` return the *same
