@@ -83,7 +83,8 @@ for (const seed of SEEDS) {
       drawRead();
       const id = new Uint8Array(N);
       const skyv = new Float32Array(N);
-      for (let i = 0, j = 0; i < N; i++, j += 4) { id[i] = Math.round(buf[j]); skyv[i] = buf[j + 2]; }
+      const glowv = new Float32Array(N);
+      for (let i = 0, j = 0; i < N; i++, j += 4) { id[i] = Math.round(buf[j]); glowv[i] = buf[j + 1]; skyv[i] = buf[j + 2]; }
 
       // Drop pixels adjacent to a layer boundary: coverage is antialiased there
       // and a mixed pixel belongs to neither layer.
@@ -141,6 +142,19 @@ for (const seed of SEEDS) {
           nrNoGlow:   [ONE, ONE, [1, 1, 0, 1], [1, 1, 1, 0]],
           nrNoLampKey:[ONE, ONE, [1, 1, 1, 0], [1, 1, 1, 0]],
           nrNoRim:    [ONE, ONE, ONE, [0, 1, 1, 0]],
+          // ...and the whole surface, so the REMAINDER is everything main()
+          // paints over a wall after it is composited: rays, silt, snow,
+          // in-scatter, the Hush. That remainder is a function of where on the
+          // SCREEN a layer sits, not of its depth, and pricing it is the only
+          // way to tell a wall's own value ladder from the frame it sits in.
+          zeroFar:    [ONE, ONE, ONE, [1, 0, 1, 0]],
+          // Every far-wall term off EXCEPT the glow floor, so what is left over
+          // the zeroFar residual is the floor itself, delivered. The analytic
+          // amplitude pow(1-s,1.6) is monotone in depth; this is what actually
+          // lands, after glowM's screen-space cloud field and the interior fade.
+          onlyGlow:   [[1, 0, 0, 0], [0, 0, 0, 0], ONE, [1, 1, 1, 0]],
+          zeroNear:   [ONE, ONE, ONE, [1, 1, 0, 0]],
+          noGlowFog:  [[0, 0, 1, 1], ONE, ONE, [1, 1, 1, 0]],
         };
         for (const k of Object.keys(cfgs)) {
           set(...cfgs[k]);
@@ -173,16 +187,27 @@ for (const seed of SEEDS) {
       const disp = [];
       for (let k = 0; k < 6; k++) {
         const n = dcnt[k];
-        let med = 0;
-        if (n) { let acc = 0; for (let b = 0; b < 256; b++) { acc += dbin[k][b]; if (acc >= n * 0.5) { med = b / 255; break; } } }
-        disp.push({ n, mean: n ? dsum[k] / n : 0, med });
+        const q = (f) => { let acc = 0; for (let b = 0; b < 256; b++) { acc += dbin[k][b]; if (acc >= n * f) return b / 255; } return 1; };
+        // check.mjs's shadowFrac counts pixels below 8/255 across the WHOLE
+        // frame, with a 36% ceiling and an 8% floor. A layer's own share of that
+        // count is the headroom a level change on it has, and it is not
+        // proportional to its mean: a layer can sit well clear of the threshold
+        // and still have a quarter of its pixels under it.
+        let sh = 0; for (let b = 0; b < 8; b++) sh += dbin[k][b];
+        disp.push({ n, mean: n ? dsum[k] / n : 0, med: n ? q(0.5) : 0, p25: n ? q(0.25) : 0, shFrac: n ? sh / n : 0, shOfFrame: sh / (Wp * Hp) });
       }
       // mean sky over each layer, as a diagnostic on the light field
       const ssum = new Float64Array(6), scnt = new Float64Array(6);
       for (let i = 0; i < N; i++) { if (!keep[i]) continue; ssum[id[i]] += skyv[i]; scnt[id[i]]++; }
       const sky = []; for (let k = 0; k < 6; k++) sky.push(scnt[k] ? ssum[k] / scnt[k] : 0);
+      // glowM is the screen-space cloud mask the far walls' floor is gated on.
+      // It is passed identically to all four, so any spread here is the layers
+      // sampling different parts of the FRAME, not different depths.
+      const gsum = new Float64Array(6), gcnt = new Float64Array(6);
+      for (let i = 0; i < N; i++) { if (!keep[i]) continue; gsum[id[i]] += glowv[i]; gcnt[id[i]]++; }
+      const glowM = []; for (let k = 0; k < 6; k++) glowM.push(gcnt[k] ? gsum[k] / gcnt[k] : 0);
 
-      return { base, disp, decomp: decompRes, sky, w: Wp, h: Hp };
+      return { base, disp, decomp: decompRes, sky, glowM, w: Wp, h: Hp };
     }, DECOMP);
 
     out.push({ seed, scene: sc, depth: info?.depth, ...r });
@@ -197,10 +222,10 @@ const NAMES = ['water', 'far4(s.135)', 'far3(s.225)', 'far2(s.360)', 'far1(s.580
 if (JSONOUT) { console.log(JSON.stringify(out, null, 1)); process.exit(0); }
 for (const r of out) {
   console.log(`\n=== seed ${r.seed} / ${r.scene}  ${r.depth ?? ''}m   (${r.w}x${r.h}) ===`);
-  console.log('  layer          area%    HDRmean     HDRmed     dispMean  dispMed   sky');
+  console.log('  layer          area%    HDRmean     HDRmed     dispMean  dispMed  dispP25   <L8%  ofFrm%   sky  glowM');
   for (let k = 0; k < 6; k++) {
     const b = r.base[k], d = r.disp[k];
-    console.log(`  ${NAMES[k].padEnd(13)} ${(b.frac * 100).toFixed(2).padStart(6)}  ${b.mean.toFixed(5).padStart(9)}  ${b.med.toFixed(5).padStart(9)}  ${d.mean.toFixed(4).padStart(8)}  ${d.med.toFixed(4).padStart(7)}  ${r.sky[k].toFixed(3)}`);
+    console.log(`  ${NAMES[k].padEnd(13)} ${(b.frac * 100).toFixed(2).padStart(6)}  ${b.mean.toFixed(5).padStart(9)}  ${b.med.toFixed(5).padStart(9)}  ${d.mean.toFixed(4).padStart(8)}  ${d.med.toFixed(4).padStart(7)}  ${d.p25.toFixed(4).padStart(7)}  ${(d.shFrac * 100).toFixed(1).padStart(5)}  ${(d.shOfFrame * 100).toFixed(1).padStart(6)}  ${r.sky[k].toFixed(3)}  ${(r.glowM?r.glowM[k]:0).toFixed(3)}`);
   }
   if (Object.keys(r.decomp).length) {
     console.log('  --- ablation: HDR mean per layer, and % of baseline removed ---');
