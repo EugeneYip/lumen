@@ -54,6 +54,33 @@ per pair). `shots/cmpN/key.json` holds the mapping — **the critic must never b
 given it, or the directory listing, before it answers.** Pass explicit file paths
 for the pair PNGs only.
 
+## NEVER ask the reviewer to identify which build is which
+
+**Ask for per-pair verdicts and per-pair observations only. The lead holds the
+key and does the aggregation.** A reviewer has no ground truth for polarity, so
+if it builds a cross-pair "signature" and gets the sign backwards, *every*
+attribution it makes flips — and the prose stays confident and specific, which
+makes it far more dangerous than a plainly wrong verdict.
+
+This happened, and it was caught only by cross-tabulating against `key.json`:
+
+- Its **per-pair verdicts** gave the new build **5 of 8 including both
+  decisives**. Its **summary** said the old build won 6 of 8. The summary
+  contradicted its own data.
+- It reported "tapering went backwards, not forwards", with the new build's
+  tentacles as "constant-width strands terminating at a shared flat cut". At 8x
+  the reverse is true: the **old** build has constant-width parallel bars with
+  blunt ends, the **new** one tapers from broad roots to needle points.
+- It cited a hatch grid and "two perfectly parallel rulers" as introduced by the
+  change. **Its own coordinates put both in the old build** — x 2040-2286 in a
+  pair whose RIGHT half is the old build, and x 843-868 in a pair whose LEFT half
+  is the old build.
+
+So the rule: a reviewer's **verdicts and coordinates are trustworthy**; its
+**build identification is not**. Take the observations, discard the narrative,
+and map the coordinates yourself. If a brief tempts the reviewer to identify
+builds — by naming what changed, for instance — expect this failure.
+
 ## The critic's rubric
 
 For **each pair**, answer:

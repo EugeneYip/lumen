@@ -454,67 +454,62 @@ Verify each against the current code before acting; some may be fixed. The
 authoritative snapshot of quality is whatever `node tools/check.mjs --seeds 7,3`
 says today, plus a blind review per `tools/CRITIC.md`.
 
-**Most recent blind review** — round twelve, eight depth-matched pairs, two
-seeds, identical world generation, registration verified at shift 0. **The same
-build took all eight pairs.** Nine-axis mean **5.1**, ship verdict **No**.
+**Most recent blind review** — round thirteen, eight depth-matched pairs, two
+seeds, identical world generation, registration verified at shift 0 with
+`tools/_align.mjs`. **The current build won 5 of 8, including BOTH decisive
+verdicts** — and those two decisives are the 900m Hush frames.
 
-| axis | | axis | |
-|---|---|---|---|
-| Composition | 5 | Object craft | 5 |
-| **Value structure** | **4** | Detail & texture | 5 |
-| **Colour** | **6** | **Motion legibility** | **7** |
-| Light behaviour | 4 | UI | 5 |
-| Cohesion | 5 | | |
+**READ THE NEXT PARAGRAPH BEFORE ANY OTHER ROUND IS RUN.** The reviewer's
+*summary* claimed the opposite: that the old build won 6 of 8 and that the round's
+two changes had regressed. Cross-tabulated against `key.json`, its own per-pair
+verdicts give 5-3 the other way. It had built a cross-pair "signature" to tell
+the builds apart, got the **polarity backwards**, and then reasoned confidently
+from it — so every attribution inverted while the prose stayed specific and
+authoritative. Verified three ways:
 
-**Four things it settled, in its own words:**
+- Its verdicts vs the key: **5-3 to the new build**, both decisives included.
+- It said tapering "went backwards", describing the new build's tentacles as
+  constant-width strands ending at a flat cut. At 8x it is the **old** build that
+  has constant-width parallel bars with blunt ends; the new one tapers from broad
+  roots to needle points, splayed and curved, with weight at the bulb.
+- It cited a hatch grid and "two perfectly parallel rulers" as introduced by the
+  change. **Its own coordinates put both in the old build.**
 
-- **Props receive light: yes.** "Warm ochre on the anchor-facing flank, cold on
-  the far flank, and the losing build shows nothing." A **partial** pass — see
-  problem 2 below.
-- **The magenta hazard's "visible sprite bounding box" DOES NOT EXIST.** Checked
-  at 18-20x in four places including the spine-crosses-lit-rock case: smooth
-  falloff every time. *"Three reviews were reading the additive glow's outer edge
-  against near-black rock. Retire it."* One genuine hard quad was found and fixed
-  in the same round, but what reviewers kept describing was the glow edge.
-- **The conjugate stroke family is real, "just under-dosed"** — and it corrected
-  its own earlier read: *"my own pair-00 read of 'one parade' was wrong at higher
-  magnification."*
-- **Speed changes character, and it is now the best axis (7).** "Three layers
-  where there was one… mask the HUD and you can still read the velocity off the
-  image." Confirms the resolution reached independently by running its
-  predecessor's acceptance bar.
-- **Amber reads as "aim here" again**, and did not before: *"the straw rotation
-  is the single most valuable change in this iteration."*
+The process fix is in `CRITIC.md`: **never ask a reviewer to identify which build
+is which.** It has no ground truth for polarity. Its verdicts and coordinates are
+trustworthy; its narrative is not. Take the observations, discard the
+attribution, and map the coordinates against the key yourself.
 
-Its three ranked problems:
+**So the two changes under review both worked**: the width-floor fix restored the
+tapers (anchor tentacles, prop rim), and the depth reorder won both Hush frames
+decisively rather than regressing them.
 
-1. **The mid-tones are one slab — there is no value structure.** *(environment,
-   and the weakest axis at 4.)* Near kelp, mid rock and far wall sit within a few
-   percent of each other; depth is carried by overlap and a little fog and
-   nothing else. It calls the result "functionally a two-value picture: dark and
-   emitter, with nothing organised in between", and asks for 12-15% luminance
-   separation between near/mid/far with fog driven by depth rather than a flat
-   global tint.
-2. **Prop lighting is an ink keyline, not a lamp.** *(scene.)* The new rim runs
-   the full height of a stem at constant width and constant intensity regardless
-   of distance from the anchor, does not break where a strap crosses in front,
-   and does not reach stems one bulb-width away. Wants inverse-square
-   attenuation, a terminator so the rim dies as the surface turns away, and
-   contact shadows — **"eight frames, zero shadows"**.
-3. **The HUD has no scrim and the world overprints it.** *(ui.)* With
-   coordinates: "90 M/S" printed inside the hazard's spines, speed-bar ticks lost
-   in a plant, an anchor stalk through THE HUSH panel. A bottom scrim exists; it
-   is not enough and the side panels have none.
+Its observations, which stand on their own once detached from the attribution:
 
-**A bug with coordinates, present in BOTH builds:** a hard axis-aligned black
-rectangle in the rock at half-frame x 748-822, y 500-552, with a smaller one
-below it. *"This — not the magenta hazard — is the real 'visible bounding box' in
-the game."* *(world / textures.)*
+1. **The mid-ground is still largely dead** — value structure 4/10, "frame-level
+   histogram is bimodal, dark and emitter". Where mid-values exist they are
+   "correctly ordered and good, but local". *(environment.)* Note its prescription
+   — revert the reorder — is based on the inverted identification and should not
+   be followed; its *alternative* is sound and worth taking: drive a per-depth-band
+   fog floor from measured depth, guaranteeing each wall layer a minimum
+   separation from its neighbour, with the far band clamped so it can never exceed
+   the emitters.
+2. **The HUD lets the danger indicator run through a numeric readout** — tentacles
+   crossing the "9", the "0" and the gap before "M/S" at 1910-1980 / 605-635, with
+   no scrim, while the score above it has one. Plus an unlabelled second gauge at
+   1740-1830 / 640-648 that "reads as a greyed-out broken duplicate", and the
+   chain multiplier wearing plankton mint. *(ui.)*
+3. **Danger is rose-red, about 30 degrees from the amber anchors** — "danger and
+   reward share a temperature, which is the one thing a colour code must never
+   do." It also emits nothing, where the anchors now bounce light. *(vfx / scene.)*
 
-**And the standing note on the hero, now sharper than ever:** "In all eight frames
-I found the tether and the wake, never the character… Cover the wake and the
-tether and there is nothing there but a bright dot. At 31 m/s, when the wake
-stops doing the work, the protagonist effectively vanishes."
+**Motion legibility 7, its best axis:** "discrete crescents with gaps at 67 m/s
+become a dense laminated ribbon with a wide soft envelope and entrained specks at
+155-171." **Object craft 6:** "the anchors are the best objects in the set."
+
+**And the standing note on the hero, fourth review running:** "I never found the
+character first. The wake leads the eye every time, then the tether, and the mote
+is the terminal bead on the end of them" — roughly 10x18px with no anatomy.
 
 Runners-up from the same review: geometry floats (kelp and reeds terminate on a
 flat horizontal baseline instead of intersecting the seabed — `world.bandBot(x)`
