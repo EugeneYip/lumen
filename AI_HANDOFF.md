@@ -614,6 +614,26 @@ Longer-standing items:
   decorrelated floor for a wet sound and not a defect.
   `tools/playtest.mjs` confirms the autoplay path: audio initialises from a real
   gesture in a real loop.
+- **When the machine saturates, the whole toolchain stops — and the tell is a
+  ratio, not a number.** Every verification stage here (capture, gate, blind
+  round, playtest) needs headless Chrome, and Chrome needs to be scheduled. Under
+  heavy load none of it completes: `shoot.mjs` produced **zero frames in ten
+  minutes**, `git worktree list` hung, and a puppeteer smoke test could not even
+  fire **its own 60-second timeout**, because the node process was too starved to
+  run a timer.
+  **The diagnostic, which takes a second:** run a trivial CPU loop under `time`.
+  Healthy is `user` ≈ `total`. Saturated looks like `0.55s user … 18.9s total` at
+  **3% cpu** — the process spent 18 seconds waiting to be scheduled. Load average
+  was 226 while `ps` showed nothing unusual, because load counts everything
+  waiting, not everything running. `ps -Ao pcpu=,comm= | sort -rn | head` names
+  the actual consumer.
+  In the case that produced this note it was **the Claude application's own
+  renderer processes across ~21 concurrent session directories** — not a runaway
+  subprocess, and not something to kill. What to do: **stop launching
+  capture-heavy agents** (they add load and produce false readings), **discard
+  any timing or perf number measured in that window**, and wait. Nothing in the
+  repository can fix it.
+
 - **Never run a performance investigation alongside a capture-heavy agent.**
   Every agent here drives its own headless Chrome, and GPU contention has now
   produced false readings three times: a render budget measuring 7.9ms and
