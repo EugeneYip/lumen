@@ -586,6 +586,48 @@ Longer-standing items:
   prove a defect is not theirs, suspect the measurement before suspecting a
   third owner. Scene predicates decide *when* a frame is sampled, and a
   predicate that resolves during a transient measures the transient.
+  **It then recurred, because that fix's `flash < 0.01` was itself picked by
+  eye.** 0.01 is inside the opening transient, so the predicate resolved on the
+  first step the flash cleared its own gate -- flash 9.666e-3 at t=0.4167s on
+  seed 7 AND seed 3, identical to four decimals across two different worlds,
+  which is the signature of a threshold latch rather than a property of the art.
+  seed 3 / tethered sat at 6.4% below L8 for many rounds *stably*, because a
+  latch does not drift. It is now `flash < 0.0006`, measured: tethered reaches
+  22.3-28.4% below L8 on all 11 seeds (was 6.4% / 10.4% on the gate's two), and
+  `launch` was quietly contaminated too -- at 0.01 it resolved at flash 3.1e-3
+  and 46m, i.e. still in the opening second.
+  **The number is not a dial, and that is the part worth carrying forward.**
+  `tools/_latch.mjs` replays the seek loop without rendering and prints the
+  frames satisfying the non-flash half of the predicate: `attached && holdTime >
+  0.25` is true in only two windows in the first 1.6s, so the flash gate merely
+  chooses which window. On 11 seeds every value in (3.11e-4, 3.14e-3] selects the
+  byte-identical frame -- a 10x plateau, with 0.0006 sitting 1.9x above its floor
+  and 5.2x below its ceiling. Tightening *below* the plateau moves only this
+  frame and leaves `launch` and `fast` byte-identical, because seeking observes
+  the sim without perturbing it: a downstream scene resolves at the same absolute
+  sim time regardless of where the previous seek stopped, provided it stopped
+  first. Verified 0.0001 against 0.0006, pixel for pixel.
+  Collision was re-checked because the fix delays `tethered` by ~0.53s:
+  `node tools/_collide.mjs 2,3,4,5,6,7,8,9,10,11,42
+  title,tethered,launch,fast,hazardNear,hushNear,deep` gives 77 distinct frames,
+  no duplicate hashes and no pair within one sim step; the tightest
+  `tethered`->`launch` gap is 0.159s / 13m on seed 42, against 1.1-2.5s typical.
+  **One thing is left standing, and it cannot be fixed from this predicate.**
+  Moving `tethered` out of the opening moves `launch` and `fast` with it, and on
+  seed 7 `fast` relocates from 87m to 187m -- a real launch instead of the first
+  one -- taking shadow from 27.0% to 36.4%, which trips `shadowFracMax` (36%) by
+  0.4pp, and focal contrast from 5.6:1 to 4.0:1, exactly its floor. Every clean
+  threshold gives that same frame, so the warning is not tunable from here; the
+  levers left are the `fast` predicate, the budget, or the art. Judged by eye the
+  frame is *not* crushed -- 0.00% of its pixels sit at code 0 or 1, 1.5% below
+  code 2, darkest pixel rgb(0,2,6), and the rock strata, kelp silhouettes and
+  stalactite field all read. Do not "fix" any of this by deepening the grade.
+  That was priced across all the gate's frames while the defect was being
+  diagnosed, using `tools/_floor.mjs --grade black=...`: `GRADE.black` 0.0020 ->
+  0.0035 is the minimum that lifts seed 3 / tethered over 8% (to 10.0%), and it
+  costs seed 7 / hushNear 30.6% -> 35.4% and seed 3 / fast 28.3% -> 33.5%; at
+  0.0050 both are over 36%. It trades one warning for two, and it was never the
+  grade's defect in the first place.
 - **Difficulty tuning drifts as movement improves.** Every time the swing gets
   better the curve gets easier. Re-run `tools/_probe.mjs` and `tools/_reach.mjs`
   after any physics change. `_reach.mjs` reports roughly one dead-end anchor per
@@ -1030,7 +1072,11 @@ Longer-standing items:
   `_atlas.*` (sprite atlas viewer), `_audio.mjs` (offline audio + spectrogram),
   `_det3.mjs` (frozen-state render stability), `_shaft.mjs`/`_slot.mjs` (god-ray
   fields), `_collide.mjs` (per-scene time/depth/frame-hash table, for catching
-  two named scenes that resolve to one frame), `_sortcheck.mjs` (x-ordering,
+  two named scenes that resolve to one frame), `_floor.mjs` (what is putting a
+  pedestal under a frame's blacks; ablates one live term, or prices a grade
+  change, on an otherwise identical frame), `_latch.mjs` (which frame a scene
+  predicate really resolves at, and over what range of its own threshold that
+  answer does not change), `_sortcheck.mjs` (x-ordering,
   now also in `check.mjs`). Note
   `_atlas.mjs` and `_grade.mjs` hardcode an absolute repo path.
 - **`shots/` is gitignored**, so "compare against the previous build" has no

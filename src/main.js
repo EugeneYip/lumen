@@ -495,8 +495,22 @@ class Game {
       // Proved by poking the identical frame: flash forced to 0 takes seed 3
       // from 6.56% to 16.24% and seed 7 from 10.78% to 20.85%.
       //
-      // 0.0006 leaves 0.0004 linear, under a tenth of p10. Do not loosen it
-      // without re-measuring blacks on all ten gate frames.
+      // 0.0006 leaves 0.0004 linear, under a tenth of p10, and that bound holds
+      // on any seed because the residual is proportional to the gate itself.
+      //
+      // It is NOT a dial, though, and the next person to tune it should know
+      // that first. `attached && holdTime > 0.25` is true in only two windows in
+      // the first 1.6s: t~0.26-0.55 while the flash decays 3.2e-2 to ~3.1e-3,
+      // then the mote is airborne, then t~0.88-0.98 onward, entered at 1.4e-4 to
+      // 3.1e-4. The gate only chooses WHICH WINDOW. On 11 seeds every value in
+      // (3.11e-4, 3.14e-3] picks the byte-identical frame; 0.01 picked window
+      // one, which is the whole defect. 0.0006 sits 1.9x above that band's floor
+      // and 5.2x below its ceiling.
+      //
+      // Tightening below 3.11e-4 moves only this frame -- `launch` and `fast`
+      // come out byte-identical, because seeking observes the sim without
+      // perturbing it. So nothing downstream can be tuned from here; do not try.
+      // `tools/_latch.mjs` prints the windows. Run it before changing this.
       tethered: () => this.player.attached && this.player.holdTime > 0.25 && this.flash < 0.0006,
       launch: () => this.player.launchGlow > 0.55,
       // `fast` used to be satisfied by the same frame as `launch` (a launch is
