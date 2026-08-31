@@ -24,10 +24,13 @@
  */
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { join, normalize } from 'node:path';
+import { join, normalize, resolve } from 'node:path';
 import puppeteer from 'puppeteer';
 
-const ROOT = '/Users/eugene/Desktop/light';
+// Derived, not hardcoded: this file used to carry an absolute path to the
+// author's home directory, which silently pointed at a DIFFERENT checkout when
+// run from a worktree and would have broken outright on relocation.
+const ROOT = resolve(new URL('..', import.meta.url).pathname);
 const argv = process.argv.slice(2);
 const ri = argv.indexOf('--region');
 const [RX, RY, RW, RH] = (ri < 0 ? '920,100,300,220' : argv[ri + 1]).split(',').map(Number);

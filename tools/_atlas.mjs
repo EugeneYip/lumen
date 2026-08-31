@@ -2,11 +2,14 @@
 // Scratch runner: serve the repo, screenshot tools/_atlas.html pages.
 import { createServer } from 'node:http';
 import { readFile, stat, mkdir } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, resolve } from 'node:path';
 import puppeteer from 'puppeteer';
 
-const ROOT = '/Users/eugene/Desktop/light';
-const OUT = process.argv[2] || '/Users/eugene/Desktop/light/shots/atlas';
+// Derived, not hardcoded: this file used to carry an absolute path to the
+// author's home directory, which silently pointed at a DIFFERENT checkout when
+// run from a worktree and would have broken outright on relocation.
+const ROOT = resolve(new URL('..', import.meta.url).pathname);
+const OUT = process.argv[2] || join(ROOT, 'shots/atlas');
 const PAGES = (process.argv[3] || '0,1,3,4').split(',');
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css' };

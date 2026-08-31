@@ -52,7 +52,7 @@ Pillars, in priority order:
 If you are working in an isolated git worktree, `node_modules/` is not there
 (it is gitignored). Link it from the main checkout before running any tool:
 ```bash
-ln -sfn /Users/eugene/Desktop/light/node_modules node_modules
+ln -sfn "$(git -C /path/to/main/checkout rev-parse --show-toplevel)/node_modules" node_modules
 ```
 Then commit your work in the worktree when you are done, and report the branch
 name so the lead can merge it.

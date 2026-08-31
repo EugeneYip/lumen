@@ -3,10 +3,13 @@
 //   node tools/_grade.mjs shots/grade "idle:1,idle:0.15,idle:5,fast:1,hush:1,launch:1"
 import { createServer } from 'node:http';
 import { readFile, stat, mkdir } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, resolve } from 'node:path';
 import puppeteer from 'puppeteer';
 
-const ROOT = '/Users/eugene/Desktop/light';
+// Derived, not hardcoded: this file used to carry an absolute path to the
+// author's home directory, which silently pointed at a DIFFERENT checkout when
+// run from a worktree and would have broken outright on relocation.
+const ROOT = resolve(new URL('..', import.meta.url).pathname);
 const OUT = join(ROOT, process.argv[2] || 'shots/grade');
 const CASES = (process.argv[3] || 'idle:1').split(',').map(s => s.trim()).filter(Boolean);
 
